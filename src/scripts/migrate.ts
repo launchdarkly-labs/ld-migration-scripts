@@ -13,7 +13,7 @@ import {
   // delay
 } from "../utils/utils.ts";
 import * as Colors from "https://deno.land/std@0.149.0/fmt/colors.ts";
-import { getEuApiKey } from "../utils/api_keys.ts";
+import { getDestinationApiKey } from "../utils/api_keys.ts";
 
 interface Arguments {
   projKeySource: string;
@@ -52,8 +52,8 @@ const inputArgs: Arguments = (yargs(Deno.args)
   .demandOption(["p", "d"])
   .parse() as unknown) as Arguments;
 
-// Get EU API key
-const apiKey = await getEuApiKey();
+// Get destination API key
+const apiKey = await getDestinationApiKey();
 const domain = "app.launchdarkly.com";
 
 // Load maintainer mapping if needed

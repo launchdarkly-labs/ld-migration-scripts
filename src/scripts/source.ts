@@ -10,7 +10,7 @@ import {
   rateLimitRequest,
   writeSourceData,
 } from "../utils/utils.ts";
-import { getUsApiKey } from "../utils/api_keys.ts";
+import { getSourceApiKey } from "../utils/api_keys.ts";
 
 interface Arguments {
   projKey: string;
@@ -25,7 +25,7 @@ const projPath = `./data/source/project/${inputArgs.projKey}`;
 ensureDirSync(projPath);
 
 // Get API key
-const apiKey = await getUsApiKey();
+const apiKey = await getSourceApiKey();
 const domain = "app.launchdarkly.com";
 
 // Project Data //

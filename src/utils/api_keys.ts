@@ -1,6 +1,6 @@
 interface ApiKeys {
-  us_api_key: string;
-  eu_api_key: string;
+  source_account_api_key: string;
+  destination_account_api_key: string;
 }
 
 let cachedApiKeys: ApiKeys | null = null;
@@ -23,12 +23,12 @@ export async function loadApiKeys(): Promise<ApiKeys> {
   }
 }
 
-export async function getUsApiKey(): Promise<string> {
+export async function getSourceApiKey(): Promise<string> {
   const keys = await loadApiKeys();
-  return keys.us_api_key;
+  return keys.source_account_api_key;
 }
 
-export async function getEuApiKey(): Promise<string> {
+export async function getDestinationApiKey(): Promise<string> {
   const keys = await loadApiKeys();
-  return keys.eu_api_key;
+  return keys.destination_account_api_key;
 } 

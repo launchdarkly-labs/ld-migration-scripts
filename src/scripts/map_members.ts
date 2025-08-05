@@ -1,6 +1,6 @@
 import { parse } from "https://deno.land/std@0.177.0/flags/mod.ts";
 import { ldAPIRequest, rateLimitRequest } from "../utils/utils.ts";
-import { getUsApiKey, getEuApiKey } from "../utils/api_keys.ts";
+import { getSourceApiKey, getDestinationApiKey } from "../utils/api_keys.ts";
 
 interface Member {
   _id: string;
@@ -48,26 +48,26 @@ async function fetchMembers(apiKey: string, domain: string): Promise<Member[]> {
 }
 
 async function createMemberMapping(): Promise<MemberMapping> {
-  const usApiKey = await getUsApiKey();
-  const euApiKey = await getEuApiKey();
+  const sourceApiKey = await getSourceApiKey();
+  const destinationApiKey = await getDestinationApiKey();
 
-  console.log("Fetching members from US instance...");
-  const usMembers = await fetchMembers(usApiKey, "app.launchdarkly.com");
-  console.log(`Found ${usMembers.length} members in US instance`);
+  console.log("Fetching members from source instance...");
+  const sourceMembers = await fetchMembers(sourceApiKey, "app.launchdarkly.com");
+  console.log(`Found ${sourceMembers.length} members in source instance`);
 
-  console.log("Fetching members from EU instance...");
-  const euMembers = await fetchMembers(euApiKey, "app.launchdarkly.com");
-  console.log(`Found ${euMembers.length} members in EU instance`);
+  console.log("Fetching members from destination instance...");
+  const destinationMembers = await fetchMembers(destinationApiKey, "app.launchdarkly.com");
+  console.log(`Found ${destinationMembers.length} members in destination instance`);
 
   const mapping: MemberMapping = {};
-  const euEmailToId = new Map(euMembers.map(m => [m.email, m._id]));
+  const destinationEmailToId = new Map(destinationMembers.map(m => [m.email, m._id]));
 
-  for (const usMember of usMembers) {
-    const euId = euEmailToId.get(usMember.email);
-    mapping[usMember._id] = euId || null;
+  for (const sourceMember of sourceMembers) {
+    const destinationId = destinationEmailToId.get(sourceMember.email);
+    mapping[sourceMember._id] = destinationId || null;
     
-    if (!euId) {
-      console.log(`Warning: No matching EU member found for ${usMember.email}`);
+    if (!destinationId) {
+      console.log(`Warning: No matching destination member found for ${sourceMember.email}`);
     }
   }
 
@@ -98,8 +98,8 @@ async function main() {
 
     console.log(`\nMember mapping created successfully at ${outputFile}`);
     console.log("Summary:");
-    console.log(`- Total US members: ${Object.keys(mapping).length}`);
-    console.log(`- Mapped to EU members: ${Object.values(mapping).filter(id => id !== null).length}`);
+    console.log(`- Total source account members: ${Object.keys(mapping).length}`);
+    console.log(`- Mapped to destination account members: ${Object.values(mapping).filter(id => id !== null).length}`);
     console.log(`- Unmapped members: ${Object.values(mapping).filter(id => id === null).length}`);
   } catch (error: unknown) {
     console.error("Error:", error instanceof Error ? error.message : String(error));

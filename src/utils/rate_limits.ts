@@ -1,5 +1,5 @@
 import { ldAPIRequest, rateLimitRequest, getJson, ldAPIPostRequest, ldAPIPatchRequest } from "./utils.ts";
-import { getEuApiKey } from "./api_keys.ts";
+import { getDestinationApiKey } from "./api_keys.ts";
 
 interface RateLimitInfo {
   globalRemaining: number;
@@ -32,7 +32,7 @@ interface TimeEstimate {
  * @returns Rate limit information
  */
 export async function testRateLimits(path: string, projectKey: string, debug = false): Promise<RateLimitInfo> {
-  const apiKey = await getEuApiKey();
+  const apiKey = await getDestinationApiKey();
   const domain = "app.launchdarkly.com";
   
   // Test GET request

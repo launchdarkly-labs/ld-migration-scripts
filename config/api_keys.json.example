@@ -1,4 +1,4 @@
 {
-  "us_api_key": "your_us_api_key_here",
-  "eu_api_key": "your_eu_api_key_here"
+  "source_account_api_key": "your_source_api_key_here",
+  "destination_account_api_key": "your_destination_api_key_here"
 } 
