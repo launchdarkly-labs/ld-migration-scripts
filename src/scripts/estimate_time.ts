@@ -4,21 +4,22 @@ import * as Colors from "https://deno.land/std@0.149.0/fmt/colors.ts";
 
 interface Arguments {
   projKeySource: string;
-  projKeyDest: string;
+  rateLimit?: number;
 }
 
 const inputArgs: Arguments = (yargs(Deno.args)
   .alias("p", "projKeySource")
-  .alias("d", "projKeyDest")
-  .demandOption(["p", "d"])
+  .alias("r", "rateLimit")
+  .number("r")
+  .demandOption(["p"])
   .parse() as unknown) as Arguments;
 
 async function main() {
   try {
     console.log("Analyzing project and calculating migration time...");
     
-    // Get the estimate
-    const estimate = await estimateMigrationTime(inputArgs.projKeySource);
+    // Get the estimate with optional custom rate limit
+    const estimate = await estimateMigrationTime(inputArgs.projKeySource, inputArgs.rateLimit);
     
     console.log("\nMigration Time Estimate:");
     console.log("=======================");
@@ -35,6 +36,12 @@ async function main() {
     console.log("==============");
     console.log(`Flags: ${formatTimeEstimate({ totalTime: estimate.breakdown.flags, breakdown: estimate.breakdown, resourceCounts: estimate.resourceCounts })}`);
     console.log(`Segments: ${formatTimeEstimate({ totalTime: estimate.breakdown.segments, breakdown: estimate.breakdown, resourceCounts: estimate.resourceCounts })}`);
+    
+    if (inputArgs.rateLimit) {
+      console.log(`\nUsing custom rate limit: ${inputArgs.rateLimit} requests per 10 seconds`);
+    } else {
+      console.log(`\nUsing default rate limit: 5 requests per 10 seconds`);
+    }
     
     console.log("\nNote: This is an estimate based on current rate limits and project size.");
     console.log("Actual time may vary due to network conditions and API response times.");

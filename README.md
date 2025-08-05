@@ -99,7 +99,11 @@ root/
    your project's size and the API rate limits:
 
    ```bash
-   deno task estimate -p SOURCE_PROJECT_KEY -d DESTINATION_PROJECT_KEY
+   # Using default rate limit (5 requests per 10 seconds)
+   deno task estimate -p SOURCE_PROJECT_KEY
+
+   # Using custom rate limit
+   deno task estimate -p SOURCE_PROJECT_KEY -r CUSTOM_RATE_LIMIT
    ```
 
    This will analyze your source project and provide:
@@ -108,7 +112,7 @@ root/
    - Time breakdown by resource type
 
    The estimate is based on the following rate limits:
-   - Flag operations (create/patch): 5 requests per 10 seconds
+   - Flag operations (create/patch): 5 requests per 10 seconds (default) or custom rate limit
    - Segment operations: No rate limit
 
    Note: The actual migration time may vary due to network conditions and API
@@ -227,6 +231,11 @@ don't need to specify them manually.
   first.
 - `-s, --migrateSegments`: (Optional) Whether to migrate segments, defaults to
   true. Set to false to skip segment migration.
+
+### estimate_time.ts
+
+- `-p, --projKeySource`: Source project key
+- `-r, --rateLimit`: (Optional) Custom rate limit (requests per 10 seconds), defaults to 5
 
 ## Notes for the use of the scripts
 

@@ -43,14 +43,58 @@ if (projResp == null) {
 }
 const projData = await projResp.json();
 
+// Handle pagination for environments if needed
+const allEnvironments = projData.environments.items;
+const totalEnvironments = projData.environments.totalCount || allEnvironments.length;
+
+if (totalEnvironments > allEnvironments.length) {
+  console.log(`Project has ${totalEnvironments} environments, fetching all...`);
+  
+  const envPageSize: number = 20;
+  let envOffset: number = allEnvironments.length;
+  let moreEnvironments: boolean = true;
+  let envPath = `projects/${inputArgs.projKey}/environments?limit=${envPageSize}&offset=${envOffset}`;
+
+  while (moreEnvironments) {
+    console.log(`Getting additional environments: ${envOffset} to ${envOffset + envPageSize}`);
+
+    const envResp = await rateLimitRequest(
+      ldAPIRequest(apiKey, domain, envPath),
+      "environments"
+    );
+
+    if (envResp.status > 201) {
+      consoleLogger(envResp.status, `Error getting environments: ${envResp.status}`);
+      consoleLogger(envResp.status, await envResp.text());
+    }
+    if (envResp == null) {
+      console.log("Failed getting environments");
+      Deno.exit(1);
+    }
+
+    const envData = await envResp.json();
+
+    allEnvironments.push(...envData.items);
+
+    if (envData._links.next) {
+      envOffset += envPageSize;
+      envPath = `projects/${inputArgs.projKey}/environments?limit=${envPageSize}&offset=${envOffset}`;
+    } else {
+      moreEnvironments = false;
+    }
+  }
+}
+
+// Update the project data with all environments
+projData.environments.items = allEnvironments;
+
 await writeSourceData(projPath, "project", projData);
 
+console.log(`Found ${allEnvironments.length} environments`);
+
 // Segment Data //
-
-if (projData.environments.items.length > 0) {
-  console.log(`Found ${projData.environments.items.length} environments`);
-
-  projData.environments.items.forEach(async (env: any) => {
+if (allEnvironments.length > 0) {
+  for (const env of allEnvironments) {
     console.log(`Getting Segments for environment: ${env.key}`);
 
     const segmentResp = await fetch(
@@ -69,7 +113,7 @@ if (projData.environments.items.length > 0) {
     await writeSourceData(projPath, `segment-${env.key}`, segmentData);
     const end = Date.now() + 2_000;
     while (Date.now() < end);
-  });
+  }
 }
 
 // Get List of all Flags

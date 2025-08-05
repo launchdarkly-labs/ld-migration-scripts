@@ -157,10 +157,12 @@ export async function analyzeSourceProject(sourceProjectKey: string): Promise<Re
 /**
  * Estimates the time needed to migrate a project
  * @param sourceProjectKey The source project key
+ * @param customRateLimit Optional custom rate limit (requests per 10 seconds)
  * @returns Time estimate in seconds
  */
 export async function estimateMigrationTime(
-  sourceProjectKey: string
+  sourceProjectKey: string,
+  customRateLimit?: number
 ): Promise<TimeEstimate> {
   // Get resource counts
   const counts = await analyzeSourceProject(sourceProjectKey);
@@ -173,11 +175,11 @@ export async function estimateMigrationTime(
   const segmentRequests = counts.segments * 2;
   
   // Apply specific rate limits
-  // Flag POST/PATCH: 5 requests per 10s
+  // Flag POST/PATCH: 5 requests per 10s (default) or custom rate limit
   // Segments: No rate limit
   
   // Calculate time in seconds (10 second window)
-  const flagRequestsPerWindow = 5; // Flag POST/PATCH limit
+  const flagRequestsPerWindow = customRateLimit || 5; // Flag POST/PATCH limit
   const flagTime = Math.ceil(flagRequests / flagRequestsPerWindow) * 10;
   const segmentTime = 0; // No rate limit for segments
   
