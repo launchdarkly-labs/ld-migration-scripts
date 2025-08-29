@@ -1,6 +1,6 @@
 import { parse } from "https://deno.land/std@0.177.0/flags/mod.ts";
-import { ldAPIRequest, rateLimitRequest } from "../utils/utils.ts";
-import { getSourceApiKey, getDestinationApiKey } from "../utils/api_keys.ts";
+import { ldAPIRequest, rateLimitRequest } from "../../utils/utils.ts";
+import { getSourceApiKey, getDestinationApiKey } from "../../utils/api_keys.ts";
 
 interface Member {
   _id: string;
@@ -82,13 +82,13 @@ async function main() {
     },
   });
 
-  const outputFile = flags.output || "data/mappings/maintainer_mapping.json";
+  const outputFile = flags.output || "data/launchdarkly-migrations/mappings/maintainer_mapping.json";
 
   try {
     const mapping = await createMemberMapping();
     
     // Ensure the output directory exists
-    await Deno.mkdir("data/mappings", { recursive: true });
+    await Deno.mkdir("data/launchdarkly-migrations/mappings", { recursive: true });
     
     // Write the mapping to file
     await Deno.writeTextFile(

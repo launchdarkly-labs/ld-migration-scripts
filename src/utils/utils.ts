@@ -1,4 +1,5 @@
 import * as Colors from "https://deno.land/std/fmt/colors.ts";
+import type { ImportFlag, LaunchDarklyFlag, ImportResult, ImportReport } from "../types/deno.d.ts";
 
 const apiVersion = "20240415";
 
@@ -181,4 +182,298 @@ export function consoleLogger(status: number, message: string) {
   }
 
   return console.log(message);
+}
+
+// Flag Import Utility Functions
+export async function parseFlagImportFile(filePath: string): Promise<ImportFlag[]> {
+  try {
+    const fileContent = await Deno.readTextFile(filePath);
+    const fileExtension = filePath.split('.').pop()?.toLowerCase();
+    
+    if (fileExtension === 'json') {
+      return JSON.parse(fileContent) as ImportFlag[];
+    } else if (fileExtension === 'csv') {
+      return parseCSVFlags(fileContent);
+    } else {
+      throw new Error(`Unsupported file format: ${fileExtension}. Only JSON and CSV are supported.`);
+    }
+  } catch (error) {
+    throw new Error(`Failed to parse file ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function parseCSVFlags(csvContent: string): ImportFlag[] {
+  const lines = csvContent.trim().split('\n');
+  const headers = lines[0].split(',').map(h => h.trim());
+  
+  // Validate required headers
+  const requiredHeaders = ['key', 'name', 'kind', 'variations', 'defaultOnVariation', 'defaultOffVariation'];
+  for (const header of requiredHeaders) {
+    if (!headers.includes(header)) {
+      throw new Error(`Missing required header: ${header}`);
+    }
+  }
+  
+  const flags: ImportFlag[] = [];
+  
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    
+    const values = parseCSVLine(line);
+    if (values.length !== headers.length) {
+      throw new Error(`Line ${i + 1}: Expected ${headers.length} columns, got ${values.length}`);
+    }
+    
+    const flag: any = {};
+    headers.forEach((header, index) => {
+      flag[header] = values[index];
+    });
+    
+    // Parse variations
+    flag.variations = parseCSVVariations(flag.variations, flag.kind);
+    flag.defaultOnVariation = parseCSVValue(flag.defaultOnVariation, flag.kind);
+    flag.defaultOffVariation = parseCSVValue(flag.defaultOffVariation, flag.kind);
+    
+    // Parse tags
+    if (flag.tags) {
+      flag.tags = flag.tags.split(',').map((tag: string) => tag.trim()).filter((tag: string) => tag);
+    }
+    
+    flags.push(flag as ImportFlag);
+  }
+  
+  return flags;
+}
+
+function parseCSVLine(line: string): string[] {
+  const result: string[] = [];
+  let current = '';
+  let inQuotes = false;
+  let i = 0;
+  
+  while (i < line.length) {
+    const char = line[i];
+    
+    if (char === '"') {
+      if (inQuotes && i + 1 < line.length && line[i + 1] === '"') {
+        // Handle escaped quotes (double quotes)
+        current += '"';
+        i += 2;
+      } else {
+        inQuotes = !inQuotes;
+        i++;
+      }
+    } else if (char === ',' && !inQuotes) {
+      result.push(current.trim());
+      current = '';
+      i++;
+    } else {
+      current += char;
+      i++;
+    }
+  }
+  
+  result.push(current.trim());
+  return result;
+}
+
+function parseCSVVariations(variationsStr: string, kind: string): (boolean | string | number | any)[] {
+  switch (kind) {
+    case 'boolean':
+    case 'number':
+    case 'string':
+      const variations = variationsStr.split(',').map((v: string) => v.trim());
+      if (kind === 'boolean') {
+        return variations.map((v: string) => v === 'true');
+      } else if (kind === 'number') {
+        return variations.map((v: string) => parseFloat(v));
+      } else {
+        return variations;
+      }
+    case 'json':
+      // For JSON, we need to handle the case where variations contain multiple JSON objects
+      // The variationsStr should be in format: {"obj1"},{"obj2"},{"obj3"}
+      try {
+        // First, let's try to parse it as a single JSON object
+        if (variationsStr.startsWith('{') && variationsStr.endsWith('}')) {
+          return [JSON.parse(variationsStr)];
+        }
+        
+        // If that fails, try to split by "},{ and reconstruct as individual JSON objects
+        const parts = variationsStr.split('},{');
+        const jsonVariations = parts.map((part, index) => {
+          let jsonStr = part;
+          if (index === 0 && !jsonStr.startsWith('{')) {
+            jsonStr = '{' + jsonStr;
+          }
+          if (index === parts.length - 1 && !jsonStr.endsWith('}')) {
+            jsonStr = jsonStr + '}';
+          }
+          if (!jsonStr.startsWith('{') || !jsonStr.endsWith('}')) {
+            jsonStr = '{' + jsonStr + '}';
+          }
+          return JSON.parse(jsonStr);
+        });
+        return jsonVariations;
+      } catch (error) {
+        throw new Error(`Failed to parse JSON variations: ${variationsStr}. Error: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    default:
+      throw new Error(`Unsupported flag kind: ${kind}`);
+  }
+}
+
+function parseCSVValue(value: string, kind: string): any {
+  switch (kind) {
+    case 'boolean':
+      return value === 'true';
+    case 'number':
+      return parseFloat(value);
+    case 'string':
+      return value;
+    case 'json':
+      return JSON.parse(value);
+    default:
+      throw new Error(`Unsupported flag kind: ${kind}`);
+  }
+}
+
+export function validateFlagData(flags: ImportFlag[]): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+  
+  // Check for duplicate keys
+  const keys = new Set<string>();
+  for (const flag of flags) {
+    if (keys.has(flag.key)) {
+      errors.push(`Duplicate flag key: ${flag.key}`);
+    }
+    keys.add(flag.key);
+  }
+  
+  // Validate each flag
+  for (let i = 0; i < flags.length; i++) {
+    const flag = flags[i];
+    const lineNum = i + 1;
+    
+    // Required fields
+    if (!flag.key || flag.key.trim() === '') {
+      errors.push(`Line ${lineNum}: Missing or empty key`);
+    }
+    
+    if (!flag.kind || !['boolean', 'string', 'number', 'json'].includes(flag.kind)) {
+      errors.push(`Line ${lineNum}: Invalid kind '${flag.kind}'. Must be one of: boolean, string, number, json`);
+    }
+    
+    if (!flag.variations || flag.variations.length === 0) {
+      errors.push(`Line ${lineNum}: Missing or empty variations`);
+    }
+    
+    // Validate default variations exist in variations array
+    const onVariationExists = flag.variations.some(v => 
+      flag.kind === 'json' ? JSON.stringify(v) === JSON.stringify(flag.defaultOnVariation) : v === flag.defaultOnVariation
+    );
+    const offVariationExists = flag.variations.some(v => 
+      flag.kind === 'json' ? JSON.stringify(v) === JSON.stringify(flag.defaultOffVariation) : v === flag.defaultOffVariation
+    );
+    
+    if (!onVariationExists) {
+      errors.push(`Line ${lineNum}: defaultOnVariation '${JSON.stringify(flag.defaultOnVariation)}' not found in variations`);
+    }
+    
+    if (!offVariationExists) {
+      errors.push(`Line ${lineNum}: defaultOffVariation '${JSON.stringify(flag.defaultOffVariation)}' not found in variations`);
+    }
+    
+    // Type-specific validation
+    if (flag.kind === 'boolean' && flag.variations.length !== 2) {
+      errors.push(`Line ${lineNum}: Boolean flags must have exactly 2 variations`);
+    }
+  }
+  
+  return {
+    valid: errors.length === 0,
+    errors
+  };
+}
+
+export function convertToLaunchDarklyFlag(importFlag: ImportFlag): LaunchDarklyFlag {
+  const variations = importFlag.variations.map((v: any) => ({ value: v }));
+  
+  // Find indices for default variations
+  const onIndex = importFlag.variations.findIndex((v: any) => 
+    importFlag.kind === 'json' ? JSON.stringify(v) === JSON.stringify(importFlag.defaultOnVariation) : v === importFlag.defaultOnVariation
+  );
+  const offIndex = importFlag.variations.findIndex((v: any) => 
+    importFlag.kind === 'json' ? JSON.stringify(v) === JSON.stringify(importFlag.defaultOffVariation) : v === importFlag.defaultOffVariation
+  );
+  
+  if (onIndex === -1 || offIndex === -1) {
+    throw new Error(`Default variations not found in variations array for flag ${importFlag.key}`);
+  }
+  
+  return {
+    key: importFlag.key,
+    name: importFlag.name || importFlag.key, // Ensure name is always present
+    description: importFlag.description || "",
+    kind: importFlag.kind,
+    variations,
+    defaults: {
+      onVariation: onIndex,
+      offVariation: offIndex
+    },
+    tags: importFlag.tags || []
+  };
+}
+
+export async function createFlagViaAPI(
+  apiKey: string,
+  domain: string,
+  projectKey: string,
+  flag: LaunchDarklyFlag
+): Promise<ImportResult> {
+  const startTime = Date.now();
+  
+  try {
+    const request = ldAPIPostRequest(apiKey, domain, `flags/${projectKey}`, flag);
+    const response = await rateLimitRequest(request, "flags");
+    
+    if (response.ok) {
+      return {
+        key: flag.key,
+        success: true,
+        timing: Date.now() - startTime
+      };
+    } else {
+      const errorText = await response.text();
+      return {
+        key: flag.key,
+        success: false,
+        error: `HTTP ${response.status}: ${errorText}`
+      };
+    }
+  } catch (error) {
+    return {
+      key: flag.key,
+      success: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+export function generateImportReport(results: ImportResult[]): ImportReport {
+  const successful = results.filter(r => r.success).length;
+  const failed = results.filter(r => !r.success).length;
+  const total = results.length;
+  
+  const summary = `Import completed: ${successful} successful, ${failed} failed out of ${total} total flags`;
+  
+  return {
+    totalFlags: total,
+    successful,
+    failed,
+    results,
+    summary,
+    timestamp: new Date().toISOString()
+  };
 }

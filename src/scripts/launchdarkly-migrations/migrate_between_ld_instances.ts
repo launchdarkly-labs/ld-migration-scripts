@@ -11,9 +11,9 @@ import {
   rateLimitRequest,
   type Rule,
   // delay
-} from "../utils/utils.ts";
+} from "../../utils/utils.ts";
 import * as Colors from "https://deno.land/std@0.149.0/fmt/colors.ts";
-import { getDestinationApiKey } from "../utils/api_keys.ts";
+import { getDestinationApiKey } from "../../utils/api_keys.ts";
 
 interface Arguments {
   projKeySource: string;
@@ -59,7 +59,7 @@ const domain = "app.launchdarkly.com";
 // Load maintainer mapping if needed
 let maintainerMapping: Record<string, string | null> = {};
 if (inputArgs.assignMaintainerIds) {
-  maintainerMapping = await getJson("./data/mappings/maintainer_mapping.json") || {};
+  maintainerMapping = await getJson("./data/launchdarkly-migrations/mappings/maintainer_mapping.json") || {};
   console.log("Loaded maintainer mapping with", Object.keys(maintainerMapping).length, "entries");
   console.log("Maintainer mapping is enabled");
 } else {
@@ -68,7 +68,7 @@ if (inputArgs.assignMaintainerIds) {
 
 // Project Data //
 const projectJson = await getJson(
-  `./data/source/project/${inputArgs.projKeySource}/project.json`,
+  `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/project.json`,
 );
 
 const buildEnv: Array<any> = [];
@@ -142,9 +142,9 @@ if (targetProjectExists) {
 if (inputArgs.migrateSegments) {
   console.log("Segment migration is enabled");
   for (const env of projectJson.environments.items) {
-    const segmentData = await getJson(
-      `./data/source/project/${inputArgs.projKeySource}/segment-${env.key}.json`,
-    );
+            const segmentData = await getJson(
+          `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/segment-${env.key}.json`,
+        );
 
     // We are ignoring big segments/synced segments for now
     for (const segment of segmentData.items) {
@@ -222,7 +222,7 @@ if (inputArgs.migrateSegments) {
 
 // Flag Data //
 const flagList: Array<string> = await getJson(
-  `./data/source/project/${inputArgs.projKeySource}/flags.json`,
+  `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/flags.json`,
 );
 
 const flagsDoubleCheck: string[] = [];
@@ -240,7 +240,7 @@ for (const [index, flagkey] of flagList.entries()) {
   console.log(`Reading flag ${index + 1} of ${flagList.length} : ${flagkey}`);
 
   const flag = await getJson(
-    `./data/source/project/${inputArgs.projKeySource}/flags/${flagkey}.json`,
+    `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/flags/${flagkey}.json`,
   );
 
   if (!flag) {

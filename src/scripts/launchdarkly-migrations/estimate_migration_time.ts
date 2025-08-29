@@ -1,5 +1,5 @@
 import yargs from "https://deno.land/x/yargs@v17.7.2-deno/deno.ts";
-import { estimateMigrationTime, formatTimeEstimate } from "../utils/rate_limits.ts";
+import { estimateMigrationTime, formatTimeEstimate } from "../../utils/rate_limits.ts";
 import * as Colors from "https://deno.land/std@0.149.0/fmt/colors.ts";
 
 interface Arguments {

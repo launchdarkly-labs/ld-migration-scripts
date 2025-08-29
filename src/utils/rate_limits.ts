@@ -124,8 +124,8 @@ export async function testRateLimits(path: string, projectKey: string, debug = f
  * @returns Counts of different resource types
  */
 export async function analyzeSourceProject(sourceProjectKey: string): Promise<ResourceCounts> {
-  const projectJson = await getJson(`./data/source/project/${sourceProjectKey}/project.json`);
-  const flagList = await getJson(`./data/source/project/${sourceProjectKey}/flags.json`);
+  const projectJson = await getJson(`./data/launchdarkly-migrations/source/project/${sourceProjectKey}/project.json`);
+  const flagList = await getJson(`./data/launchdarkly-migrations/source/project/${sourceProjectKey}/flags.json`);
   
   const environments = projectJson.environments.items.length;
   const flags = flagList.length;
@@ -134,7 +134,7 @@ export async function analyzeSourceProject(sourceProjectKey: string): Promise<Re
   let segments = 0;
   for (const env of projectJson.environments.items) {
     try {
-      const segmentData = await getJson(`./data/source/project/${sourceProjectKey}/segment-${env.key}.json`);
+      const segmentData = await getJson(`./data/launchdarkly-migrations/source/project/${sourceProjectKey}/segment-${env.key}.json`);
       if (segmentData && segmentData.items) {
         segments += segmentData.items.length;
       }

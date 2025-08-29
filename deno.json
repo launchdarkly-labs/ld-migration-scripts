@@ -1,4 +1,7 @@
 {
+  "name": "ld-migration-scripts",
+  "version": "2.1.0",
+  "description": "LaunchDarkly Project Migration Scripts - Support for LD-to-LD migrations and third-party flag imports",
   "compilerOptions": {
     "lib": [
       "deno.window",
@@ -9,10 +12,15 @@
   },
   "importMap": "./config/import_map.json",
   "tasks": {
-    "source": "deno run --allow-net --allow-read --allow-write src/scripts/source.ts",
-    "map-members": "deno run --allow-net --allow-read --allow-write src/scripts/map_members.ts",
+    "source-from-ld": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/source_from_ld.ts",
+    "map-members": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/map_members_between_ld_instances.ts",
     "update-maintainers": "deno run --allow-read --allow-write src/scripts/update_maintainers.ts",
-    "migrate": "deno run --allow-net --allow-read --allow-write src/scripts/migrate.ts",
-    "estimate": "deno run --allow-net --allow-read --allow-write src/scripts/estimate_time.ts"
+    "migrate": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/migrate_between_ld_instances.ts",
+    "estimate-migration-time": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/estimate_migration_time.ts",
+    "import-flags": "deno run --allow-net --allow-read --allow-write src/scripts/third-party-migrations/import_flags_from_external.ts",
+    "version:show": "./scripts/check-version.sh",
+    "version:bump:patch": "./scripts/bump-version.sh patch",
+    "version:bump:minor": "./scripts/bump-version.sh minor",
+    "version:bump:major": "./scripts/bump-version.sh major"
   }
 }

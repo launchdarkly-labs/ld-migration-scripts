@@ -9,8 +9,8 @@ import {
   ldAPIRequest,
   rateLimitRequest,
   writeSourceData,
-} from "../utils/utils.ts";
-import { getSourceApiKey } from "../utils/api_keys.ts";
+} from "../../utils/utils.ts";
+import { getSourceApiKey } from "../../utils/api_keys.ts";
 
 interface Arguments {
   projKey: string;
@@ -21,7 +21,7 @@ const inputArgs: Arguments = yargs(Deno.args)
   .parse() as Arguments;
 
 // ensure output directory exists
-const projPath = `./data/source/project/${inputArgs.projKey}`;
+const projPath = `./data/launchdarkly-migrations/source/project/${inputArgs.projKey}`;
 ensureDirSync(projPath);
 
 // Get API key

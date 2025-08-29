@@ -1,4 +1,8 @@
 # LaunchDarkly Migration Scripts
+
+[![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)](https://github.com/your-username/ld-migration-scripts)
+[![Deno](https://img.shields.io/badge/deno-v1.x-blue.svg)](https://deno.land/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 Set of scripts intended for migrating LaunchDarkly projects between different accounts, regions, or instances. The supported resources include: environments, flags, segments, and maintainer mappings.
 
 ## Overview
@@ -24,13 +28,19 @@ Features that are currently supported:
 ```
 root/
 ├── src/                  # Source code
-│   ├── scripts/          # Main migration scripts
+│   ├── scripts/          # Scripts organized by purpose
+│   │   ├── launchdarkly-migrations/    # LD-to-LD migration scripts
+│   │   └── third-party-migrations/     # External-to-LD import scripts
 │   ├── utils/            # Utility functions
 │   └── types/            # TypeScript type definitions
 ├── config/               # Configuration files
-├── data/                 # Data directory
-│   ├── source/           # Downloaded source project data
-│   └── mappings/         # Mapping files (e.g., maintainer IDs)
+├── data/                 # Data directory organized by purpose
+│   ├── launchdarkly-migrations/        # LD migration data
+│   │   ├── source/       # Downloaded source project data
+│   │   └── mappings/     # Mapping files (e.g., maintainer IDs)
+│   └── third-party-migrations/         # External import data
+│       ├── import-files/ # Template and import files
+│       └── reports/      # Import operation reports
 ```
 
 ## Prerequisites
@@ -64,14 +74,14 @@ root/
 
 1. **Download Source Project Data**
 
-   Download source project data to `data/source/project/SOURCE_PROJECT_KEY/`.
+   Download source project data to `data/launchdarkly-migrations/source/project/SOURCE_PROJECT_KEY/`.
 
    ```bash
    # Using deno task (recommended)
-   deno task source -p SOURCE_PROJECT_KEY
+   deno task source-from-ld -p SOURCE_PROJECT_KEY
 
    # Or using deno run directly
-   deno run --allow-net --allow-read --allow-write src/scripts/source.ts -p SOURCE_PROJECT_KEY
+   deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/source_from_ld.ts -p SOURCE_PROJECT_KEY
    ```
 
 2. **Create Member ID Mapping**
@@ -100,10 +110,10 @@ root/
 
    ```bash
    # Using default rate limit (5 requests per 10 seconds)
-   deno task estimate -p SOURCE_PROJECT_KEY
+   deno task estimate-migration-time -p SOURCE_PROJECT_KEY
 
    # Using custom rate limit
-   deno task estimate -p SOURCE_PROJECT_KEY -r CUSTOM_RATE_LIMIT
+   deno task estimate-migration-time -p SOURCE_PROJECT_KEY -r CUSTOM_RATE_LIMIT
    ```
 
    This will analyze your source project and provide:
@@ -136,7 +146,7 @@ root/
    deno task migrate -p SOURCE_PROJECT_KEY -d DESTINATION_PROJECT_KEY -m -s=false
 
    # Or using deno run directly:
-   deno run --allow-net --allow-read --allow-write src/scripts/migrate.ts -p SOURCE_PROJECT_KEY -d DESTINATION_PROJECT_KEY -m
+   deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/migrate_between_ld_instances.ts -p SOURCE_PROJECT_KEY -d DESTINATION_PROJECT_KEY -m
    ```
 
    When migrating into an existing project:
@@ -162,26 +172,27 @@ configured in `deno.json` and include all necessary permissions.
 ```json
 {
   "tasks": {
-    "source": "deno run --allow-net --allow-read --allow-write src/scripts/source.ts",
-    "map-members": "deno run --allow-net --allow-read --allow-write src/scripts/map_members.ts",
-    "migrate": "deno run --allow-net --allow-read --allow-write src/scripts/migrate.ts",
-    "estimate": "deno run --allow-net --allow-read --allow-write src/scripts/estimate_time.ts"
+    "source-from-ld": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/source_from_ld.ts",
+    "map-members": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/map_members_between_ld_instances.ts",
+    "migrate": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/migrate_between_ld_instances.ts",
+    "estimate-migration-time": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/estimate_migration_time.ts",
+    "import-flags": "deno run --allow-net --allow-read --allow-write src/scripts/third-party-migrations/import_flags_from_external.ts"
   }
 }
 ```
 
 ### Task Descriptions
 
-1. **source**: Downloads all project data (flags, segments, environments) from
-   the source project
+1. **source-from-ld**: Downloads all project data (flags, segments, environments) from
+   the source LaunchDarkly project
    - Requires network access for API calls
    - Requires file system access to save downloaded data
-   - Creates directory structure in `data/source/project/`
+   - Creates directory structure in `data/launchdarkly-migrations/source/project/`
 
-2. **map-members**: Creates a mapping between member IDs iin the source & destination accounts
+2. **map-members**: Creates a mapping between member IDs in the source & destination LaunchDarkly accounts
    - Fetches members from both source and destination account instances
    - Matches members based on their email addresses
-   - Creates a mapping file in `data/mappings/maintainer_mapping.json`
+   - Creates a mapping file in `data/launchdarkly-migrations/mappings/maintainer_mapping.json`
    - Shows a summary of mapped and unmapped members
 
 3. **migrate**: Creates a new project or migrates into an existing project
@@ -193,12 +204,19 @@ configured in `deno.json` and include all necessary permissions.
    - Can optionally map source maintainer IDs to destination maintainer IDs if the mapping
      was done (step 2) maintainers if mapping was done
 
-4. **estimate**: (Optional) Estimates the time needed for migration
+4. **estimate-migration-time**: (Optional) Estimates the time needed for migration
    - Analyzes source project to count resources
    - Tests rate limits in target account
    - Calculates estimated time based on resource counts and rate limits
    - Shows detailed breakdown of the estimate
    - Helps plan migration timing and resource allocation
+
+5. **import-flags**: Bulk import feature flags from JSON or CSV files
+   - Supports multiple flag types (boolean, string, number, JSON)
+   - Comprehensive validation before import
+   - Dry-run mode for safe testing
+   - Rate limiting and error handling
+   - Detailed reporting and optional JSON output
 
 ### Task Permissions
 
@@ -207,6 +225,7 @@ Each task includes the necessary permissions:
 - `--allow-net`: Required for API calls to LaunchDarkly
 - `--allow-read`: Required for reading local files
 - `--allow-write`: Required for writing downloaded data
+- `--allow-env`: Required for reading environment variables (used by import-flags)
 
 These permissions are automatically included in the task definitions, so you
 don't need to specify them manually.
@@ -236,6 +255,13 @@ don't need to specify them manually.
 
 - `-p, --projKeySource`: Source project key
 - `-r, --rateLimit`: (Optional) Custom rate limit (requests per 10 seconds), defaults to 5
+
+### import_flags.ts
+
+- `-f, --file`: Input file path (JSON or CSV format)
+- `-p, --project`: Target LaunchDarkly project key
+- `-d, --dry-run`: (Optional) Validate only, no changes made
+- `-o, --output`: (Optional) JSON report output file path
 
 ## Notes for the use of the scripts
 
@@ -292,6 +318,131 @@ don't need to specify them manually.
 - The tool does not support the migration of experiments or percentage-based
   rollouts while maintaining consistent variation assignment pre- &
   post-migration
+
+## Flag Import From 3rd Party Sources
+
+The project includes a **Flag Import Tool** that allows you to bulk create feature flags in LaunchDarkly using JSON or CSV files. This is particularly useful for:
+
+- Setting up new projects with predefined flags
+- Migrating flags from other systems
+- Standardizing flag configurations across projects
+- Bulk flag creation for development/testing
+
+### Quick Start
+
+1. **Place your flag file in the import-files directory**:
+   ```bash
+   # Copy the template files to get started
+   cp data/third-party-migrations/import-files/flags_template.json data/third-party-migrations/import-files/my_flags.json
+   cp data/third-party-migrations/import-files/flags_template.csv data/third-party-migrations/import-files/my_flags.csv
+   
+   # Edit the copied files with your flag definitions
+   # Or create your own files in the same directory
+   ```
+
+2. **Ensure your API keys are configured**:
+   ```bash
+   # The import-flags script uses the same API key configuration as other scripts
+   # Make sure config/api_keys.json contains your destination account API key
+   cp config/api_keys.json.example config/api_keys.json
+   # Edit config/api_keys.json with your API keys
+   ```
+
+3. **Import flags**:
+   ```bash
+   # Using deno task (recommended)
+   # The script automatically looks in data/third-party-migrations/import-files/
+   deno task import-flags -f my_flags.json -p PROJECT_KEY
+
+   # Or using deno run directly
+   deno run --allow-net --allow-read --allow-write src/scripts/third-party-migrations/import_flags_from_external.ts -f my_flags.json -p PROJECT_KEY
+   ```
+
+### File Formats
+
+#### JSON Format
+```json
+[
+  {
+    "key": "flag-key",
+    "name": "Flag Name",
+    "description": "Flag description",
+    "kind": "boolean",
+    "variations": [true, false],
+    "defaultOnVariation": true,
+    "defaultOffVariation": false,
+    "tags": ["tag1", "tag2"]
+  }
+]
+```
+
+#### CSV Format
+```csv
+key,name,description,kind,variations,defaultOnVariation,defaultOffVariation,tags
+flag-key,Flag Name,Flag description,boolean,"true,false",true,false,"tag1,tag2"
+```
+
+⚠️ **Important**: CSV import is only suitable for non-JSON flag types (boolean, string, number). For flags with JSON variations or complex nested structures, use the JSON format instead.
+
+### Supported Flag Types
+
+- **boolean**: Simple on/off flags with true/false variations
+- **string**: Text-based flags with multiple string options
+- **number**: Numeric flags with number variations
+- **json**: Complex configuration flags with JSON object variations
+
+### Features
+
+- **Validation**: Comprehensive input validation before import
+- **Dry-run mode**: Test your configuration without creating flags
+- **Rate limiting**: Automatic rate limiting to comply with LaunchDarkly API limits
+- **Detailed reporting**: Success/failure summary with optional JSON report
+- **Error handling**: Clear error messages for troubleshooting
+
+### Requirements
+
+- **Target project must exist**: The LaunchDarkly project specified with `-p PROJECT_KEY` must already exist in your account
+- **API key with write permissions**: Your `destination_account_api_key` in `config/api_keys.json` must have permission to create flags in the target project
+- **Consistent with other scripts**: Uses the same API key configuration as LD-to-LD migration scripts
+
+### Examples
+
+```bash
+# Dry run to validate configuration
+deno task import-flags -f flags.json -p myproject -d
+
+# Import with detailed report
+deno task import-flags -f flags.json -p myproject -o import_report.json
+
+# Import from CSV file
+deno task import-flags -f flags.csv -p myproject
+
+# Use template files (automatically found in import-files directory)
+deno task import-flags -f flags_template.json -p myproject -d
+```
+
+## Version Management
+
+This project uses [Semantic Versioning](https://semver.org/) and maintains a [CHANGELOG.md](CHANGELOG.md) for tracking changes.
+
+### Quick Version Commands
+
+```bash
+# Check current version
+deno task version:show
+
+# Bump version (patch, minor, or major)
+deno task version:bump:patch    # 1.0.0 → 1.0.1
+deno task version:bump:minor    # 1.0.0 → 1.1.0
+deno task version:bump:major    # 1.0.0 → 2.0.0
+```
+
+### Manual Version Management
+
+You can also manage versions manually:
+- **deno.json**: Update the `version` field
+- **README.md**: Update the version badge
+- **CHANGELOG.md**: Move items from `[Unreleased]` to a new version section
 
 ## Support
 
