@@ -2,6 +2,7 @@
   "name": "ld-migration-scripts",
   "version": "2.1.0",
   "description": "LaunchDarkly Project Migration Scripts - Support for LD-to-LD migrations and third-party flag imports",
+  "deno": ">=2.0.0",
   "compilerOptions": {
     "lib": [
       "deno.window",

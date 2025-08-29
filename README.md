@@ -1,7 +1,7 @@
 # LaunchDarkly Migration Scripts
 
 [![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)](https://github.com/your-username/ld-migration-scripts)
-[![Deno](https://img.shields.io/badge/deno-v1.x-blue.svg)](https://deno.land/)
+[![Deno](https://img.shields.io/badge/deno-v2.x-blue.svg)](https://deno.land/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 Set of scripts intended for migrating LaunchDarkly projects between different accounts, regions, or instances. The supported resources include: environments, flags, segments, and maintainer mappings.
 
@@ -48,7 +48,7 @@ root/
 
 ## Prerequisites
 
-- [Deno](https://deno.land/) installed
+- [Deno](https://deno.land/) **2.0.0 or higher** installed
   - If you use Homebrew: `brew install deno`
 - LaunchDarkly API key with appropriate permissions
   - Source account API key with at least Reader access
