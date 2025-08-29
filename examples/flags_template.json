@@ -1,0 +1,54 @@
+[
+  {
+    "key": "new-user-interface",
+    "name": "New User Interface",
+    "description": "Enable the redesigned user interface for all users",
+    "kind": "boolean",
+    "variations": [true, false],
+    "defaultOnVariation": true,
+    "defaultOffVariation": false,
+    "tags": ["ui", "experiment"]
+  },
+  {
+    "key": "theme-selector",
+    "name": "Theme Selector",
+    "description": "Allow users to choose between different color themes",
+    "kind": "string",
+    "variations": ["light", "dark", "auto"],
+    "defaultOnVariation": "light",
+    "defaultOffVariation": "light",
+    "tags": ["ui", "personalization"]
+  },
+  {
+    "key": "max-upload-size",
+    "name": "Maximum Upload Size",
+    "description": "Set the maximum file upload size in megabytes",
+    "kind": "number",
+    "variations": [10, 25, 50, 100],
+    "defaultOnVariation": 25,
+    "defaultOffVariation": 10,
+    "tags": ["file-upload", "limits"]
+  },
+  {
+    "key": "feature-config",
+    "name": "Feature Configuration",
+    "description": "Complex configuration object for advanced features",
+    "kind": "json",
+    "variations": [
+      {"enabled": true, "timeout": 5000, "retries": 3},
+      {"enabled": false, "timeout": 3000, "retries": 1}
+    ],
+    "defaultOnVariation": {"enabled": true, "timeout": 5000, "retries": 3},
+    "defaultOffVariation": {"enabled": false, "timeout": 3000, "retries": 1},
+    "tags": ["advanced", "configuration"]
+  },
+  {
+    "key": "simple-toggle",
+    "name": "Simple Toggle",
+    "description": "Basic boolean flag with minimal configuration",
+    "kind": "boolean",
+    "variations": [true, false],
+    "defaultOnVariation": false,
+    "defaultOffVariation": false
+  }
+]

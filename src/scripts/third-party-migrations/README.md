@@ -48,9 +48,9 @@ Place your import files in the designated directory for the best experience.
 
 ## Template Files
 
-Template files are provided in `data/third-party-migrations/import-files/`:
-- `flags_template.json` - JSON template with examples of different flag types
-- `flags_template.csv` - CSV template with examples of different flag types
+Template files are provided in the `examples/` folder:
+- `examples/flags_template.json` - JSON template with examples of different flag types
+- `examples/flags_template.csv` - CSV template with examples of different flag types
 
 ⚠️ **Important**: CSV import is only suitable for non-JSON flag types (boolean, string, number). For flags with JSON variations or complex nested structures, use the JSON format instead.
 

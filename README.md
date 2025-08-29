@@ -34,6 +34,9 @@ root/
 │   ├── utils/            # Utility functions
 │   └── types/            # TypeScript type definitions
 ├── config/               # Configuration files
+├── examples/             # Template and example files
+│   ├── flags_template.json   # JSON flag import template
+│   └── flags_template.csv    # CSV flag import template
 ├── data/                 # Data directory organized by purpose
 │   ├── launchdarkly-migrations/        # LD migration data
 │   │   ├── source/       # Downloaded source project data
@@ -330,14 +333,14 @@ The project includes a **Flag Import Tool** that allows you to bulk create featu
 
 ### Quick Start
 
-1. **Place your flag file in the import-files directory**:
+1. **Use the provided template files**:
    ```bash
    # Copy the template files to get started
-   cp data/third-party-migrations/import-files/flags_template.json data/third-party-migrations/import-files/my_flags.json
-   cp data/third-party-migrations/import-files/flags_template.csv data/third-party-migrations/import-files/my_flags.csv
+   cp examples/flags_template.json my_flags.json
+   cp examples/flags_template.csv my_flags.csv
    
    # Edit the copied files with your flag definitions
-   # Or create your own files in the same directory
+   # Or create your own files in the import-files directory
    ```
 
 2. **Ensure your API keys are configured**:
@@ -417,8 +420,8 @@ deno task import-flags -f flags.json -p myproject -o import_report.json
 # Import from CSV file
 deno task import-flags -f flags.csv -p myproject
 
-# Use template files (automatically found in import-files directory)
-deno task import-flags -f flags_template.json -p myproject -d
+# Use template files from examples folder
+deno task import-flags -f examples/flags_template.json -p myproject -d
 ```
 
 ## Version Management

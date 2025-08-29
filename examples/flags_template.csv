@@ -1,0 +1,5 @@
+key,name,description,kind,variations,defaultOnVariation,defaultOffVariation,tags
+new-user-interface-csv,New User Interface,Enable the redesigned user interface for all users,boolean,"true,false",true,false,"ui,experiment"
+theme-selector-csv,Theme Selector,Allow users to choose between different color themes,string,"light,dark,auto",light,light,"ui,personalization"
+max-upload-size-csv,Maximum Upload Size,Set the maximum file upload size in megabytes,number,"10,25,50,100",25,10,"file-upload,limits"
+simple-toggle-csv,Simple Toggle,Basic boolean flag with minimal configuration,boolean,"true,false",false,false,""
