@@ -33,7 +33,7 @@ interface TimeEstimate {
  */
 export async function testRateLimits(path: string, projectKey: string, debug = false): Promise<RateLimitInfo> {
   const apiKey = await getDestinationApiKey();
-  const domain = "app.launchdarkly.com";
+  const domain = "app.ld.catamorphic.com";
   
   // Test GET request
   console.log(`\nTesting GET request for ${path}...`);

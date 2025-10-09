@@ -13,6 +13,7 @@
   },
   "importMap": "./config/import_map.json",
   "tasks": {
+    "workflow": "deno run --allow-net --allow-read --allow-write --allow-run src/scripts/launchdarkly-migrations/workflow.ts",
     "source-from-ld": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/source_from_ld.ts",
     "map-members": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/map_members_between_ld_instances.ts",
     "update-maintainers": "deno run --allow-read --allow-write src/scripts/update_maintainers.ts",

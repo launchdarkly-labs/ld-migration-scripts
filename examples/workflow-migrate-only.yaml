@@ -1,0 +1,31 @@
+# Migrate Only (assumes source data already extracted)
+# Use this when you've already run extract-source and want to migrate
+
+workflow:
+  steps:
+    - migrate
+
+source:
+  projectKey: my-source-project
+  domain: app.launchdarkly.com  # Optional: Defaults to app.launchdarkly.com
+
+destination:
+  projectKey: my-dest-project
+  domain: app.launchdarkly.com  # Optional: Use app.eu.launchdarkly.com for EU instance
+
+migration:
+  # Don't map maintainers (no map-members step)
+  assignMaintainerIds: false
+  
+  migrateSegments: true
+  conflictPrefix: "imported-"
+  targetView: "migration-2024"
+  
+  environments:
+    - production
+    - staging
+  
+  environmentMapping:
+    prod: production
+    stg: staging
+

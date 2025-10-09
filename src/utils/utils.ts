@@ -477,3 +477,135 @@ export function generateImportReport(results: ImportResult[]): ImportReport {
     timestamp: new Date().toISOString()
   };
 }
+
+// View Management Utilities
+export interface View {
+  key: string;
+  name: string;
+  description?: string;
+  tags?: string[];
+  maintainerId?: string;
+}
+
+export async function checkViewExists(
+  apiKey: string,
+  domain: string,
+  projectKey: string,
+  viewKey: string
+): Promise<boolean> {
+  try {
+    const req = ldAPIRequest(apiKey, domain, `projects/${projectKey}/views/${viewKey}`);
+    const response = await rateLimitRequest(req, 'views');
+    return response.status === 200;
+  } catch (error) {
+    return false;
+  }
+}
+
+export async function createView(
+  apiKey: string,
+  domain: string,
+  projectKey: string,
+  view: View
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const req = ldAPIPostRequest(apiKey, domain, `projects/${projectKey}/views`, view);
+    const response = await rateLimitRequest(req, 'views');
+    
+    if (response.status === 201 || response.status === 200) {
+      return { success: true };
+    } else if (response.status === 409) {
+      // View already exists - not an error
+      return { success: true };
+    } else {
+      const errorText = await response.text();
+      return { success: false, error: `HTTP ${response.status}: ${errorText}` };
+    }
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+export async function getViewsFromProject(
+  apiKey: string,
+  domain: string,
+  projectKey: string
+): Promise<View[]> {
+  try {
+    const req = ldAPIRequest(apiKey, domain, `projects/${projectKey}/views`);
+    const response = await rateLimitRequest(req, 'views');
+    
+    if (response.status === 200) {
+      const data = await response.json();
+      return data.items || [];
+    }
+    return [];
+  } catch (error) {
+    console.log(Colors.yellow(`Warning: Could not fetch views from project ${projectKey}: ${error}`));
+    return [];
+  }
+}
+
+// Conflict Resolution Utilities
+export interface ConflictResolution {
+  originalKey: string;
+  resolvedKey: string;
+  resourceType: 'flag' | 'segment' | 'project';
+  conflictPrefix: string;
+}
+
+export class ConflictTracker {
+  private resolutions: ConflictResolution[] = [];
+
+  addResolution(resolution: ConflictResolution) {
+    this.resolutions.push(resolution);
+  }
+
+  getResolutions(): ConflictResolution[] {
+    return this.resolutions;
+  }
+
+  hasConflicts(): boolean {
+    return this.resolutions.length > 0;
+  }
+
+  getReport(): string {
+    if (!this.hasConflicts()) {
+      return "No conflicts encountered during migration.";
+    }
+
+    const lines = [
+      `\n${'='.repeat(60)}`,
+      `CONFLICT RESOLUTION REPORT`,
+      `${'='.repeat(60)}`,
+      `Total conflicts resolved: ${this.resolutions.length}`,
+      ``
+    ];
+
+    const byType = this.resolutions.reduce((acc, r) => {
+      acc[r.resourceType] = (acc[r.resourceType] || 0) + 1;
+      return acc;
+    }, {} as Record<string, number>);
+
+    lines.push(`Conflicts by resource type:`);
+    Object.entries(byType).forEach(([type, count]) => {
+      lines.push(`  - ${type}: ${count}`);
+    });
+    lines.push(``);
+
+    lines.push(`Conflict resolutions:`);
+    this.resolutions.forEach((r) => {
+      lines.push(`  - ${r.resourceType}: "${r.originalKey}" → "${r.resolvedKey}"`);
+    });
+
+    lines.push(`${'='.repeat(60)}\n`);
+    return lines.join('\n');
+  }
+}
+
+export function applyConflictPrefix(originalKey: string, prefix: string): string {
+  return `${prefix}${originalKey}`;
+}

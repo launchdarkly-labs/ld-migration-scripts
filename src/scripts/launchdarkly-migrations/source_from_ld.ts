@@ -14,10 +14,13 @@ import { getSourceApiKey } from "../../utils/api_keys.ts";
 
 interface Arguments {
   projKey: string;
+  domain?: string;
 }
 
 const inputArgs: Arguments = yargs(Deno.args)
   .alias("p", "projKey")
+  .alias("domain", "domain")
+  .describe("domain", "LaunchDarkly domain (default: app.launchdarkly.com)")
   .parse() as Arguments;
 
 // ensure output directory exists
@@ -26,7 +29,7 @@ ensureDirSync(projPath);
 
 // Get API key
 const apiKey = await getSourceApiKey();
-const domain = "app.launchdarkly.com";
+const domain = inputArgs.domain || "app.launchdarkly.com";
 
 // Project Data //
 const projResp = await rateLimitRequest(
@@ -43,6 +46,7 @@ if (projResp == null) {
 }
 const projData = await projResp.json();
 
+console.log(projData);
 // Handle pagination for environments if needed
 const allEnvironments = projData.environments.items;
 const totalEnvironments = projData.environments.totalCount || allEnvironments.length;
