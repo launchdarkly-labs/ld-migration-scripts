@@ -80,17 +80,21 @@ async function runExtractSource(config: WorkflowConfig) {
     args.push("--domain", config.source.domain);
   }
 
-  const command = new Deno.Command("deno", { args });
-  const { code, stdout, stderr } = await command.output();
+  console.log(Colors.gray(`Executing: deno ${args.join(' ')}\n`));
+
+  const command = new Deno.Command("deno", { 
+    args,
+    stdout: "inherit",
+    stderr: "inherit"
+  });
+  const { code } = await command.output();
 
   if (code !== 0) {
-    console.error(Colors.red("Extract source step failed"));
-    console.error(new TextDecoder().decode(stderr));
+    console.error(Colors.red("\n❌ Extract source step failed"));
     Deno.exit(1);
   }
 
-  console.log(new TextDecoder().decode(stdout));
-  console.log(Colors.green("✓ Source data extraction completed\n"));
+  console.log(Colors.green("\n✓ Source data extraction completed\n"));
 }
 
 async function runMapMembers(config: WorkflowConfig) {
@@ -186,17 +190,21 @@ async function runMigrate(config: WorkflowConfig) {
     args.push("--domain", config.destination.domain);
   }
 
-  const command = new Deno.Command("deno", { args });
-  const { code, stdout, stderr } = await command.output();
+  console.log(Colors.gray(`Executing: deno ${args.join(' ')}\n`));
+
+  const command = new Deno.Command("deno", { 
+    args,
+    stdout: "inherit",  // Show output in real-time
+    stderr: "inherit"   // Show errors in real-time
+  });
+  const { code } = await command.output();
 
   if (code !== 0) {
-    console.error(Colors.red("Migration step failed"));
-    console.error(new TextDecoder().decode(stderr));
+    console.error(Colors.red("\n❌ Migration step failed"));
     Deno.exit(1);
   }
 
-  console.log(new TextDecoder().decode(stdout));
-  console.log(Colors.green("✓ Migration completed\n"));
+  console.log(Colors.green("\n✓ Migration completed\n"));
 }
 
 async function runThirdPartyImport(config: WorkflowConfig) {

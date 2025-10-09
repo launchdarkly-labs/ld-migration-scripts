@@ -129,6 +129,10 @@ if (cliArgs.config) {
   }
 }
 
+console.log(Colors.blue("\n=== Migration Script Starting ==="));
+console.log(Colors.gray(`Source Project: ${cliArgs.projKeySource || '(from config)'}`));
+console.log(Colors.gray(`Destination Project: ${cliArgs.projKeyDest || '(from config)'}`));
+
 // Validate required arguments
 if (!inputArgs.projKeySource || !inputArgs.projKeyDest) {
   console.log(Colors.red(`Error: Both source project (-p) and destination project (-d) are required.`));
@@ -136,9 +140,24 @@ if (!inputArgs.projKeySource || !inputArgs.projKeyDest) {
   Deno.exit(1);
 }
 
+console.log(Colors.blue("\n📋 Configuration Summary:"));
+console.log(Colors.gray(`  Source: ${inputArgs.projKeySource}`));
+console.log(Colors.gray(`  Destination: ${inputArgs.projKeyDest}`));
+console.log(Colors.gray(`  Assign Maintainers: ${inputArgs.assignMaintainerIds}`));
+console.log(Colors.gray(`  Migrate Segments: ${inputArgs.migrateSegments}`));
+console.log(Colors.gray(`  Conflict Prefix: ${inputArgs.conflictPrefix || 'none'}`));
+console.log(Colors.gray(`  Target View: ${inputArgs.targetView || 'none'}`));
+console.log(Colors.gray(`  Environments: ${inputArgs.environments || 'all'}`));
+console.log(Colors.gray(`  Env Mapping: ${inputArgs.envMap || 'none'}`));
+console.log(Colors.gray(`  Domain: ${inputArgs.domain || 'app.launchdarkly.com'}`));
+
 // Get destination API key
+console.log(Colors.blue("\n🔑 Loading API key from config..."));
 const apiKey = await getDestinationApiKey();
+console.log(Colors.green("✓ API key loaded"));
+
 const domain = inputArgs.domain || "app.launchdarkly.com";
+console.log(Colors.gray(`Using domain: ${domain}\n`));
 
 // Parse environment mapping
 const envMapping: Record<string, string> = {};
@@ -172,19 +191,32 @@ if (inputArgs.conflictPrefix) {
 }
 
 // Load maintainer mapping if needed
+console.log(Colors.blue("👥 Loading maintainer mapping..."));
 let maintainerMapping: Record<string, string | null> = {};
 if (inputArgs.assignMaintainerIds) {
-  maintainerMapping = await getJson("./data/launchdarkly-migrations/mappings/maintainer_mapping.json") || {};
-  console.log("Loaded maintainer mapping with", Object.keys(maintainerMapping).length, "entries");
-  console.log("Maintainer mapping is enabled");
+  try {
+    maintainerMapping = await getJson("./data/launchdarkly-migrations/mappings/maintainer_mapping.json") || {};
+    console.log(Colors.green(`✓ Loaded maintainer mapping with ${Object.keys(maintainerMapping).length} entries`));
+  } catch (error) {
+    console.log(Colors.yellow(`⚠ Warning: Could not load maintainer mapping file: ${error}`));
+    console.log(Colors.yellow(`  Continuing without maintainer mapping...`));
+  }
 } else {
-  console.log("Maintainer mapping is disabled");
+  console.log(Colors.gray("  Maintainer mapping disabled"));
 }
 
 // Project Data //
+console.log(Colors.blue(`\n📦 Loading source project data from: ${inputArgs.projKeySource}...`));
 const projectJson = await getJson(
   `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/project.json`,
 );
+
+if (!projectJson) {
+  console.log(Colors.red(`❌ Error: Could not load project data from ./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/project.json`));
+  console.log(Colors.yellow(`Make sure you've run the extract-source step first!`));
+  Deno.exit(1);
+}
+console.log(Colors.green(`✓ Project data loaded`));
 
 const buildEnv: Array<any> = [];
 
@@ -248,14 +280,16 @@ if (inputArgs.envMap) {
 }
 
 // Check if project exists
+console.log(Colors.blue(`\n🔍 Checking if destination project "${inputArgs.projKeyDest}" exists...`));
 const targetProjectExists = await checkProjectExists(apiKey, domain, inputArgs.projKeyDest);
 
 if (targetProjectExists) {
-  console.log(`Project ${inputArgs.projKeyDest} already exists, skipping creation`);
+  console.log(Colors.green(`✓ Project ${inputArgs.projKeyDest} already exists, skipping creation`));
   
   // Get existing environments
+  console.log(Colors.blue(`  Fetching existing environments...`));
   const existingEnvs = await getExistingEnvironments(apiKey, domain, inputArgs.projKeyDest);
-  console.log(`Found existing environments: ${existingEnvs.join(', ')}`);
+  console.log(Colors.gray(`  Found existing environments: ${existingEnvs.join(', ')}`))
   
   // If environment mapping is enabled, check destination environments exist
   if (inputArgs.envMap) {
@@ -315,9 +349,16 @@ console.log(Colors.cyan("\n=== View Management ==="));
 const allViewKeys = new Set<string>();
 
 // Extract views from flags
+console.log(Colors.blue("\n📋 Loading flag list..."));
 const flagList: Array<string> = await getJson(
   `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/flags.json`,
 );
+
+if (!flagList) {
+  console.log(Colors.red(`❌ Error: Could not load flag list from ./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/flags.json`));
+  Deno.exit(1);
+}
+console.log(Colors.green(`✓ Loaded ${flagList.length} flags`));
 
 console.log("Extracting view associations from source flags...");
 for (const flagkey of flagList) {
@@ -369,10 +410,12 @@ if (allViewKeys.size > 0) {
 }
 
 // Migrate segments if enabled
+console.log(Colors.blue("\n🔷 Starting segment migration..."));
 if (inputArgs.migrateSegments) {
-  console.log("Segment migration is enabled");
+  console.log(Colors.green("  Segment migration enabled"));
   // Filter environments to only those selected
   const envsToMigrate = projectJson.environments.items.filter((env: any) => envkeys.includes(env.key));
+  console.log(Colors.gray(`  Processing ${envsToMigrate.length} environment(s) for segments`));
   for (const env of envsToMigrate) {
             const segmentData = await getJson(
           `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/segment-${env.key}.json`,
@@ -485,9 +528,10 @@ if (inputArgs.migrateSegments) {
     };
   };
 } else {
-  console.log("Segment migration is disabled, skipping...");
+  console.log(Colors.gray("  Segment migration disabled, skipping..."));
 }
 
+console.log(Colors.blue("\n🚩 Starting flag migration..."));
 const flagsDoubleCheck: string[] = [];
 
 interface Variation {
@@ -498,9 +542,10 @@ interface Variation {
 }
 
 // Creating Global Flags //
+console.log(Colors.blue(`\n🏁 Creating ${flagList.length} flags in destination project...\n`));
 for (const [index, flagkey] of flagList.entries()) {
   // Read flag
-  console.log(`Reading flag ${index + 1} of ${flagList.length} : ${flagkey}`);
+  console.log(Colors.cyan(`\n[${index + 1}/${flagList.length}] Processing flag: ${flagkey}`));
 
   const flag = await getJson(
     `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/flags/${flagkey}.json`,
@@ -640,14 +685,16 @@ for (const [index, flagkey] of flagList.entries()) {
 
   // Add flag env settings - use the potentially updated flag key
   if (flagCreated) {
+    console.log(Colors.cyan(`\t📝 Patching flag ${createdFlagKey} for ${envkeys.length} environment(s)...`));
     for (const env of envkeys) {
       if (!flag.environments || !flag.environments[env]) {
-        console.log(Colors.yellow(`\tWarning: No environment data found for ${env} in flag ${flag.key}, skipping...`));
+        console.log(Colors.yellow(`\t⚠ Warning: No environment data found for ${env} in flag ${flag.key}, skipping...`));
         continue;
       }
 
       // Determine destination environment key (mapped or original)
       const destEnvKey = inputArgs.envMap && envMapping[env] ? envMapping[env] : env;
+      console.log(Colors.gray(`\t  Source env: ${env} → Destination env: ${destEnvKey}`));
 
       const patchReq: any[] = [];
       const flagEnvData = flag.environments[env];
@@ -700,6 +747,9 @@ projectJson.environments.items.forEach((env: any) => {
 
 
 async function makePatchCall(flagKey: string, patchReq: any[], env: string) {
+  console.log(Colors.cyan(`\t→ Patching flag ${flagKey} for environment ${env}...`));
+  console.log(Colors.gray(`\t  Patch operations: ${patchReq.length} items`));
+  
   const patchFlagReq = await rateLimitRequest(
     ldAPIPatchRequest(
       apiKey,
@@ -710,22 +760,23 @@ async function makePatchCall(flagKey: string, patchReq: any[], env: string) {
     'flags'
   );
   const flagPatchStatus = await patchFlagReq.status;
-  if (flagPatchStatus > 200) {
-    flagsDoubleCheck.push(flagKey)
-    consoleLogger(
-      flagPatchStatus,
-      `\tPatching ${flagKey} with environment [${env}] specific configuration, Status: ${flagPatchStatus}`,
-    );
+  
+  // Only treat 400+ as errors (200, 201 are success)
+  if (flagPatchStatus >= 400) {
+    flagsDoubleCheck.push(flagKey);
+    console.log(Colors.red(`\t✗ ERROR patching ${flagKey} for env ${env}, Status: ${flagPatchStatus}`));
+    
+    if (flagPatchStatus == 400) {
+      const errorBody = await patchFlagReq.text();
+      console.log(Colors.red(`\t  Error details: ${errorBody}`));
+    }
+  } else if (flagPatchStatus > 201) {
+    // 202-399 range: log as warning but don't fail
+    console.log(Colors.yellow(`\t⚠ Patching ${flagKey} for env ${env}, Status: ${flagPatchStatus}`));
+  } else {
+    // 200-201: Success
+    console.log(Colors.green(`\t✓ Successfully patched ${flagKey} for env ${env}, Status: ${flagPatchStatus}`));
   }
-
-  if (flagPatchStatus == 400) {
-    console.log(patchFlagReq)
-  }
-
-  consoleLogger(
-    flagPatchStatus,
-    `\tPatching ${flagKey} with environment [${env}] specific configuration, Status: ${flagPatchStatus}`,
-  );
 
   return flagsDoubleCheck;
 }

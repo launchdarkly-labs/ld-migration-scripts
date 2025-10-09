@@ -67,6 +67,7 @@ export function ldAPIPostRequest(
   domain: string,
   path: string,
   body: any,
+  useBetaVersion = false,
 ) {
   const req = new Request(
     `https://${domain}/api/v2/${path}`,
@@ -76,7 +77,7 @@ export function ldAPIPostRequest(
         "Content-Type": "application/json",
         'User-Agent': 'Project-Migrator-Script',
         "Authorization": apiKey,
-        "LD-API-Version": apiVersion,
+        "LD-API-Version": useBetaVersion ? "beta" : apiVersion,
       },
       body: JSON.stringify(body),
     },
@@ -153,14 +154,14 @@ export async function writeSourceData(
   return await writeJson(`${projPath}/${dataType}.json`, data);
 }
 
-export function ldAPIRequest(apiKey: string, domain: string, path: string) {
+export function ldAPIRequest(apiKey: string, domain: string, path: string, useBetaVersion = false) {
   const req = new Request(
     `https://${domain}/api/v2/${path}`,
     {
       headers: {
         "Authorization": apiKey,
         'User-Agent': 'launchdarkly-project-migrator-script',
-        "LD-API-Version": apiVersion,
+        "LD-API-Version": useBetaVersion ? "beta" : apiVersion,
       },
     },
   );
@@ -494,7 +495,7 @@ export async function checkViewExists(
   viewKey: string
 ): Promise<boolean> {
   try {
-    const req = ldAPIRequest(apiKey, domain, `projects/${projectKey}/views/${viewKey}`);
+    const req = ldAPIRequest(apiKey, domain, `projects/${projectKey}/views/${viewKey}`, true);
     const response = await rateLimitRequest(req, 'views');
     return response.status === 200;
   } catch (error) {
@@ -509,7 +510,7 @@ export async function createView(
   view: View
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const req = ldAPIPostRequest(apiKey, domain, `projects/${projectKey}/views`, view);
+    const req = ldAPIPostRequest(apiKey, domain, `projects/${projectKey}/views`, view, true);
     const response = await rateLimitRequest(req, 'views');
     
     if (response.status === 201 || response.status === 200) {
@@ -535,7 +536,7 @@ export async function getViewsFromProject(
   projectKey: string
 ): Promise<View[]> {
   try {
-    const req = ldAPIRequest(apiKey, domain, `projects/${projectKey}/views`);
+    const req = ldAPIRequest(apiKey, domain, `projects/${projectKey}/views`, true);
     const response = await rateLimitRequest(req, 'views');
     
     if (response.status === 200) {
