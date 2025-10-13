@@ -71,8 +71,12 @@ function simulatePostRequest(resource: string, data: any): Response {
 /**
  * Simulates an API PATCH request in dry-run mode
  */
-function simulatePatchRequest(resource: string, patches: any[]): Response {
-  console.log(Colors.gray(`    [DRY RUN] Would PATCH ${resource} with ${patches.length} operation(s)`));
+function simulatePatchRequest(resource: string, patches: any[], context?: string): Response {
+  if (context) {
+    console.log(Colors.gray(`    [DRY RUN] Would PATCH ${resource} for ${context} with ${patches.length} operation(s)`));
+  } else {
+    console.log(Colors.gray(`    [DRY RUN] Would PATCH ${resource} with ${patches.length} operation(s)`));
+  }
   return new Response(JSON.stringify({ success: true }), { 
     status: 200,
     headers: { 'Content-Type': 'application/json' }
@@ -110,10 +114,11 @@ async function dryRunAwarePatch(
   path: string,
   patches: any[],
   _useBeta = false,  // Not currently supported by ldAPIPatchRequest
-  rateLimit: string = 'default'
+  rateLimit: string = 'default',
+  context?: string  // Optional context for better dry-run logging (e.g., environment name)
 ): Promise<Response> {
   if (dryRun) {
-    return simulatePatchRequest(path, patches);
+    return simulatePatchRequest(path, patches, context);
   }
   return await rateLimitRequest(
     ldAPIPatchRequest(apiKey, domain, path, patches),
@@ -623,7 +628,8 @@ if (inputArgs.migrateSegments) {
         `segments/${inputArgs.projKeyDest}/${destEnvKey}/${segmentKey}`,
           sgmtPatches,
         false,
-        'segments'
+        'segments',
+        `environment: ${destEnvKey}`  // Pass environment context for better dry-run logging
       );
 
       const segPatchStatus = patchRules.statusText;
@@ -1019,9 +1025,85 @@ const handlePatchResponse = async (
 };
 
 /**
+ * Checks if a patch would actually change the environment configuration
+ * Returns true if changes are needed, false if environment is already in desired state
+ */
+const wouldPatchChangeEnvironment = (
+  currentEnvConfig: any,
+  patchOperations: any[],
+  variations: any[]
+): boolean => {
+  // If no current config, changes are needed
+  if (!currentEnvConfig) return true;
+  
+  // Check each patch operation to see if it would actually change something
+  for (const patch of patchOperations) {
+    const pathParts = patch.path.split('/');
+    // Path format: /environments/{envKey}/{field} or /environments/{envKey}/rules/-
+    
+    if (pathParts.length < 4) continue;
+    
+    const field = pathParts[3];
+    
+    // Get current value from the environment config
+    let currentValue = currentEnvConfig[field];
+    
+    switch (patch.op) {
+      case 'replace':
+        // For replace operations, compare values
+        if (field === 'offVariation' || field === 'on') {
+          // Direct value comparison
+          if (currentValue !== patch.value) {
+            return true;
+          }
+        } else if (field === 'fallthrough') {
+          // Compare fallthrough configuration
+          const currentFallthrough = JSON.stringify(currentValue);
+          const newFallthrough = JSON.stringify(patch.value);
+          if (currentFallthrough !== newFallthrough) {
+            return true;
+          }
+        }
+        break;
+        
+      case 'add':
+        // For add operations (like adding rules), assume change is needed
+        // unless the exact rule already exists at that position
+        if (field === 'rules') {
+          // Compare rules array
+          const currentRules = JSON.stringify(currentEnvConfig.rules || []);
+          const newRules = JSON.stringify(patch.value);
+          if (currentRules !== newRules) {
+            return true;
+          }
+        } else {
+          // Other add operations are assumed to be changes
+          return true;
+        }
+        break;
+        
+      case 'remove':
+        // Remove operations are changes if the thing exists
+        if (currentValue !== undefined && currentValue !== null) {
+          return true;
+        }
+        break;
+        
+      default:
+        // Unknown operation type, assume it's a change
+        return true;
+    }
+  }
+  
+  // If we got here, no meaningful changes were detected
+  return false;
+};
+
+/**
  * Makes a patch call to update flag environment configuration
  * Handles approval workflows when direct patching requires approval (405)
  * Retries 404s after a delay (environment may not be ready yet)
+ * Skips patch if environment is already in desired state
  */
 const makePatchCall = async (
   flagKey: string,
@@ -1030,8 +1112,18 @@ const makePatchCall = async (
   maintainerId: string | null,
   fallbackMemberId: string | null,
   variations: any[],
+  destinationFlag: any,
   retryCount: number = 0
 ): Promise<Set<string>> => {
+  // Check if this patch would actually change anything
+  const currentEnvConfig = destinationFlag?.environments?.[env];
+  const hasChanges = wouldPatchChangeEnvironment(currentEnvConfig, patchReq, variations);
+  
+  if (!hasChanges) {
+    console.log(Colors.gray(`\t  ✓ ${env}: Already up to date, skipping`));
+    return flagsWithErrors;
+  }
+  
   const patchFlagReq = await dryRunAwarePatch(
     inputArgs.dryRun || false,
       apiKey,
@@ -1039,7 +1131,8 @@ const makePatchCall = async (
       `flags/${inputArgs.projKeyDest}/${flagKey}`,
       patchReq,
     false,
-    'flags'
+    'flags',
+    `environment: ${env}`  // Pass environment context for better dry-run logging
   );
   
   const flagPatchStatus = patchFlagReq.status;
@@ -1048,7 +1141,7 @@ const makePatchCall = async (
     // Environment not ready yet, wait and retry
     console.log(Colors.gray(`\t  ⏳ ${env}: Environment not ready, retrying in 3s... (attempt ${retryCount + 1}/2)`));
     await new Promise(resolve => setTimeout(resolve, 3000));
-    return await makePatchCall(flagKey, patchReq, env, maintainerId, fallbackMemberId, variations, retryCount + 1);
+    return await makePatchCall(flagKey, patchReq, env, maintainerId, fallbackMemberId, variations, destinationFlag, retryCount + 1);
   } else if (flagPatchStatus === 405) {
     // Environment requires approval workflow
     await handleApprovalWorkflow(
@@ -1111,6 +1204,47 @@ for (const [index, flagkey] of flagList.entries()) {
   let flagCreated = false;
   let createdFlagKey = flag.key;
   let flagMaintainerId: string | null = null;
+  let flagAlreadyExisted = false;
+
+  // First, check if the flag already exists in the destination
+  try {
+    const checkFlagReq = ldAPIRequest(
+      apiKey,
+      domain,
+      `flags/${inputArgs.projKeyDest}/${flagKey}`
+    );
+    const checkFlagResp = await rateLimitRequest(checkFlagReq, 'flags');
+    
+    if (checkFlagResp.status === 200) {
+      // Flag already exists
+      if (inputArgs.conflictPrefix) {
+        // Conflict prefix enabled - we'll try creating with prefix
+        console.log(Colors.yellow(`\t⚠ Flag exists, will try with prefix "${inputArgs.conflictPrefix}"`));
+        flagKey = applyConflictPrefix(flag.key, inputArgs.conflictPrefix);
+        flagName = `${inputArgs.conflictPrefix}${flag.name}`;
+        flagAlreadyExisted = false; // Will attempt creation with prefixed key
+        
+        conflictTracker.addResolution({
+          originalKey: flag.key,
+          resolvedKey: flagKey,
+          resourceType: 'flag',
+          conflictPrefix: inputArgs.conflictPrefix
+        });
+      } else {
+        // No conflict prefix - update existing flag
+        flagCreated = true;
+        flagAlreadyExisted = true;
+        createdFlagKey = flagKey;
+        console.log(Colors.gray(`\t⚠ Flag already exists, will update environments...`));
+      }
+    } else if (checkFlagResp.status === 404) {
+      // Flag doesn't exist, we'll create it
+      flagAlreadyExisted = false;
+    }
+  } catch (error) {
+    // If check fails, proceed with creation attempt
+    console.log(Colors.gray(`\t  Could not check if flag exists, will attempt creation...`));
+  }
 
   while (!flagCreated && attemptCount < 2) {
     attemptCount++;
@@ -1150,102 +1284,104 @@ for (const [index, flagkey] of flagList.entries()) {
     newFlag.defaults = flag.defaults;
   }
 
-    // Collect view associations for flag creation
-    // API supports "viewKeys" (plural, array) field during creation (NO beta header needed)
-    const viewKeys: string[] = [];
-    
-    // Add target view if specified (highest priority)
-    if (inputArgs.targetView) {
-      viewKeys.push(inputArgs.targetView);
-    }
-    
-    // Add source flag's view associations (if not already added)
-    if (flag.viewKeys && Array.isArray(flag.viewKeys)) {
-      flag.viewKeys.forEach((viewKey: string) => {
-        if (!viewKeys.includes(viewKey)) {
-          viewKeys.push(viewKey);
-        }
-      });
-    }
-    
-    // Add viewKeys to newFlag if any views specified
-    if (viewKeys.length > 0) {
-      (newFlag as any).viewKeys = viewKeys;
-    }
-    
-  const flagResp = await dryRunAwarePost(
-    inputArgs.dryRun || false,
+    // Skip the creation POST if flag already exists
+    if (!flagAlreadyExisted) {
+      // Collect view associations for flag creation
+      // API supports "viewKeys" (plural, array) field during creation (NO beta header needed)
+      const viewKeys: string[] = [];
+      
+      // Add target view if specified (highest priority)
+      if (inputArgs.targetView) {
+        viewKeys.push(inputArgs.targetView);
+      }
+      
+      // Add source flag's view associations (if not already added)
+      if (flag.viewKeys && Array.isArray(flag.viewKeys)) {
+        flag.viewKeys.forEach((viewKey: string) => {
+          if (!viewKeys.includes(viewKey)) {
+            viewKeys.push(viewKey);
+          }
+        });
+      }
+      
+      // Add viewKeys to newFlag if any views specified
+      if (viewKeys.length > 0) {
+        (newFlag as any).viewKeys = viewKeys;
+      }
+      
+      const flagResp = await dryRunAwarePost(
+        inputArgs.dryRun || false,
       apiKey,
       domain,
       `flags/${inputArgs.projKeyDest}`,
       newFlag,
-    false, // Standard API (no beta header needed for viewKeys)
+        false, // Standard API (no beta header needed for viewKeys)
     'flags'
   );
 
   if (flagResp.status == 200 || flagResp.status == 201) {
-      flagCreated = true;
-      createdFlagKey = flagKey;
-      if (viewKeys.length > 0) {
-        console.log(Colors.green(`\t✓ Created and linked to view(s): ${viewKeys.join(', ')}`));
-      } else {
-        console.log(Colors.green(`\t✓ Created`));
-      }
-    } else if (flagResp.status === 409) {
-      // Flag already exists
-      if (inputArgs.conflictPrefix && attemptCount === 1) {
-        // Conflict detected with prefix enabled, retry with prefix
-        console.log(Colors.yellow(`\t⚠ Exists, retrying with prefix "${inputArgs.conflictPrefix}"`));
-        flagKey = applyConflictPrefix(flag.key, inputArgs.conflictPrefix);
-        flagName = `${inputArgs.conflictPrefix}${flag.name}`;
-        
-        conflictTracker.addResolution({
-          originalKey: flag.key,
-          resolvedKey: flagKey,
-          resourceType: 'flag',
-          conflictPrefix: inputArgs.conflictPrefix
-        });
-  } else {
-        // No prefix or second attempt - flag exists, proceed to update it
         flagCreated = true;
         createdFlagKey = flagKey;
-        console.log(Colors.yellow(`\t⚠ Exists, updating environments...`));
-        
-        // Note: We don't link to views for existing flags to avoid overwriting existing view associations
-        
-        break; // Exit retry loop and proceed to patching
+        if (viewKeys.length > 0) {
+          console.log(Colors.green(`\t✓ Created and linked to view(s): ${viewKeys.join(', ')}`));
+        } else {
+          console.log(Colors.green(`\t✓ Created`));
+        }
+      } else if (flagResp.status === 409) {
+        // Flag already exists (shouldn't happen if our check above worked)
+        if (inputArgs.conflictPrefix && attemptCount === 1) {
+          // Conflict detected with prefix enabled, retry with prefix
+          console.log(Colors.yellow(`\t⚠ Conflict detected, retrying with prefix "${inputArgs.conflictPrefix}"`));
+          flagKey = applyConflictPrefix(flag.key, inputArgs.conflictPrefix);
+          flagName = `${inputArgs.conflictPrefix}${flag.name}`;
+          flagAlreadyExisted = false; // Reset to attempt creation with new key
+          
+          conflictTracker.addResolution({
+            originalKey: flag.key,
+            resolvedKey: flagKey,
+            resourceType: 'flag',
+            conflictPrefix: inputArgs.conflictPrefix
+          });
+        } else {
+          // No prefix or second attempt - flag exists, proceed to update it
+          flagCreated = true;
+          createdFlagKey = flagKey;
+          console.log(Colors.gray(`\t⚠ Flag exists (409), will update environments...`));
+          break; // Exit retry loop and proceed to patching
     }
   } else {
-      // Real error
-      console.log(Colors.red(`\t✗ Error ${flagResp.status}`));
+        // Real error
+        console.log(Colors.red(`\t✗ Error ${flagResp.status}`));
     const errorText = await flagResp.text();
-      console.log(Colors.red(`\t  ${errorText}`));
-      break; // Exit loop on non-conflict errors
+        console.log(Colors.red(`\t  ${errorText}`));
+        break; // Exit loop on non-conflict errors
+      }
     }
   }
 
   // Add flag env settings - use the potentially updated flag key
   if (flagCreated) {
-    // Fetch the destination flag to get the correct variation IDs
+    // Fetch the destination flag to get the correct variation IDs and current environment state
     // (LaunchDarkly generates new UUIDs when the flag is created)
     let destinationVariations = flag.variations; // Fallback to source variations
+    let destinationFlag: any = null;
     
     try {
       const destFlagReq = ldAPIRequest(
         apiKey,
         domain,
-        `flags/${inputArgs.projKeyDest}/${createdFlagKey}`
+        `flags/${inputArgs.projKeyDest}/${createdFlagKey}?env=*`  // Request all environments
       );
       const destFlagResp = await rateLimitRequest(destFlagReq, 'flags');
       
       if (destFlagResp.status === 200) {
-        const destFlag = await destFlagResp.json();
-        if (destFlag.variations && Array.isArray(destFlag.variations)) {
-          destinationVariations = destFlag.variations;
+        destinationFlag = await destFlagResp.json();
+        if (destinationFlag.variations && Array.isArray(destinationFlag.variations)) {
+          destinationVariations = destinationFlag.variations;
         }
       }
     } catch (error) {
-      console.log(Colors.yellow(`\t⚠ Could not fetch destination flag variations, using source IDs (may cause issues with approval requests)`));
+      console.log(Colors.yellow(`\t⚠ Could not fetch destination flag, using source IDs (may cause issues with approval requests and skip detection)`));
     }
     
   for (const env of envkeys) {
@@ -1288,7 +1424,7 @@ for (const [index, flagkey] of flagList.entries()) {
           );
         }
       });
-      await makePatchCall(createdFlagKey, patchReq, destEnvKey, flagMaintainerId, currentMemberId, destinationVariations);
+      await makePatchCall(createdFlagKey, patchReq, destEnvKey, flagMaintainerId, currentMemberId, destinationVariations, destinationFlag);
     }
   }
 }
