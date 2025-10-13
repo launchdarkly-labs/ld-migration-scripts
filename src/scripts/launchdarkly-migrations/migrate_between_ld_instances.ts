@@ -716,23 +716,28 @@ for (const [index, flagkey] of flagList.entries()) {
     newFlag.defaults = flag.defaults;
   }
 
-    // Collect view associations (but don't add to newFlag yet)
-    // We'll add them after creation due to a bug in LD's beta API
+    // Collect view associations for flag creation
+    // API supports "viewKeys" (plural, array) field during creation (NO beta header needed)
     const viewKeys: string[] = [];
     
-    // Add source flag's view associations
-    if (flag.viewKeys && Array.isArray(flag.viewKeys)) {
-      viewKeys.push(...flag.viewKeys);
-    }
-    
-    // Add target view if specified (and not already present)
-    if (inputArgs.targetView && !viewKeys.includes(inputArgs.targetView)) {
+    // Add target view if specified (highest priority)
+    if (inputArgs.targetView) {
       viewKeys.push(inputArgs.targetView);
     }
-
-    // DON'T add viewKeys to newFlag - LD's beta API has a bug where including
-    // viewKeys in flag creation causes the key field to be lost during parsing
-    // We'll add views via PATCH after creation
+    
+    // Add source flag's view associations (if not already added)
+    if (flag.viewKeys && Array.isArray(flag.viewKeys)) {
+      flag.viewKeys.forEach((viewKey: string) => {
+        if (!viewKeys.includes(viewKey)) {
+          viewKeys.push(viewKey);
+        }
+      });
+    }
+    
+    // Add viewKeys to newFlag if any views specified
+    if (viewKeys.length > 0) {
+      (newFlag as any).viewKeys = viewKeys;
+    }
     
   const flagResp = await dryRunAwarePost(
     inputArgs.dryRun || false,
@@ -740,43 +745,17 @@ for (const [index, flagkey] of flagList.entries()) {
       domain,
       `flags/${inputArgs.projKeyDest}`,
       newFlag,
-    false, // Never use beta version for flag creation
+    false, // Standard API (no beta header needed for viewKeys)
     'flags'
   );
 
   if (flagResp.status == 200 || flagResp.status == 201) {
       flagCreated = true;
       createdFlagKey = flagKey;
-      console.log(Colors.green(`\t✓ Created`));
-      
-      // Now add flag to views via PATCH (if needed)
       if (viewKeys.length > 0) {
-        console.log(Colors.cyan(`\t  Adding flag to view(s): ${viewKeys.join(', ')}`));
-        try {
-          const viewPatch = [{
-            op: "add",
-            path: "/viewKeys",
-            value: viewKeys
-          }];
-          
-          const viewPatchResp = await dryRunAwarePatch(
-            inputArgs.dryRun || false,
-            apiKey,
-            domain,
-            `flags/${inputArgs.projKeyDest}/${flagKey}`,
-            viewPatch,
-            false,
-            'flags'
-          );
-          
-          if (viewPatchResp.status >= 200 && viewPatchResp.status < 300) {
-            console.log(Colors.green(`\t  ✓ Added to view(s)`));
-          } else {
-            console.log(Colors.yellow(`\t  ⚠ Failed to add to views (status: ${viewPatchResp.status})`));
-          }
-        } catch (error) {
-          console.log(Colors.yellow(`\t  ⚠ Error adding to views: ${error instanceof Error ? error.message : String(error)}`));
-        }
+        console.log(Colors.green(`\t✓ Created and linked to view(s): ${viewKeys.join(', ')}`));
+      } else {
+        console.log(Colors.green(`\t✓ Created`));
       }
     } else if (flagResp.status === 409) {
       // Flag already exists
@@ -798,32 +777,7 @@ for (const [index, flagkey] of flagList.entries()) {
         createdFlagKey = flagKey;
         console.log(Colors.yellow(`\t⚠ Exists, updating environments...`));
         
-        // Also add flag to views if needed (since it already exists)
-        if (viewKeys.length > 0) {
-          try {
-            const viewPatch = [{
-              op: "add",
-              path: "/viewKeys",
-              value: viewKeys
-            }];
-            
-            const viewPatchResp = await dryRunAwarePatch(
-              inputArgs.dryRun || false,
-              apiKey,
-              domain,
-              `flags/${inputArgs.projKeyDest}/${flagKey}`,
-              viewPatch,
-              false,
-              'flags'
-            );
-            
-            if (viewPatchResp.status >= 200 && viewPatchResp.status < 300) {
-              console.log(Colors.green(`\t  ✓ Added to view(s): ${viewKeys.join(', ')}`));
-            }
-          } catch (error) {
-            // Silently continue if view linking fails
-          }
-        }
+        // Note: We don't link to views for existing flags to avoid overwriting existing view associations
         
         break; // Exit retry loop and proceed to patching
     }
