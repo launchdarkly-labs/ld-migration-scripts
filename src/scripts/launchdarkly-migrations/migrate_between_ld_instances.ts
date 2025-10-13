@@ -32,6 +32,7 @@ interface Arguments {
   envMap?: string;
   domain?: string;
   config?: string;
+  dryRun?: boolean;
 }
 
 interface MigrationConfig {
@@ -50,8 +51,77 @@ interface MigrationConfig {
     targetView?: string;
     environments?: string[];
     environmentMapping?: Record<string, string>;
+    dryRun?: boolean;
   };
 }
+
+// ==================== Dry Run Helpers ====================
+
+/**
+ * Simulates an API POST request in dry-run mode
+ */
+function simulatePostRequest(resource: string, data: any): Response {
+  console.log(Colors.gray(`    [DRY RUN] Would POST to ${resource}`));
+  return new Response(JSON.stringify({ success: true, _id: 'dry-run-id' }), { 
+    status: 201,
+    headers: { 'Content-Type': 'application/json' }
+  });
+}
+
+/**
+ * Simulates an API PATCH request in dry-run mode
+ */
+function simulatePatchRequest(resource: string, patches: any[]): Response {
+  console.log(Colors.gray(`    [DRY RUN] Would PATCH ${resource} with ${patches.length} operation(s)`));
+  return new Response(JSON.stringify({ success: true }), { 
+    status: 200,
+    headers: { 'Content-Type': 'application/json' }
+  });
+}
+
+/**
+ * Wraps POST requests with dry-run support
+ */
+async function dryRunAwarePost(
+  dryRun: boolean,
+  apiKey: string,
+  domain: string,
+  path: string,
+  body: any,
+  useBeta = false,
+  rateLimit: string = 'default'
+): Promise<Response> {
+  if (dryRun) {
+    return simulatePostRequest(path, body);
+  }
+  return await rateLimitRequest(
+    ldAPIPostRequest(apiKey, domain, path, body, useBeta),
+    rateLimit
+  );
+}
+
+/**
+ * Wraps PATCH requests with dry-run support
+ */
+async function dryRunAwarePatch(
+  dryRun: boolean,
+  apiKey: string,
+  domain: string,
+  path: string,
+  patches: any[],
+  _useBeta = false,  // Not currently supported by ldAPIPatchRequest
+  rateLimit: string = 'default'
+): Promise<Response> {
+  if (dryRun) {
+    return simulatePatchRequest(path, patches);
+  }
+  return await rateLimitRequest(
+    ldAPIPatchRequest(apiKey, domain, path, patches),
+    rateLimit
+  );
+}
+
+// ==================== Project Helpers ====================
 
 // Add function to check if project exists
 async function checkProjectExists(apiKey: string, domain: string, projectKey: string): Promise<boolean> {
@@ -82,8 +152,10 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .alias("env-map", "envMap")
   .alias("domain", "domain")
   .alias("f", "config")
+  .alias("dry-run", "dryRun")
   .boolean("m")
   .boolean("s")
+  .boolean("dry-run")
   .default("m", false)
   .default("s", true)
   .describe("c", "Prefix to use when resolving key conflicts (e.g., 'imported-')")
@@ -92,6 +164,7 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .describe("env-map", "Environment mapping in format 'source1:dest1,source2:dest2' (e.g., 'prod:production,dev:development')")
   .describe("domain", "Destination LaunchDarkly domain (default: app.launchdarkly.com)")
   .describe("f", "Path to YAML config file. CLI arguments override config file values.")
+  .describe("dry-run", "Preview migration without making any changes")
   .parse() as unknown) as Arguments;
 
 // Load and merge config file if provided
@@ -119,6 +192,7 @@ if (cliArgs.config) {
         ? Object.entries(config.options.environmentMapping).map(([k, v]) => `${k}:${v}`).join(',')
         : undefined),
       domain: cliArgs.domain || config.destination?.domain,
+      dryRun: cliArgs.dryRun ?? config.options?.dryRun ?? false,
       config: cliArgs.config
     };
     
@@ -150,6 +224,12 @@ console.log(Colors.gray(`  Target View: ${inputArgs.targetView || 'none'}`));
 console.log(Colors.gray(`  Environments: ${inputArgs.environments || 'all'}`));
 console.log(Colors.gray(`  Env Mapping: ${inputArgs.envMap || 'none'}`));
 console.log(Colors.gray(`  Domain: ${inputArgs.domain || 'app.launchdarkly.com'}`));
+console.log(Colors.gray(`  Dry Run: ${inputArgs.dryRun || false}`));
+
+if (inputArgs.dryRun) {
+  console.log(Colors.yellow("\n⚠️  DRY RUN MODE - No changes will be made"));
+  console.log(Colors.yellow("All API write operations will be simulated\n"));
+}
 
 // Get destination API key
 console.log(Colors.blue("\n🔑 Loading API key from config..."));
@@ -348,8 +428,13 @@ if (targetProjectExists) {
     projPost.includeInSnippetByDefault = projectJson.includeInSnippetByDefault;
   }
 
-  const projResp = await rateLimitRequest(
-    ldAPIPostRequest(apiKey, domain, `projects`, projPost),
+  const projResp = await dryRunAwarePost(
+    inputArgs.dryRun || false,
+    apiKey,
+    domain,
+    `projects`,
+    projPost,
+    false,
     'projects'
   );
 
@@ -465,15 +550,13 @@ if (inputArgs.migrateSegments) {
       if (segment.tags) newSegment.tags = segment.tags;
       if (segment.description) newSegment.description = segment.description;
 
-      const post = ldAPIPostRequest(
+      const segmentResp = await dryRunAwarePost(
+        inputArgs.dryRun || false,
         apiKey,
         domain,
-          `segments/${inputArgs.projKeyDest}/${destEnvKey}`,
+        `segments/${inputArgs.projKeyDest}/${destEnvKey}`,
         newSegment,
-      )
-
-      const segmentResp = await rateLimitRequest(
-        post,
+        false,
         'segments'
       );
 
@@ -527,13 +610,13 @@ if (inputArgs.migrateSegments) {
         sgmtPatches.push(...buildRules(segment.rules));
       }
 
-      const patchRules = await rateLimitRequest(
-        ldAPIPatchRequest(
+      const patchRules = await dryRunAwarePatch(
+        inputArgs.dryRun || false,
           apiKey,
           domain,
-            `segments/${inputArgs.projKeyDest}/${destEnvKey}/${segmentKey}`,
+        `segments/${inputArgs.projKeyDest}/${destEnvKey}/${segmentKey}`,
           sgmtPatches,
-        ),
+        false,
         'segments'
       );
 
@@ -651,14 +734,13 @@ for (const [index, flagkey] of flagList.entries()) {
     // viewKeys in flag creation causes the key field to be lost during parsing
     // We'll add views via PATCH after creation
     
-  const flagResp = await rateLimitRequest(
-    ldAPIPostRequest(
+  const flagResp = await dryRunAwarePost(
+    inputArgs.dryRun || false,
       apiKey,
       domain,
       `flags/${inputArgs.projKeyDest}`,
       newFlag,
-        false // Never use beta version for flag creation
-    ),
+    false, // Never use beta version for flag creation
     'flags'
   );
 
@@ -677,13 +759,13 @@ for (const [index, flagkey] of flagList.entries()) {
             value: viewKeys
           }];
           
-          const viewPatchResp = await rateLimitRequest(
-            ldAPIPatchRequest(
-              apiKey,
-              domain,
-              `flags/${inputArgs.projKeyDest}/${flagKey}`,
-              viewPatch
-            ),
+          const viewPatchResp = await dryRunAwarePatch(
+            inputArgs.dryRun || false,
+            apiKey,
+            domain,
+            `flags/${inputArgs.projKeyDest}/${flagKey}`,
+            viewPatch,
+            false,
             'flags'
           );
           
@@ -725,13 +807,13 @@ for (const [index, flagkey] of flagList.entries()) {
               value: viewKeys
             }];
             
-            const viewPatchResp = await rateLimitRequest(
-              ldAPIPatchRequest(
-                apiKey,
-                domain,
-                `flags/${inputArgs.projKeyDest}/${flagKey}`,
-                viewPatch
-              ),
+            const viewPatchResp = await dryRunAwarePatch(
+              inputArgs.dryRun || false,
+              apiKey,
+              domain,
+              `flags/${inputArgs.projKeyDest}/${flagKey}`,
+              viewPatch,
+              false,
               'flags'
             );
             
@@ -1142,13 +1224,13 @@ const handleApprovalWorkflow = async (
     }
     
     // Submit approval request
-    const approvalResp = await rateLimitRequest(
-      ldAPIPostRequest(
-        apiKey,
-        domain,
-        `projects/${inputArgs.projKeyDest}/flags/${flagKey}/environments/${env}/approval-requests`,
-        body
-      ),
+    const approvalResp = await dryRunAwarePost(
+      inputArgs.dryRun || false,
+      apiKey,
+      domain,
+      `projects/${inputArgs.projKeyDest}/flags/${flagKey}/environments/${env}/approval-requests`,
+      body,
+      false,
       'approval-requests'
     );
     
@@ -1204,13 +1286,13 @@ async function makePatchCall(
   fallbackMemberId: string | null,
   variations: any[]
 ) {
-  const patchFlagReq = await rateLimitRequest(
-    ldAPIPatchRequest(
+  const patchFlagReq = await dryRunAwarePatch(
+    inputArgs.dryRun || false,
       apiKey,
       domain,
       `flags/${inputArgs.projKeyDest}/${flagKey}`,
       patchReq,
-    ),
+    false,
     'flags'
   );
   

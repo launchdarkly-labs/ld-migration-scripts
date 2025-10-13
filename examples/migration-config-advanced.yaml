@@ -34,4 +34,7 @@ migration:
   environmentMapping:
     production: production
     staging: staging
+  
+  # Preview migration without making changes (recommended first time!)
+  # dryRun: true
 

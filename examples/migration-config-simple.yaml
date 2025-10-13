@@ -14,4 +14,7 @@ destination:
 
 migration:
   migrateSegments: true
+  
+  # Preview migration without making changes (optional)
+  # dryRun: true
 

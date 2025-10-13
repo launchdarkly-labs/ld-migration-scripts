@@ -1,0 +1,62 @@
+# Revert and Re-migrate Workflow
+#
+# Use this pattern when you need to:
+# 1. Clean up a failed or partial migration
+# 2. Re-run the migration with corrected settings
+#
+# Usage:
+#   deno task workflow -f workflow-revert-and-migrate.yaml
+
+workflow:
+  steps:
+    - revert      # First, clean up the previous migration
+    - migrate     # Then, run the migration again
+
+source:
+  projectKey: source-project
+  domain: app.launchdarkly.com
+
+destination:
+  projectKey: dest-project
+  domain: app.launchdarkly.com
+
+# Revert configuration
+revert:
+  # Preview the revert first (recommended!)
+  dryRun: true
+  
+  # Delete the view after unlinking flags
+  # deleteViews: true
+  
+  # Optional: Only process specific views
+  # viewKeys:
+  #   - migration-view-1
+
+# Migration configuration
+migration:
+  assignMaintainerIds: true
+  migrateSegments: true
+  targetView: "migration-2024"
+  
+  # Preview the migration (recommended after revert preview!)
+  dryRun: true
+  
+  # Optional: Add conflict prefix
+  # conflictPrefix: "migrated-"
+  
+  # Optional: Limit to specific environments
+  # environments:
+  #   - production
+  #   - staging
+  
+  # Optional: Map environment keys
+  # environmentMapping:
+  #   prod: production
+  #   stage: staging
+
+# Workflow execution order:
+# 1. Revert (with dryRun: true) - Preview cleanup
+# 2. Migrate (with dryRun: true) - Preview re-migration
+# 
+# Then change both dryRun values to false and run again to execute
+

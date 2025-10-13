@@ -18,6 +18,7 @@
     "map-members": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/map_members_between_ld_instances.ts",
     "update-maintainers": "deno run --allow-read --allow-write src/scripts/update_maintainers.ts",
     "migrate": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/migrate_between_ld_instances.ts",
+    "revert": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/revert_migration.ts",
     "estimate-migration-time": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/estimate_migration_time.ts",
     "import-flags": "deno run --allow-net --allow-read --allow-write src/scripts/third-party-migrations/import_flags_from_external.ts",
     "version:show": "./scripts/check-version.sh",

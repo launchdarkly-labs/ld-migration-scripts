@@ -262,6 +262,7 @@ const loadFlagListFromSourceData = async (sourceProjectKey: string): Promise<str
 
 /**
  * Fetches a single flag by key
+ * Uses beta API to ensure viewKeys are included
  */
 const fetchFlagByKey = async (
   apiKey: string,
@@ -270,7 +271,8 @@ const fetchFlagByKey = async (
   flagKey: string
 ): Promise<Flag | null> => {
   try {
-    const req = ldAPIRequest(apiKey, domain, `flags/${projectKey}/${flagKey}`);
+    // Use beta API to get viewKeys field
+    const req = ldAPIRequest(apiKey, domain, `flags/${projectKey}/${flagKey}`, true);
     const response = await rateLimitRequest(req, 'flags');
     
     if (response.status === 200) {
@@ -371,11 +373,21 @@ const discoverMigrationFlags = async (
         sourceFlags
       );
       
-      // Filter to only those with migration marker (in case some existed before)
-      const migrationFlags = identifyMigrationFlags(
+      console.log(Colors.gray(`  Found ${destinationFlags.length} matching flag(s) in destination`));
+      
+      // First try: Filter by migration marker in description
+      let migrationFlags = identifyMigrationFlags(
         destinationFlags,
         config.sourceProjectKey
       );
+      
+      // If no flags found with description marker, assume all flags from source list are migration flags
+      // This handles the case where the migration script doesn't add description markers
+      if (migrationFlags.length === 0 && destinationFlags.length > 0) {
+        console.log(Colors.yellow(`  Note: No migration markers found in descriptions`));
+        console.log(Colors.cyan(`  Assuming all ${destinationFlags.length} flag(s) from source are migration flags`));
+        migrationFlags = destinationFlags;
+      }
       
       return {
         flags: migrationFlags,
@@ -528,32 +540,73 @@ const fetchProjectViews = async (
 };
 
 /**
- * Fetches linked resources for a view
+ * Fetches views linked to a flag
  */
-const fetchViewLinks = async (
+const fetchFlagViews = async (
   apiKey: string,
   domain: string,
   projectKey: string,
-  viewKey: string
-): Promise<ViewLink[]> => {
+  flagKey: string,
+  debug: boolean = false
+): Promise<string[]> => {
   try {
     const req = ldAPIRequest(
       apiKey,
       domain,
-      `projects/${projectKey}/views/${viewKey}/links`,
-      true
+      `projects/${projectKey}/flags/${flagKey}/views`,
+      true  // Use beta API version
     );
-    const response = await rateLimitRequest(req, 'views');
+    const response = await rateLimitRequest(req, 'flags');
+    
+    if (debug) {
+      console.log(Colors.gray(`      DEBUG: GET /api/v2/projects/${projectKey}/flags/${flagKey}/views -> ${response.status}`));
+    }
     
     if (response.status === 200) {
       const data = await response.json();
-      return data.items || [];
+      if (debug) {
+        console.log(Colors.gray(`      DEBUG: Response has ${data.items?.length || 0} view(s): ${(data.items || []).map((v: any) => v.key).join(', ') || 'none'}`));
+      }
+      // Extract view keys from the response
+      return (data.items || []).map((item: any) => item.key);
+    } else if (debug) {
+      const errorText = await response.text();
+      console.log(Colors.yellow(`      DEBUG: Error - ${errorText}`));
     }
   } catch (error) {
-    console.log(Colors.gray(`  Warning: Could not fetch links for view ${viewKey}`));
+    if (debug) {
+      console.log(Colors.yellow(`      DEBUG: Exception - ${error}`));
+    }
   }
   
   return [];
+};
+
+/**
+ * Finds flags linked to a view by checking each flag individually
+ * This is a fallback when the /views/{viewKey}/linked/flags endpoint fails
+ */
+const findFlagsLinkedToView = async (
+  apiKey: string,
+  domain: string,
+  projectKey: string,
+  viewKey: string,
+  flagKeys: string[]
+): Promise<string[]> => {
+  console.log(Colors.gray(`    Checking ${flagKeys.length} flag(s) for view links...`));
+  const linkedFlags: string[] = [];
+  
+  for (let i = 0; i < flagKeys.length; i++) {
+    const flagKey = flagKeys[i];
+    // Debug first 3 flags
+    const debug = i < 3;
+    const views = await fetchFlagViews(apiKey, domain, projectKey, flagKey, debug);
+    if (views.includes(viewKey)) {
+      linkedFlags.push(flagKey);
+    }
+  }
+  
+  return linkedFlags;
 };
 
 /**
@@ -659,12 +712,12 @@ const fetchProjectEnvironments = async (
   projectKey: string
 ): Promise<string[]> => {
   try {
-    const req = ldAPIRequest(apiKey, domain, `projects/${projectKey}`);
-    const response = await rateLimitRequest(req, 'projects');
+    const req = ldAPIRequest(apiKey, domain, `projects/${projectKey}/environments`);
+    const response = await rateLimitRequest(req, 'environments');
     
     if (response.status === 200) {
       const data = await response.json();
-      return (data.environments?.items || []).map((env: any) => env.key);
+      return (data.items || []).map((env: any) => env.key);
     }
   } catch (error) {
     console.log(Colors.yellow(`Warning: Could not fetch environments: ${error}`));
@@ -805,13 +858,16 @@ const revertViews = async (
 ): Promise<void> => {
   console.log(Colors.cyan("\n🔷 Processing Views"));
   
+  if (!config.viewKeys || config.viewKeys.length === 0) {
+    console.log(Colors.gray("  No target views specified, skipping view processing"));
+    return;
+  }
+  
   const views = await fetchProjectViews(apiKey, domain, config.projectKey);
-  const targetViews = config.viewKeys 
-    ? views.filter(v => config.viewKeys!.includes(v.key))
-    : views;
+  const targetViews = views.filter(v => config.viewKeys!.includes(v.key));
   
   if (targetViews.length === 0) {
-    console.log(Colors.gray("  No views to process"));
+    console.log(Colors.gray("  Target views not found in project"));
     return;
   }
   
@@ -820,34 +876,34 @@ const revertViews = async (
   for (const view of targetViews) {
     console.log(Colors.cyan(`\n  Processing view: ${view.key}`));
     
-    // Get all links for this view
-    const links = await fetchViewLinks(apiKey, domain, config.projectKey, view.key);
+    // NOTE: LaunchDarkly's beta Views API has issues:
+    // - GET /projects/{proj}/views/{view}/linked/flags returns 500
+    // - GET /projects/{proj}/flags/{flag}/views returns 404
+    // So we'll attempt to unlink ALL migration flags from this view
+    // The API will ignore unlink requests for flags that aren't actually linked
     
-    // Filter to only migration flags
-    const migrationFlagKeys = new Set(migrationFlags.map(f => f.key));
-    const flagLinksToRemove = links
-      .filter(link => link.resource.type === 'flag')
-      .filter(link => migrationFlagKeys.has(link.resource.key))
-      .map(link => link.resource.key);
+    const migrationFlagKeys = migrationFlags.map(f => f.key);
+    console.log(Colors.gray(`    Attempting to unlink ${migrationFlagKeys.length} migration flag(s)...`));
+    console.log(Colors.gray(`    (Note: API will ignore flags that aren't actually linked)`));
     
-    if (flagLinksToRemove.length > 0) {
-      console.log(Colors.gray(`    Unlinking ${flagLinksToRemove.length} flag(s)`));
-      const unlinked = await unlinkFlagsFromView(
-        apiKey,
-        domain,
-        config.projectKey,
-        view.key,
-        flagLinksToRemove,
-        config.dryRun || false
-      );
-      stats.viewLinksRemoved += unlinked;
-      console.log(Colors.green(`    ✓ Unlinked ${unlinked} flag(s)`));
+    const unlinked = await unlinkFlagsFromView(
+      apiKey,
+      domain,
+      config.projectKey,
+      view.key,
+      migrationFlagKeys,
+      config.dryRun || false
+    );
+    stats.viewLinksRemoved += unlinked;
+    
+    if (unlinked > 0) {
+      console.log(Colors.green(`    ✓ Unlinked ${unlinked} flag(s) from view`));
     } else {
-      console.log(Colors.gray(`    No migration flags linked to this view`));
+      console.log(Colors.gray(`    No flags were unlinked (they may not have been linked)`));
     }
     
-    // Delete view if requested and all links removed
-    if (config.deleteViews && flagLinksToRemove.length > 0) {
+    // Delete view if requested
+    if (config.deleteViews) {
       const deleted = await deleteView(
         apiKey,
         domain,

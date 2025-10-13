@@ -1,0 +1,37 @@
+# Example: Revert a Failed Migration
+# 
+# This config file can be used with the revert tool to undo a migration.
+# The revert tool will:
+# 1. Use the source data to know exactly which flags were migrated (faster!)
+# 2. Delete any pending approval requests
+# 3. Remove flags from the target view
+# 4. Archive and delete the migrated flags
+# 5. Optionally delete the view itself
+#
+# Usage:
+#   deno task revert -f examples/revert-migration-example.yaml --dry-run
+#   deno task revert -f examples/revert-migration-example.yaml  # Execute the revert
+
+source:
+  projectKey: slack-app
+  domain: app.ld.catamorphic.com
+
+destination:
+  projectKey: default
+  domain: app.ld.catamorphic.com
+
+migration:
+  # The view that was created during migration
+  targetView: "slack-app"
+
+# Note: When using --config/-f with the revert tool:
+# - source.projectKey: Used to identify which flags to revert
+# - destination.projectKey: Where to delete the flags from
+# - migration.targetView: Which view to clean up
+# - Smart mode is automatically enabled (uses extracted source data)
+#
+# Additional CLI options you can use:
+# --dry-run              Preview the revert without making changes
+# --delete-views         Also delete the view after unlinking flags
+# --no-use-source-data   Disable smart mode (scan all flags instead)
+

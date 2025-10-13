@@ -34,6 +34,7 @@ interface WorkflowConfig {
     targetView?: string;
     environments?: string[];
     environmentMapping?: Record<string, string>;
+    dryRun?: boolean;
   };
   thirdPartyImport?: {
     inputFile: string;
@@ -41,13 +42,18 @@ interface WorkflowConfig {
     dryRun?: boolean;
     reportOutput?: string;
   };
+  revert?: {
+    dryRun?: boolean;
+    deleteViews?: boolean;
+    viewKeys?: string[];
+  };
 }
 
 interface Arguments {
   config: string;
 }
 
-type StepName = 'extract-source' | 'map-members' | 'migrate' | 'third-party-import';
+type StepName = 'extract-source' | 'map-members' | 'migrate' | 'third-party-import' | 'revert';
 type CommandOptions = { args: string[]; stdout: "inherit"; stderr: "inherit" };
 
 // ==================== Configuration ====================
@@ -226,6 +232,7 @@ const buildMigrationArgs = (config: WorkflowConfig): string[] => {
 
   args = addBooleanFlag(args, "-m", migration.assignMaintainerIds);
   args = addBooleanFlag(args, "-s=false", migration.migrateSegments === false);
+  args = addBooleanFlag(args, "--dry-run", migration.dryRun);
   args = addOptionalArg(args, "-c", migration.conflictPrefix);
   args = addOptionalArg(args, "-v", migration.targetView);
   args = addOptionalArg(args, "-e", migration.environments?.join(","));
@@ -312,6 +319,55 @@ const runThirdPartyImport = async (config: WorkflowConfig): Promise<void> => {
   printStepCompletion("Third-party import completed");
 };
 
+// ==================== Revert Step ====================
+
+/**
+ * Validates revert configuration
+ */
+const validateRevertConfig = (config: WorkflowConfig): void => {
+  if (!config.destination?.projectKey) {
+    console.log(Colors.red("Error: Destination project key is required for revert step"));
+    Deno.exit(1);
+  }
+};
+
+/**
+ * Builds arguments for revert command
+ */
+const buildRevertArgs = (config: WorkflowConfig): string[] => {
+  const revertConfig = config.revert || {};
+  
+  const baseArgs = buildBaseRunArgs(
+    "src/scripts/launchdarkly-migrations/revert_migration.ts",
+    ["--allow-net", "--allow-read", "--allow-write"]
+  );
+
+  // Use the config file itself as the -f parameter (revert reads from it)
+  const withConfigFile = [...baseArgs, "-f", inputArgs.config];
+  
+  // Add optional flags
+  let args = addBooleanFlag(withConfigFile, "--dry-run", revertConfig.dryRun);
+  args = addBooleanFlag(args, "--delete-views", revertConfig.deleteViews);
+  
+  // Add view keys if specified
+  if (revertConfig.viewKeys && revertConfig.viewKeys.length > 0) {
+    args = addOptionalArg(args, "-v", revertConfig.viewKeys.join(","));
+  }
+  
+  return args;
+};
+
+/**
+ * Runs the revert step
+ */
+const runRevert = async (config: WorkflowConfig): Promise<void> => {
+  printStepHeader("STEP", "Revert Migration");
+  validateRevertConfig(config);
+  const args = buildRevertArgs(config);
+  await executeCommand(args, "Revert step");
+  printStepCompletion("Revert completed");
+};
+
 // ==================== Step Execution ====================
 
 type StepExecutor = (config: WorkflowConfig) => Promise<void>;
@@ -323,7 +379,8 @@ const STEP_EXECUTORS: Record<StepName, StepExecutor> = {
   'extract-source': runExtractSource,
   'map-members': runMapMembers,
   'migrate': runMigrate,
-  'third-party-import': runThirdPartyImport
+  'third-party-import': runThirdPartyImport,
+  'revert': runRevert
 };
 
 /**
