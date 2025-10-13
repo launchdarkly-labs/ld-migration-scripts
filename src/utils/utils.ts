@@ -491,7 +491,8 @@ export function generateImportReport(results: ImportResult[]): ImportReport {
   };
 }
 
-// View Management Utilities
+// ==================== View Management ====================
+
 export interface View {
   key: string;
   name: string;
@@ -500,69 +501,105 @@ export interface View {
   maintainerId?: string;
 }
 
-export async function checkViewExists(
+type ViewOperationResult = { success: boolean; error?: string };
+
+/**
+ * Checks if a view exists in a project
+ */
+export const checkViewExists = async (
   apiKey: string,
   domain: string,
   projectKey: string,
   viewKey: string
-): Promise<boolean> {
+): Promise<boolean> => {
   try {
     const req = ldAPIRequest(apiKey, domain, `projects/${projectKey}/views/${viewKey}`, true);
     const response = await rateLimitRequest(req, 'views');
     return response.status === 200;
-  } catch (error) {
+  } catch {
     return false;
   }
-}
+};
 
-export async function createView(
+/**
+ * Determines if a view creation response is successful
+ */
+const isViewCreationSuccess = (status: number): boolean => 
+  status === 200 || status === 201 || status === 409;
+
+/**
+ * Creates an error result from a response
+ */
+const createErrorResult = async (response: Response): Promise<ViewOperationResult> => {
+  const errorText = await response.text();
+  return {
+    success: false,
+    error: `HTTP ${response.status}: ${errorText}`
+  };
+};
+
+/**
+ * Creates an error result from an exception
+ */
+const createExceptionResult = (error: unknown): ViewOperationResult => ({
+  success: false,
+  error: error instanceof Error ? error.message : String(error)
+});
+
+/**
+ * Creates a view in a LaunchDarkly project
+ */
+export const createView = async (
   apiKey: string,
   domain: string,
   projectKey: string,
   view: View
-): Promise<{ success: boolean; error?: string }> {
+): Promise<ViewOperationResult> => {
   try {
     const req = ldAPIPostRequest(apiKey, domain, `projects/${projectKey}/views`, view, true);
     const response = await rateLimitRequest(req, 'views');
     
-    if (response.status === 201 || response.status === 200) {
-      return { success: true };
-    } else if (response.status === 409) {
-      // View already exists - not an error
-      return { success: true };
-    } else {
-      const errorText = await response.text();
-      return { success: false, error: `HTTP ${response.status}: ${errorText}` };
-    }
+    return isViewCreationSuccess(response.status)
+      ? { success: true }
+      : await createErrorResult(response);
   } catch (error) {
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : String(error)
-    };
+    return createExceptionResult(error);
   }
-}
+};
 
-export async function getViewsFromProject(
+/**
+ * Extracts views from API response data
+ */
+const extractViewsFromResponse = (data: any): View[] => 
+  data.items || [];
+
+/**
+ * Fetches all views from a LaunchDarkly project
+ */
+export const getViewsFromProject = async (
   apiKey: string,
   domain: string,
   projectKey: string
-): Promise<View[]> {
+): Promise<View[]> => {
   try {
     const req = ldAPIRequest(apiKey, domain, `projects/${projectKey}/views`, true);
     const response = await rateLimitRequest(req, 'views');
     
     if (response.status === 200) {
       const data = await response.json();
-      return data.items || [];
+      return extractViewsFromResponse(data);
     }
     return [];
   } catch (error) {
-    console.log(Colors.yellow(`Warning: Could not fetch views from project ${projectKey}: ${error}`));
+    console.log(Colors.yellow(
+      `Warning: Could not fetch views from project ${projectKey}: ${error}`
+    ));
     return [];
   }
-}
+};
 
-// Conflict Resolution Utilities
+// ==================== Conflict Resolution ====================
+
 export interface ConflictResolution {
   originalKey: string;
   resolvedKey: string;
@@ -570,15 +607,96 @@ export interface ConflictResolution {
   conflictPrefix: string;
 }
 
-export class ConflictTracker {
-  private resolutions: ConflictResolution[] = [];
+type ConflictsByType = Record<string, number>;
 
-  addResolution(resolution: ConflictResolution) {
+/**
+ * Applies a prefix to a resource key
+ */
+export const applyConflictPrefix = (originalKey: string, prefix: string): string =>
+  `${prefix}${originalKey}`;
+
+/**
+ * Groups conflicts by resource type
+ */
+const groupConflictsByType = (resolutions: ConflictResolution[]): ConflictsByType =>
+  resolutions.reduce((acc, r) => {
+    acc[r.resourceType] = (acc[r.resourceType] || 0) + 1;
+    return acc;
+  }, {} as ConflictsByType);
+
+/**
+ * Formats a conflict type count line
+ */
+const formatTypeCountLine = ([type, count]: [string, number]): string =>
+  `  - ${type}: ${count}`;
+
+/**
+ * Formats a conflict resolution line
+ */
+const formatResolutionLine = (r: ConflictResolution): string =>
+  `  - ${r.resourceType}: "${r.originalKey}" → "${r.resolvedKey}"`;
+
+/**
+ * Creates the header section of the conflict report
+ */
+const createReportHeader = (totalCount: number): string[] => [
+  `\n${'='.repeat(60)}`,
+  `CONFLICT RESOLUTION REPORT`,
+  `${'='.repeat(60)}`,
+  `Total conflicts resolved: ${totalCount}`,
+  ``
+];
+
+/**
+ * Creates the by-type section of the conflict report
+ */
+const createByTypeSection = (byType: ConflictsByType): string[] => [
+  `Conflicts by resource type:`,
+  ...Object.entries(byType).map(formatTypeCountLine),
+  ``
+];
+
+/**
+ * Creates the resolutions list section
+ */
+const createResolutionsSection = (resolutions: ConflictResolution[]): string[] => [
+  `Conflict resolutions:`,
+  ...resolutions.map(formatResolutionLine)
+];
+
+/**
+ * Generates a conflict resolution report
+ */
+const generateConflictReport = (resolutions: ConflictResolution[]): string => {
+  if (resolutions.length === 0) {
+    return "No conflicts encountered during migration.";
+  }
+
+  const byType = groupConflictsByType(resolutions);
+  
+  const reportLines = [
+    ...createReportHeader(resolutions.length),
+    ...createByTypeSection(byType),
+    ...createResolutionsSection(resolutions),
+    `${'='.repeat(60)}\n`
+  ];
+
+  return reportLines.join('\n');
+};
+
+/**
+ * Tracks and reports on conflict resolutions during migration
+ * Uses immutable approach while maintaining interface compatibility
+ */
+export class ConflictTracker {
+  private readonly resolutions: ConflictResolution[] = [];
+
+  addResolution(resolution: ConflictResolution): void {
     this.resolutions.push(resolution);
   }
 
   getResolutions(): ConflictResolution[] {
-    return this.resolutions;
+    return [...this.resolutions];
   }
 
   hasConflicts(): boolean {
@@ -586,39 +704,6 @@ export class ConflictTracker {
   }
 
   getReport(): string {
-    if (!this.hasConflicts()) {
-      return "No conflicts encountered during migration.";
-    }
-
-    const lines = [
-      `\n${'='.repeat(60)}`,
-      `CONFLICT RESOLUTION REPORT`,
-      `${'='.repeat(60)}`,
-      `Total conflicts resolved: ${this.resolutions.length}`,
-      ``
-    ];
-
-    const byType = this.resolutions.reduce((acc, r) => {
-      acc[r.resourceType] = (acc[r.resourceType] || 0) + 1;
-      return acc;
-    }, {} as Record<string, number>);
-
-    lines.push(`Conflicts by resource type:`);
-    Object.entries(byType).forEach(([type, count]) => {
-      lines.push(`  - ${type}: ${count}`);
-    });
-    lines.push(``);
-
-    lines.push(`Conflict resolutions:`);
-    this.resolutions.forEach((r) => {
-      lines.push(`  - ${r.resourceType}: "${r.originalKey}" → "${r.resolvedKey}"`);
-    });
-
-    lines.push(`${'='.repeat(60)}\n`);
-    return lines.join('\n');
+    return generateConflictReport(this.resolutions);
   }
-}
-
-export function applyConflictPrefix(originalKey: string, prefix: string): string {
-  return `${prefix}${originalKey}`;
 }
