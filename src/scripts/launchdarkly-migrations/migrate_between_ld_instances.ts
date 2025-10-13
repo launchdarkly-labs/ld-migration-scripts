@@ -710,7 +710,7 @@ for (const [index, flagkey] of flagList.entries()) {
           resourceType: 'flag',
           conflictPrefix: inputArgs.conflictPrefix
         });
-      } else {
+  } else {
         // No prefix or second attempt - flag exists, proceed to update it
         flagCreated = true;
         createdFlagKey = flagKey;
@@ -812,120 +812,398 @@ projectJson.environments.items.forEach((env: any) => {
 //const envList: string[] = ["test"];
 
 
+// ==================== Semantic Patch Conversion ====================
+// Converts JSON Patch operations to LaunchDarkly's Semantic Patch format
+
+type VariationIdMapper = (index: number) => string | undefined;
+type SemanticInstruction = Record<string, any>;
+type ConversionResult = { instructions: SemanticInstruction[], skippedFields: string[] };
+
+/**
+ * Creates a variation ID mapper from flag variations
+ */
+const createVariationMapper = (variations: any[]): VariationIdMapper => 
+  (index: number) => variations[index]?._id;
+
+/**
+ * Extracts the environment field name from a JSON Patch path
+ */
+const extractFieldFromPath = (path: string): string | null => {
+  const pathParts = path.split('/');
+  const envIndex = pathParts.indexOf('environments');
+  return envIndex !== -1 ? pathParts[envIndex + 2] : null;
+};
+
+/**
+ * Converts rollout variations from indices to UUIDs
+ */
+const convertRolloutVariations = (rollout: any, getVariationId: VariationIdMapper) => ({
+  ...rollout,
+  variations: rollout.variations?.map((v: any) => ({
+    ...v,
+    variation: getVariationId(v.variation) || v.variation
+  }))
+});
+
+/**
+ * Converts a flag on/off patch to semantic instruction
+ */
+const convertOnOffInstruction = (value: boolean): SemanticInstruction => ({
+  kind: value ? 'turnFlagOn' : 'turnFlagOff'
+});
+
+/**
+ * Converts an off variation patch to semantic instruction
+ */
+const convertOffVariationInstruction = (
+  value: number, 
+  getVariationId: VariationIdMapper
+): SemanticInstruction | null => {
+  const variationId = getVariationId(value);
+  return variationId ? { kind: 'updateOffVariation', variationId } : null;
+};
+
+/**
+ * Converts a fallthrough patch to semantic instruction
+ */
+const convertFallthroughInstruction = (
+  value: any,
+  getVariationId: VariationIdMapper
+): SemanticInstruction | null => {
+  const instruction: SemanticInstruction = {
+    kind: 'updateFallthroughVariationOrRollout'
+  };
+
+  if (value.variation !== undefined) {
+    const variationId = getVariationId(value.variation);
+    if (variationId) {
+      instruction.variationId = variationId;
+    }
+  } else if (value.rollout) {
+    instruction.rollout = convertRolloutVariations(value.rollout, getVariationId);
+  }
+
+  return (instruction.variationId || instruction.rollout) ? instruction : null;
+};
+
+/**
+ * Converts a rule patch to semantic instruction
+ */
+const convertRuleInstruction = (
+  patch: any,
+  getVariationId: VariationIdMapper
+): SemanticInstruction | null => {
+  if (patch.op !== 'add' || !patch.path.includes('rules/-')) {
+    return null;
+  }
+
+  const instruction: SemanticInstruction = {
+    kind: 'addRule',
+    clauses: patch.value.clauses || [],
+    ...(patch.value.description && { description: patch.value.description })
+  };
+
+  if (patch.value.variation !== undefined) {
+    const variationId = getVariationId(patch.value.variation);
+    if (variationId) {
+      instruction.variationId = variationId;
+    }
+  } else if (patch.value.rollout) {
+    instruction.rollout = convertRolloutVariations(patch.value.rollout, getVariationId);
+  }
+
+  return instruction;
+};
+
+/**
+ * Converts a single JSON Patch to a semantic instruction
+ */
+const convertPatchToSemanticInstruction = (
+  patch: any,
+  getVariationId: VariationIdMapper
+): { instruction: SemanticInstruction | null, shouldSkip: boolean } => {
+  const field = extractFieldFromPath(patch.path);
+  if (!field) return { instruction: null, shouldSkip: false };
+
+  switch (field) {
+    case 'on':
+      return { instruction: convertOnOffInstruction(patch.value), shouldSkip: false };
+    case 'offVariation':
+      return { instruction: convertOffVariationInstruction(patch.value, getVariationId), shouldSkip: false };
+    case 'fallthrough':
+      return { instruction: convertFallthroughInstruction(patch.value, getVariationId), shouldSkip: false };
+    case 'rules':
+      return { instruction: convertRuleInstruction(patch, getVariationId), shouldSkip: false };
+    case 'trackEvents':
+      return { instruction: null, shouldSkip: true };
+    default:
+      return { instruction: null, shouldSkip: true };
+  }
+};
+
 /**
  * Convert JSON Patch format to Semantic Patch format for approval requests
- * LaunchDarkly approval requests require semantic patches with "kind" field
- * @param variations - Array of flag variations with _id fields to map indices to UUIDs
- * @returns Object with semantic patches and array of skipped field names
  */
-function convertToSemanticPatch(jsonPatches: any[], envKey: string, variations: any[]): { instructions: any[], skippedFields: string[] } {
-  const semanticPatches: any[] = [];
+const convertToSemanticPatch = (
+  jsonPatches: any[],
+  envKey: string,
+  variations: any[]
+): ConversionResult => {
+  const getVariationId = createVariationMapper(variations);
   const skippedFields = new Set<string>();
   
-  // Helper to convert variation index to UUID
-  const getVariationId = (index: number): string | undefined => {
-    return variations[index]?._id;
-  };
-  
-  for (const patch of jsonPatches) {
-    // Extract the field being modified (after environments/{envKey}/)
-    const pathParts = patch.path.split('/');
-    const envIndex = pathParts.indexOf('environments');
-    if (envIndex === -1) continue;
+  const instructions = jsonPatches.reduce<SemanticInstruction[]>((acc, patch) => {
+    const { instruction, shouldSkip } = convertPatchToSemanticInstruction(patch, getVariationId);
     
-    const field = pathParts[envIndex + 2]; // Skip 'environments' and envKey
-    
-    // Convert based on field type - only handle fields we know work
-    if (field === 'on') {
-      // Convert to turnFlagOn or turnFlagOff
-      semanticPatches.push({
-        kind: patch.value === true ? 'turnFlagOn' : 'turnFlagOff'
-      });
-    } else if (field === 'offVariation') {
-      // Update off variation - convert index to UUID
-      const variationId = getVariationId(patch.value);
-      if (variationId) {
-        semanticPatches.push({
-          kind: 'updateOffVariation',
-          variationId
-        });
-      }
-    } else if (field === 'fallthrough') {
-      // Update fallthrough - can be either a simple variation or a rollout
-      const instruction: any = {
-        kind: 'updateFallthroughVariationOrRollout'
-      };
-      
-      if (patch.value.variation !== undefined) {
-        // Simple variation - convert index to UUID
-        const variationId = getVariationId(patch.value.variation);
-        if (variationId) {
-          instruction.variationId = variationId;
-        }
-      } else if (patch.value.rollout) {
-        // Rollout with bucketBy and variations - need to convert variation indices in rollout
-        instruction.rollout = {
-          ...patch.value.rollout,
-          variations: patch.value.rollout.variations?.map((v: any) => ({
-            ...v,
-            variation: getVariationId(v.variation) || v.variation
-          }))
-        };
-      }
-      
-      // Only add if we have either variationId or rollout
-      if (instruction.variationId || instruction.rollout) {
-        semanticPatches.push(instruction);
-      }
-    } else if (field === 'rules') {
-      // For rules, check if it's an add operation
-      if (patch.op === 'add' && patch.path.includes('rules/-')) {
-        const ruleInstruction: any = {
-          kind: 'addRule',
-          clauses: patch.value.clauses || [],
-          ...(patch.value.description && { description: patch.value.description })
-        };
-        
-        // Rules can have either a variation or a rollout
-        if (patch.value.variation !== undefined) {
-          const variationId = getVariationId(patch.value.variation);
-          if (variationId) {
-            ruleInstruction.variationId = variationId;
-          }
-        } else if (patch.value.rollout) {
-          // Convert variation indices in rollout
-          ruleInstruction.rollout = {
-            ...patch.value.rollout,
-            variations: patch.value.rollout.variations?.map((v: any) => ({
-              ...v,
-              variation: getVariationId(v.variation) || v.variation
-            }))
-          };
-        }
-        
-        semanticPatches.push(ruleInstruction);
-      }
-    } else if (field === 'trackEvents') {
-      // Skip trackEvents - not supported in approval requests
-      skippedFields.add(field);
-    } else {
-      // Skip fields we can't convert (targets, contextTargets, prerequisites, etc.)
-      // These will need to be set manually after approval
-      skippedFields.add(field);
+    if (shouldSkip) {
+      const field = extractFieldFromPath(patch.path);
+      if (field) skippedFields.add(field);
     }
+    
+    if (instruction) {
+      acc.push(instruction);
+    }
+    
+    return acc;
+  }, []);
+
+  if (skippedFields.size > 0) {
+    console.log(Colors.gray(
+      `\t    ⓘ Skipped fields (set manually after approval): ${Array.from(skippedFields).join(', ')}`
+    ));
+  }
+
+  return {
+    instructions,
+    skippedFields: Array.from(skippedFields)
+  };
+};
+
+// ==================== Approval Request Management ====================
+
+type ApprovalRequest = { _id: string; status: string };
+type ApprovalRequestBody = {
+  description: string;
+  instructions: SemanticInstruction[];
+  notifyMemberIds?: string[];
+};
+
+/**
+ * Checks if an approval request is active (should prevent duplicate creation)
+ */
+const isActiveApprovalRequest = (request: ApprovalRequest): boolean => {
+  const activeStatuses = ['pending', 'scheduled', 'failed'];
+  return activeStatuses.includes(request.status);
+};
+
+/**
+ * Finds active approval requests for a flag environment
+ */
+const findActiveApprovalRequests = async (
+  flagKey: string,
+  env: string
+): Promise<ApprovalRequest[]> => {
+  const listApprovalsReq = ldAPIRequest(
+    apiKey,
+    domain,
+    `projects/${inputArgs.projKeyDest}/flags/${flagKey}/environments/${env}/approval-requests`
+  );
+  
+  const response = await rateLimitRequest(listApprovalsReq, 'approval-requests');
+  
+  if (response.status !== 200) {
+    return [];
   }
   
-  if (skippedFields.size > 0) {
-    console.log(Colors.gray(`\t    ⓘ Skipped fields (set manually after approval): ${Array.from(skippedFields).join(', ')}`));
+  const data = await response.json();
+  return (data.items || []).filter(isActiveApprovalRequest);
+};
+
+/**
+ * Determines who should be notified about an approval request
+ * Priority: 1. Flag maintainer, 2. Authenticated member, 3. No one
+ */
+const determineNotificationRecipients = (
+  maintainerId: string | null,
+  fallbackMemberId: string | null
+): { recipients: string[], warning: string | null } => {
+  if (maintainerId) {
+    return { recipients: [maintainerId], warning: null };
+  }
+  
+  if (fallbackMemberId) {
+    return {
+      recipients: [fallbackMemberId],
+      warning: 'No maintainer mapped, notifying creating member'
+    };
   }
   
   return {
-    instructions: semanticPatches,
-    skippedFields: Array.from(skippedFields)
+    recipients: [],
+    warning: 'No one to notify (service token used and no maintainer)'
   };
-}
+};
 
-async function makePatchCall(flagKey: string, patchReq: any[], env: string, maintainerId: string | null, fallbackMemberId: string | null, variations: any[]) {
+/**
+ * Creates an approval request body
+ */
+const createApprovalRequestBody = (
+  flagKey: string,
+  env: string,
+  instructions: SemanticInstruction[],
+  maintainerId: string | null,
+  fallbackMemberId: string | null
+): { body: ApprovalRequestBody, warning: string | null } => {
+  const { recipients, warning } = determineNotificationRecipients(maintainerId, fallbackMemberId);
+  
+  const body: ApprovalRequestBody = {
+    description: `Migration of flag "${flagKey}" environment "${env}" from project "${inputArgs.projKeySource}"`,
+    instructions,
+  };
+  
+  if (recipients.length > 0) {
+    body.notifyMemberIds = recipients;
+  }
+  
+  return { body, warning };
+};
+
+/**
+ * Tracks an approval request and its skipped fields
+ */
+const trackApprovalRequest = (
+  flagKey: string,
+  env: string,
+  skippedFields: string[]
+): void => {
+  approvalRequestsCreated.push({ flag: flagKey, env, skippedFields });
+  
+  if (skippedFields.length > 0) {
+    if (!skippedFieldsByFlag.has(flagKey)) {
+      skippedFieldsByFlag.set(flagKey, new Set());
+    }
+    const flagSkipped = skippedFieldsByFlag.get(flagKey)!;
+    skippedFields.forEach(field => flagSkipped.add(field));
+  }
+};
+
+/**
+ * Handles approval request creation when direct patch fails with 405
+ */
+const handleApprovalWorkflow = async (
+  flagKey: string,
+  env: string,
+  patchReq: any[],
+  maintainerId: string | null,
+  fallbackMemberId: string | null,
+  variations: any[]
+): Promise<void> => {
+  console.log(Colors.cyan(`\t  → ${env}: Requires approval, checking for existing requests...`));
+  
+  try {
+    // Check for existing active approval requests
+    const activeApprovals = await findActiveApprovalRequests(flagKey, env);
+    
+    if (activeApprovals.length > 0) {
+      const approval = activeApprovals[0];
+      console.log(Colors.yellow(
+        `\t  ⚠ ${env}: Existing approval request found (ID: ${approval._id}, status: ${approval.status})`
+      ));
+      console.log(Colors.gray(`\t    Skipping creation to avoid duplicates`));
+      
+      trackApprovalRequest(flagKey, env, []); // Don't know existing request's skipped fields
+      return;
+    }
+    
+    // Convert patches to semantic instructions
+    console.log(Colors.gray(`\t    No existing requests, creating new approval request...`));
+    const conversionResult = convertToSemanticPatch(patchReq, env, variations);
+    
+    console.log(Colors.gray(
+      `\t    Converting ${patchReq.length} JSON patches → ${conversionResult.instructions.length} semantic instructions`
+    ));
+    
+    if (conversionResult.instructions.length === 0) {
+      console.log(Colors.yellow(`\t  ⚠ ${env}: No valid instructions to approve, skipping`));
+      return;
+    }
+    
+    // Create approval request body
+    const { body, warning } = createApprovalRequestBody(
+      flagKey,
+      env,
+      conversionResult.instructions,
+      maintainerId,
+      fallbackMemberId
+    );
+    
+    if (warning) {
+      console.log(Colors.gray(`\t    ${warning}`));
+    }
+    
+    // Submit approval request
+    const approvalResp = await rateLimitRequest(
+      ldAPIPostRequest(
+        apiKey,
+        domain,
+        `projects/${inputArgs.projKeyDest}/flags/${flagKey}/environments/${env}/approval-requests`,
+        body
+      ),
+      'approval-requests'
+    );
+    
+    if (approvalResp.status >= 200 && approvalResp.status < 300) {
+      console.log(Colors.green(`\t  ✓ ${env}: Approval request created`));
+      trackApprovalRequest(flagKey, env, conversionResult.skippedFields);
+    } else {
+      const errorBody = await approvalResp.text();
+      console.log(Colors.yellow(
+        `\t  ⚠ ${env}: Failed to create approval request (status: ${approvalResp.status})`
+      ));
+      console.log(Colors.gray(`\t    API response: ${errorBody}`));
+      flagsDoubleCheck.push(flagKey);
+    }
+  } catch (error) {
+    console.log(Colors.red(`\t  ✗ ${env}: Error creating approval request`));
+    flagsDoubleCheck.push(flagKey);
+  }
+};
+
+/**
+ * Handles the result of a patch request
+ */
+const handlePatchResponse = async (
+  status: number,
+  response: Response,
+  flagKey: string,
+  env: string
+): Promise<void> => {
+  if (status >= 400) {
+    flagsDoubleCheck.push(flagKey);
+    console.log(Colors.red(`\t  ✗ ${env}: Error ${status}`));
+    
+    if (status === 400) {
+      const errorBody = await response.text();
+      console.log(Colors.red(`\t    ${errorBody}`));
+    }
+  } else if (status > 201) {
+    console.log(Colors.yellow(`\t  ⚠ ${env}: Status ${status}`));
+  }
+  // Success (200-201) - no logging needed for each env
+};
+
+/**
+ * Makes a patch call to update flag environment configuration
+ * Handles approval workflows when direct patching requires approval (405)
+ */
+async function makePatchCall(
+  flagKey: string,
+  patchReq: any[],
+  env: string,
+  maintainerId: string | null,
+  fallbackMemberId: string | null,
+  variations: any[]
+) {
   const patchFlagReq = await rateLimitRequest(
     ldAPIPatchRequest(
       apiKey,
@@ -935,194 +1213,166 @@ async function makePatchCall(flagKey: string, patchReq: any[], env: string, main
     ),
     'flags'
   );
-  const flagPatchStatus = await patchFlagReq.status;
   
-  // 405 means environment requires approval workflow
+  const flagPatchStatus = patchFlagReq.status;
+  
   if (flagPatchStatus === 405) {
-    console.log(Colors.cyan(`\t  → ${env}: Requires approval, checking for existing requests...`));
-    
-    try {
-      // First, check if there are existing pending approval requests
-      const listApprovalsReq = ldAPIRequest(
-        apiKey,
-        domain,
-        `projects/${inputArgs.projKeyDest}/flags/${flagKey}/environments/${env}/approval-requests`
-      );
-      const listApprovalsResp = await rateLimitRequest(listApprovalsReq, 'approval-requests');
-      
-      if (listApprovalsResp.status === 200) {
-        const approvalsData = await listApprovalsResp.json();
-        // Check if there are any active approval requests (pending, scheduled, or failed/declined)
-        // We check these to avoid creating duplicates if a previous migration created one
-        const activeApprovals = approvalsData.items?.filter((req: any) => 
-          req.status === 'pending' || req.status === 'scheduled' || req.status === 'failed'
-        ) || [];
-        
-        if (activeApprovals.length > 0) {
-          const approval = activeApprovals[0];
-          console.log(Colors.yellow(`\t  ⚠ ${env}: Existing approval request found (ID: ${approval._id}, status: ${approval.status})`));
-          console.log(Colors.gray(`\t    Skipping creation to avoid duplicates`));
-          
-          // Still track this as needing approval, but note it already exists
-          approvalRequestsCreated.push({
-            flag: flagKey,
-            env: env,
-            skippedFields: [] // We don't know what fields the existing request covers
-          });
-          
-          return flagsDoubleCheck;
-        }
-      }
-      
-      // No existing request, proceed to create one
-      console.log(Colors.gray(`\t    No existing requests, creating new approval request...`));
-      
-      // Convert JSON Patch format to Semantic Patch format for approval requests
-      const conversionResult = convertToSemanticPatch(patchReq, env, variations);
-      
-      console.log(Colors.gray(`\t    Converting ${patchReq.length} JSON patches → ${conversionResult.instructions.length} semantic instructions`));
-      
-      if (conversionResult.instructions.length === 0) {
-        console.log(Colors.yellow(`\t  ⚠ ${env}: No valid instructions to approve, skipping`));
-        return flagsDoubleCheck;
-      }
-      
-      const approvalRequestBody: any = {
-        description: `Migration of flag "${flagKey}" environment "${env}" from project "${inputArgs.projKeySource}"`,
-        instructions: conversionResult.instructions,
-      };
-      
-      // Determine who to notify about the approval request
-      // Priority: 1. Flag maintainer, 2. Current authenticated member, 3. No one (but warn)
-      if (maintainerId) {
-        approvalRequestBody.notifyMemberIds = [maintainerId];
-      } else if (fallbackMemberId) {
-        approvalRequestBody.notifyMemberIds = [fallbackMemberId];
-        console.log(Colors.gray(`\t    No maintainer mapped, notifying creating member`));
-      } else {
-        console.log(Colors.yellow(`\t    ⚠ No one to notify (service token used and no maintainer)`));
-      }
-      
-      // Correct endpoint format: /projects/{projectKey}/flags/{flagKey}/environments/{envKey}/approval-requests
-      const approvalResp = await rateLimitRequest(
-        ldAPIPostRequest(
-          apiKey,
-          domain,
-          `projects/${inputArgs.projKeyDest}/flags/${flagKey}/environments/${env}/approval-requests`,
-          approvalRequestBody
-        ),
-        'approval-requests'
-      );
-      
-      if (approvalResp.status >= 200 && approvalResp.status < 300) {
-        console.log(Colors.green(`\t  ✓ ${env}: Approval request created`));
-        
-        // Track this approval request
-        approvalRequestsCreated.push({
-          flag: flagKey,
-          env: env,
-          skippedFields: conversionResult.skippedFields
-        });
-        
-        // Track skipped fields for this flag
-        if (conversionResult.skippedFields.length > 0) {
-          if (!skippedFieldsByFlag.has(flagKey)) {
-            skippedFieldsByFlag.set(flagKey, new Set());
-          }
-          const flagSkipped = skippedFieldsByFlag.get(flagKey)!;
-          conversionResult.skippedFields.forEach(f => flagSkipped.add(f));
-        }
-      } else {
-        const errorBody = await approvalResp.text();
-        console.log(Colors.yellow(`\t  ⚠ ${env}: Failed to create approval request (status: ${approvalResp.status})`));
-        console.log(Colors.gray(`\t    API response: ${errorBody}`));
-        flagsDoubleCheck.push(flagKey);
-      }
-    } catch (error) {
-      console.log(Colors.red(`\t  ✗ ${env}: Error creating approval request`));
-      flagsDoubleCheck.push(flagKey);
-    }
-  } else if (flagPatchStatus >= 400) {
-    // Other errors (400, 403, 404, etc.)
-    flagsDoubleCheck.push(flagKey);
-    console.log(Colors.red(`\t  ✗ ${env}: Error ${flagPatchStatus}`));
-    if (flagPatchStatus == 400) {
-      const errorBody = await patchFlagReq.text();
-      console.log(Colors.red(`\t    ${errorBody}`));
-    }
-  } else if (flagPatchStatus > 201) {
-    console.log(Colors.yellow(`\t  ⚠ ${env}: Status ${flagPatchStatus}`));
+    // Environment requires approval workflow
+    await handleApprovalWorkflow(
+      flagKey,
+      env,
+      patchReq,
+      maintainerId,
+      fallbackMemberId,
+      variations
+    );
+  } else {
+    await handlePatchResponse(flagPatchStatus, patchFlagReq, flagKey, env);
   }
-  // Success (200-201) - no logging needed for each env
 
   return flagsDoubleCheck;
 }
 
-// Print final summary report
-console.log(Colors.blue("\n\n" + "=".repeat(70)));
-console.log(Colors.blue("📊 MIGRATION SUMMARY"));
-console.log(Colors.blue("=".repeat(70)));
+// ==================== Summary Report ====================
 
-// 1. Approval Requests
-if (approvalRequestsCreated.length > 0) {
+type ApprovalSummary = { flag: string; env: string; skippedFields: string[] };
+
+/**
+ * Groups approval requests by flag
+ */
+const groupApprovalsByFlag = (
+  approvals: ApprovalSummary[]
+): Map<string, string[]> => {
+  return approvals.reduce((map, req) => {
+    if (!map.has(req.flag)) {
+      map.set(req.flag, []);
+    }
+    map.get(req.flag)!.push(req.env);
+    return map;
+  }, new Map<string, string[]>());
+};
+
+/**
+ * Prints approval requests section
+ */
+const printApprovalRequestsSection = (approvals: ApprovalSummary[]): void => {
+  if (approvals.length === 0) return;
+  
   console.log(Colors.yellow("\n⏳ APPROVAL REQUESTS CREATED"));
   console.log(Colors.yellow("The following flags require approval before changes take effect:\n"));
   
-  // Group by flag
-  const approvalsByFlag = new Map<string, string[]>();
-  approvalRequestsCreated.forEach(req => {
-    if (!approvalsByFlag.has(req.flag)) {
-      approvalsByFlag.set(req.flag, []);
-    }
-    approvalsByFlag.get(req.flag)!.push(req.env);
-  });
+  const approvalsByFlag = groupApprovalsByFlag(approvals);
   
   approvalsByFlag.forEach((envs, flag) => {
     console.log(Colors.cyan(`  📋 ${flag}`));
     console.log(Colors.gray(`     Environments: ${envs.join(', ')}`));
   });
   
-  console.log(Colors.yellow(`\n  Total: ${approvalRequestsCreated.length} approval request(s) across ${approvalsByFlag.size} flag(s)`));
+  console.log(Colors.yellow(
+    `\n  Total: ${approvals.length} approval request(s) across ${approvalsByFlag.size} flag(s)`
+  ));
   console.log(Colors.gray(`  → Review and approve these in the LaunchDarkly UI`));
-}
+};
 
-// 2. Non-migrated settings
-if (skippedFieldsByFlag.size > 0) {
+/**
+ * Prints non-migrated settings section
+ */
+const printNonMigratedSettingsSection = (
+  skippedFields: Map<string, Set<string>>
+): void => {
+  if (skippedFields.size === 0) return;
+  
   console.log(Colors.yellow("\n⚠️  NON-MIGRATED SETTINGS"));
   console.log(Colors.yellow("The following fields could not be migrated via approval requests:"));
   console.log(Colors.gray("These will need to be set manually after approvals are applied.\n"));
   
-  skippedFieldsByFlag.forEach((fields, flag) => {
+  skippedFields.forEach((fields, flag) => {
     console.log(Colors.cyan(`  📋 ${flag}`));
     console.log(Colors.gray(`     Fields: ${Array.from(fields).join(', ')}`));
   });
   
-  console.log(Colors.yellow(`\n  Total: ${skippedFieldsByFlag.size} flag(s) with non-migrated settings`));
-}
+  console.log(Colors.yellow(`\n  Total: ${skippedFields.size} flag(s) with non-migrated settings`));
+};
 
-// 3. Errors/Warnings
-if (flagsDoubleCheck.length > 0) {
+/**
+ * Prints flags with errors section
+ */
+const printErrorsSection = (flagsWithErrors: string[]): void => {
+  if (flagsWithErrors.length === 0) return;
+  
   console.log(Colors.red("\n❌ FLAGS WITH ERRORS"));
   console.log(Colors.red("The following flags encountered errors during migration:\n"));
   
-  flagsDoubleCheck.forEach((flag) => {
+  flagsWithErrors.forEach((flag) => {
     console.log(Colors.red(`  ✗ ${flag}`));
   });
   
-  console.log(Colors.red(`\n  Total: ${flagsDoubleCheck.length} flag(s) with errors`));
+  console.log(Colors.red(`\n  Total: ${flagsWithErrors.length} flag(s) with errors`));
   console.log(Colors.gray(`  → Review these flags manually`));
-}
+};
 
-// 4. Conflict resolution report
-console.log(conflictTracker.getReport());
+/**
+ * Determines the final migration status message
+ */
+const getMigrationStatusMessage = (
+  approvalsCount: number,
+  errorsCount: number
+): { message: string; color: (text: string) => string } => {
+  if (approvalsCount > 0) {
+    return {
+      message: `✓ Migration complete with ${approvalsCount} pending approval(s)`,
+      color: Colors.cyan
+    };
+  }
+  
+  if (errorsCount > 0) {
+    return {
+      message: `⚠ Migration complete with ${errorsCount} error(s)`,
+      color: Colors.yellow
+    };
+  }
+  
+  return {
+    message: "✓ Migration complete successfully",
+    color: Colors.green
+  };
+};
 
-// Final summary line
-console.log(Colors.blue("\n" + "=".repeat(70)));
-if (approvalRequestsCreated.length > 0) {
-  console.log(Colors.cyan(`✓ Migration complete with ${approvalRequestsCreated.length} pending approval(s)`));
-} else if (flagsDoubleCheck.length > 0) {
-  console.log(Colors.yellow(`⚠ Migration complete with ${flagsDoubleCheck.length} error(s)`));
-} else {
-  console.log(Colors.green("✓ Migration complete successfully"));
-}
-console.log(Colors.blue("=".repeat(70) + "\n"));
+/**
+ * Prints the complete migration summary report
+ */
+const printMigrationSummary = (
+  approvals: ApprovalSummary[],
+  skippedFields: Map<string, Set<string>>,
+  flagsWithErrors: string[],
+  conflictReport: string
+): void => {
+  const divider = "=".repeat(70);
+  
+  console.log(Colors.blue(`\n\n${divider}`));
+  console.log(Colors.blue("📊 MIGRATION SUMMARY"));
+  console.log(Colors.blue(divider));
+  
+  printApprovalRequestsSection(approvals);
+  printNonMigratedSettingsSection(skippedFields);
+  printErrorsSection(flagsWithErrors);
+  
+  console.log(conflictReport);
+  
+  const { message, color } = getMigrationStatusMessage(
+    approvals.length,
+    flagsWithErrors.length
+  );
+  
+  console.log(Colors.blue(`\n${divider}`));
+  console.log(color(message));
+  console.log(Colors.blue(`${divider}\n`));
+};
+
+// Print the migration summary
+printMigrationSummary(
+  approvalRequestsCreated,
+  skippedFieldsByFlag,
+  flagsDoubleCheck,
+  conflictTracker.getReport()
+);
