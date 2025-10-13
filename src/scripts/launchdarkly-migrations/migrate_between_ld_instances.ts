@@ -632,222 +632,6 @@ if (inputArgs.migrateSegments) {
   console.log(Colors.gray("  Segment migration disabled, skipping..."));
 }
 
-console.log(Colors.blue("\n🚩 Starting flag migration..."));
-const flagsDoubleCheck: string[] = [];
-const approvalRequestsCreated: Array<{flag: string, env: string, skippedFields: string[]}> = [];
-const skippedFieldsByFlag: Map<string, Set<string>> = new Map();
-
-interface Variation {
-  _id: string;
-  value: any;
-  name?: string;
-  description?: string;
-}
-
-// Creating Global Flags //
-console.log(Colors.blue(`\n🏁 Creating ${flagList.length} flags in destination project...\n`));
-for (const [index, flagkey] of flagList.entries()) {
-  // Read flag
-  console.log(Colors.cyan(`\n[${index + 1}/${flagList.length}] Processing flag: ${flagkey}`));
-
-  const flag = await getJson(
-    `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/flags/${flagkey}.json`,
-  );
-
-  if (!flag) {
-    console.log(Colors.yellow(`\tWarning: Could not load flag data for ${flagkey}, skipping...`));
-    continue;
-  }
-
-  if (!flag.variations) {
-    console.log(Colors.yellow(`\t⚠ No variations, skipping`));
-    continue;
-  }
-  
-  if (!flag.key || flag.key.trim() === '') {
-    console.log(Colors.red(`\t✗ ERROR: Flag data has empty key! Expected: "${flagkey}"`));
-    continue;
-  }
-
-  const newVariations = flag.variations.map(({ _id, ...rest }: Variation) => rest);
-
-  let flagKey = flag.key;
-  let flagName = flag.name;
-  let attemptCount = 0;
-  let flagCreated = false;
-  let createdFlagKey = flag.key;
-  let flagMaintainerId: string | null = null;
-
-  while (!flagCreated && attemptCount < 2) {
-    attemptCount++;
-
-  const newFlag: any = {
-      key: flagKey,
-      name: flagName,
-    variations: newVariations,
-    temporary: flag.temporary,
-    tags: flag.tags,
-    description: flag.description,
-    maintainerId: null  // Set to null by default to prevent API from assigning token owner
-  };
-
-  // Only assign maintainerId if explicitly requested and mapping exists
-  if (inputArgs.assignMaintainerIds) {
-      if (flag.maintainerId && maintainerMapping[flag.maintainerId]) {
-        newFlag.maintainerId = maintainerMapping[flag.maintainerId];
-        flagMaintainerId = newFlag.maintainerId;
-      } else {
-        newFlag.maintainerId = null;
-      }
-    } else {
-      newFlag.maintainerId = null;
-  }
-
-  if (flag.clientSideAvailability) {
-    newFlag.clientSideAvailability = flag.clientSideAvailability;
-  } else if (flag.includeInSnippet) {
-    newFlag.includeInSnippet = flag.includeInSnippet;
-  }
-  if (flag.customProperties) {
-    newFlag.customProperties = flag.customProperties;
-  }
-
-  if (flag.defaults) {
-    newFlag.defaults = flag.defaults;
-  }
-
-    // Collect view associations for flag creation
-    // API supports "viewKeys" (plural, array) field during creation (NO beta header needed)
-    const viewKeys: string[] = [];
-    
-    // Add target view if specified (highest priority)
-    if (inputArgs.targetView) {
-      viewKeys.push(inputArgs.targetView);
-    }
-    
-    // Add source flag's view associations (if not already added)
-    if (flag.viewKeys && Array.isArray(flag.viewKeys)) {
-      flag.viewKeys.forEach((viewKey: string) => {
-        if (!viewKeys.includes(viewKey)) {
-          viewKeys.push(viewKey);
-        }
-      });
-    }
-    
-    // Add viewKeys to newFlag if any views specified
-    if (viewKeys.length > 0) {
-      (newFlag as any).viewKeys = viewKeys;
-    }
-    
-  const flagResp = await dryRunAwarePost(
-    inputArgs.dryRun || false,
-      apiKey,
-      domain,
-      `flags/${inputArgs.projKeyDest}`,
-      newFlag,
-    false, // Standard API (no beta header needed for viewKeys)
-    'flags'
-  );
-
-  if (flagResp.status == 200 || flagResp.status == 201) {
-      flagCreated = true;
-      createdFlagKey = flagKey;
-      if (viewKeys.length > 0) {
-        console.log(Colors.green(`\t✓ Created and linked to view(s): ${viewKeys.join(', ')}`));
-      } else {
-        console.log(Colors.green(`\t✓ Created`));
-      }
-    } else if (flagResp.status === 409) {
-      // Flag already exists
-      if (inputArgs.conflictPrefix && attemptCount === 1) {
-        // Conflict detected with prefix enabled, retry with prefix
-        console.log(Colors.yellow(`\t⚠ Exists, retrying with prefix "${inputArgs.conflictPrefix}"`));
-        flagKey = applyConflictPrefix(flag.key, inputArgs.conflictPrefix);
-        flagName = `${inputArgs.conflictPrefix}${flag.name}`;
-        
-        conflictTracker.addResolution({
-          originalKey: flag.key,
-          resolvedKey: flagKey,
-          resourceType: 'flag',
-          conflictPrefix: inputArgs.conflictPrefix
-        });
-  } else {
-        // No prefix or second attempt - flag exists, proceed to update it
-        flagCreated = true;
-        createdFlagKey = flagKey;
-        console.log(Colors.yellow(`\t⚠ Exists, updating environments...`));
-        
-        // Note: We don't link to views for existing flags to avoid overwriting existing view associations
-        
-        break; // Exit retry loop and proceed to patching
-    }
-  } else {
-      // Real error
-      console.log(Colors.red(`\t✗ Error ${flagResp.status}`));
-    const errorText = await flagResp.text();
-      console.log(Colors.red(`\t  ${errorText}`));
-      break; // Exit loop on non-conflict errors
-    }
-  }
-
-  // Add flag env settings - use the potentially updated flag key
-  if (flagCreated) {
-  for (const env of envkeys) {
-    if (!flag.environments || !flag.environments[env]) {
-      continue;
-    }
-
-      // Determine destination environment key (mapped or original)
-      const destEnvKey = inputArgs.envMap && envMapping[env] ? envMapping[env] : env;
-
-    const patchReq: any[] = [];
-    const flagEnvData = flag.environments[env];
-    const parsedData: Record<string, string> = Object.keys(flagEnvData)
-      .filter((key) => !key.includes("salt"))
-      .filter((key) => !key.includes("version"))
-      .filter((key) => !key.includes("lastModified"))
-      .filter((key) => !key.includes("_environmentName"))
-      .filter((key) => !key.includes("_site"))
-      .filter((key) => !key.includes("_summary"))
-      .filter((key) => !key.includes("sel"))
-      .filter((key) => !key.includes("access"))
-      .filter((key) => !key.includes("_debugEventsUntilDate"))
-      .filter((key) => !key.startsWith("_"))
-      .filter((key) => !key.startsWith("-"))
-      .reduce((cur, key) => {
-        return Object.assign(cur, { [key]: flagEnvData[key] });
-      }, {});
-
-    Object.keys(parsedData)
-      .map((key) => {
-        if (key == "rules") {
-            patchReq.push(...buildRules(parsedData[key] as unknown as Rule[], "environments/" + destEnvKey));
-        } else {
-          patchReq.push(
-            buildPatch(
-                `environments/${destEnvKey}/${key}`,
-              "replace",
-              parsedData[key],
-            ),
-          );
-        }
-      });
-      await makePatchCall(createdFlagKey, patchReq, destEnvKey, flagMaintainerId, currentMemberId, flag.variations);
-    }
-  }
-}
-
-// Send one patch per Flag for all Environments //
-const envList: string[] = [];
-projectJson.environments.items.forEach((env: any) => {
-  envList.push(env.key);
-});
-
-// The # of patch calls is the # of environments * flags,
-// if you need to limit run time, a good place to start is to only patch the critical environments in a shorter list
-//const envList: string[] = ["test"];
-
-
 // ==================== Semantic Patch Conversion ====================
 // Converts JSON Patch operations to LaunchDarkly's Semantic Patch format
 
@@ -1232,14 +1016,14 @@ const handlePatchResponse = async (
  * Makes a patch call to update flag environment configuration
  * Handles approval workflows when direct patching requires approval (405)
  */
-async function makePatchCall(
+const makePatchCall = async (
   flagKey: string,
   patchReq: any[],
   env: string,
   maintainerId: string | null,
   fallbackMemberId: string | null,
   variations: any[]
-) {
+): Promise<string[]> => {
   const patchFlagReq = await dryRunAwarePatch(
     inputArgs.dryRun || false,
       apiKey,
@@ -1267,7 +1051,244 @@ async function makePatchCall(
   }
 
   return flagsDoubleCheck;
+};
+
+console.log(Colors.blue("\n🚩 Starting flag migration..."));
+const flagsDoubleCheck: string[] = [];
+const approvalRequestsCreated: Array<{flag: string, env: string, skippedFields: string[]}> = [];
+const skippedFieldsByFlag: Map<string, Set<string>> = new Map();
+
+interface Variation {
+  _id: string;
+  value: any;
+  name?: string;
+  description?: string;
 }
+
+// Creating Global Flags //
+console.log(Colors.blue(`\n🏁 Creating ${flagList.length} flags in destination project...\n`));
+for (const [index, flagkey] of flagList.entries()) {
+  // Read flag
+  console.log(Colors.cyan(`\n[${index + 1}/${flagList.length}] Processing flag: ${flagkey}`));
+
+  const flag = await getJson(
+    `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/flags/${flagkey}.json`,
+  );
+
+  if (!flag) {
+    console.log(Colors.yellow(`\tWarning: Could not load flag data for ${flagkey}, skipping...`));
+    continue;
+  }
+
+  if (!flag.variations) {
+    console.log(Colors.yellow(`\t⚠ No variations, skipping`));
+    continue;
+  }
+  
+  if (!flag.key || flag.key.trim() === '') {
+    console.log(Colors.red(`\t✗ ERROR: Flag data has empty key! Expected: "${flagkey}"`));
+    continue;
+  }
+
+  const newVariations = flag.variations.map(({ _id, ...rest }: Variation) => rest);
+
+  let flagKey = flag.key;
+  let flagName = flag.name;
+  let attemptCount = 0;
+  let flagCreated = false;
+  let createdFlagKey = flag.key;
+  let flagMaintainerId: string | null = null;
+
+  while (!flagCreated && attemptCount < 2) {
+    attemptCount++;
+
+  const newFlag: any = {
+      key: flagKey,
+      name: flagName,
+    variations: newVariations,
+    temporary: flag.temporary,
+    tags: flag.tags,
+    description: flag.description,
+    maintainerId: null  // Set to null by default to prevent API from assigning token owner
+  };
+
+  // Only assign maintainerId if explicitly requested and mapping exists
+  if (inputArgs.assignMaintainerIds) {
+      if (flag.maintainerId && maintainerMapping[flag.maintainerId]) {
+        newFlag.maintainerId = maintainerMapping[flag.maintainerId];
+        flagMaintainerId = newFlag.maintainerId;
+      } else {
+        newFlag.maintainerId = null;
+      }
+    } else {
+      newFlag.maintainerId = null;
+  }
+
+  if (flag.clientSideAvailability) {
+    newFlag.clientSideAvailability = flag.clientSideAvailability;
+  } else if (flag.includeInSnippet) {
+    newFlag.includeInSnippet = flag.includeInSnippet;
+  }
+  if (flag.customProperties) {
+    newFlag.customProperties = flag.customProperties;
+  }
+
+  if (flag.defaults) {
+    newFlag.defaults = flag.defaults;
+  }
+
+    // Collect view associations for flag creation
+    // API supports "viewKeys" (plural, array) field during creation (NO beta header needed)
+    const viewKeys: string[] = [];
+    
+    // Add target view if specified (highest priority)
+    if (inputArgs.targetView) {
+      viewKeys.push(inputArgs.targetView);
+    }
+    
+    // Add source flag's view associations (if not already added)
+    if (flag.viewKeys && Array.isArray(flag.viewKeys)) {
+      flag.viewKeys.forEach((viewKey: string) => {
+        if (!viewKeys.includes(viewKey)) {
+          viewKeys.push(viewKey);
+        }
+      });
+    }
+    
+    // Add viewKeys to newFlag if any views specified
+    if (viewKeys.length > 0) {
+      (newFlag as any).viewKeys = viewKeys;
+    }
+    
+  const flagResp = await dryRunAwarePost(
+    inputArgs.dryRun || false,
+      apiKey,
+      domain,
+      `flags/${inputArgs.projKeyDest}`,
+      newFlag,
+    false, // Standard API (no beta header needed for viewKeys)
+    'flags'
+  );
+
+  if (flagResp.status == 200 || flagResp.status == 201) {
+      flagCreated = true;
+      createdFlagKey = flagKey;
+      if (viewKeys.length > 0) {
+        console.log(Colors.green(`\t✓ Created and linked to view(s): ${viewKeys.join(', ')}`));
+      } else {
+        console.log(Colors.green(`\t✓ Created`));
+      }
+    } else if (flagResp.status === 409) {
+      // Flag already exists
+      if (inputArgs.conflictPrefix && attemptCount === 1) {
+        // Conflict detected with prefix enabled, retry with prefix
+        console.log(Colors.yellow(`\t⚠ Exists, retrying with prefix "${inputArgs.conflictPrefix}"`));
+        flagKey = applyConflictPrefix(flag.key, inputArgs.conflictPrefix);
+        flagName = `${inputArgs.conflictPrefix}${flag.name}`;
+        
+        conflictTracker.addResolution({
+          originalKey: flag.key,
+          resolvedKey: flagKey,
+          resourceType: 'flag',
+          conflictPrefix: inputArgs.conflictPrefix
+        });
+  } else {
+        // No prefix or second attempt - flag exists, proceed to update it
+        flagCreated = true;
+        createdFlagKey = flagKey;
+        console.log(Colors.yellow(`\t⚠ Exists, updating environments...`));
+        
+        // Note: We don't link to views for existing flags to avoid overwriting existing view associations
+        
+        break; // Exit retry loop and proceed to patching
+    }
+  } else {
+      // Real error
+      console.log(Colors.red(`\t✗ Error ${flagResp.status}`));
+    const errorText = await flagResp.text();
+      console.log(Colors.red(`\t  ${errorText}`));
+      break; // Exit loop on non-conflict errors
+    }
+  }
+
+  // Add flag env settings - use the potentially updated flag key
+  if (flagCreated) {
+    // Fetch the destination flag to get the correct variation IDs
+    // (LaunchDarkly generates new UUIDs when the flag is created)
+    let destinationVariations = flag.variations; // Fallback to source variations
+    
+    try {
+      const destFlagReq = ldAPIRequest(
+        apiKey,
+        domain,
+        `flags/${inputArgs.projKeyDest}/${createdFlagKey}`
+      );
+      const destFlagResp = await rateLimitRequest(destFlagReq, 'flags');
+      
+      if (destFlagResp.status === 200) {
+        const destFlag = await destFlagResp.json();
+        if (destFlag.variations && Array.isArray(destFlag.variations)) {
+          destinationVariations = destFlag.variations;
+        }
+      }
+    } catch (error) {
+      console.log(Colors.yellow(`\t⚠ Could not fetch destination flag variations, using source IDs (may cause issues with approval requests)`));
+    }
+    
+  for (const env of envkeys) {
+    if (!flag.environments || !flag.environments[env]) {
+      continue;
+    }
+
+      // Determine destination environment key (mapped or original)
+      const destEnvKey = inputArgs.envMap && envMapping[env] ? envMapping[env] : env;
+
+    const patchReq: any[] = [];
+    const flagEnvData = flag.environments[env];
+    const parsedData: Record<string, string> = Object.keys(flagEnvData)
+      .filter((key) => !key.includes("salt"))
+      .filter((key) => !key.includes("version"))
+      .filter((key) => !key.includes("lastModified"))
+      .filter((key) => !key.includes("_environmentName"))
+      .filter((key) => !key.includes("_site"))
+      .filter((key) => !key.includes("_summary"))
+      .filter((key) => !key.includes("sel"))
+      .filter((key) => !key.includes("access"))
+      .filter((key) => !key.includes("_debugEventsUntilDate"))
+      .filter((key) => !key.startsWith("_"))
+      .filter((key) => !key.startsWith("-"))
+      .reduce((cur, key) => {
+        return Object.assign(cur, { [key]: flagEnvData[key] });
+      }, {});
+
+    Object.keys(parsedData)
+      .map((key) => {
+        if (key == "rules") {
+            patchReq.push(...buildRules(parsedData[key] as unknown as Rule[], "environments/" + destEnvKey));
+        } else {
+          patchReq.push(
+            buildPatch(
+                `environments/${destEnvKey}/${key}`,
+              "replace",
+              parsedData[key],
+            ),
+          );
+        }
+      });
+      await makePatchCall(createdFlagKey, patchReq, destEnvKey, flagMaintainerId, currentMemberId, destinationVariations);
+    }
+  }
+}
+
+// Send one patch per Flag for all Environments //
+const envList: string[] = [];
+projectJson.environments.items.forEach((env: any) => {
+  envList.push(env.key);
+});
+
+// The # of patch calls is the # of environments * flags,
+// if you need to limit run time, a good place to start is to only patch the critical environments in a shorter list
+//const envList: string[] = ["test"];
 
 // ==================== Summary Report ====================
 
