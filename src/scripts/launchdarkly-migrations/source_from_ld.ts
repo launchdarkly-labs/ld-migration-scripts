@@ -15,12 +15,16 @@ import { getSourceApiKey } from "../../utils/api_keys.ts";
 interface Arguments {
   projKey: string;
   domain?: string;
+  extractSegments?: boolean;
 }
 
 const inputArgs: Arguments = yargs(Deno.args)
   .alias("p", "projKey")
   .alias("domain", "domain")
   .describe("domain", "LaunchDarkly domain (default: app.launchdarkly.com)")
+  .boolean("extract-segments")
+  .default("extract-segments", false)
+  .describe("extract-segments", "Whether to extract segment data (default: false)")
   .parse() as Arguments;
 
 // ensure output directory exists
@@ -46,7 +50,6 @@ if (projResp == null) {
 }
 const projData = await projResp.json();
 
-console.log(projData);
 // Handle pagination for environments if needed
 const allEnvironments = projData.environments.items;
 const totalEnvironments = projData.environments.totalCount || allEnvironments.length;
@@ -97,9 +100,12 @@ await writeSourceData(projPath, "project", projData);
 console.log(`Found ${allEnvironments.length} environments`);
 
 // Segment Data //
-if (allEnvironments.length > 0) {
+if (inputArgs.extractSegments && allEnvironments.length > 0) {
+  console.log("\nExtracting segment data...");
+  ensureDirSync(`${projPath}/segments`);
+  
   for (const env of allEnvironments) {
-    console.log(`Getting Segments for environment: ${env.key}`);
+    console.log(`Getting segments for environment: ${env.key}`);
 
     const segmentResp = await fetch(
       ldAPIRequest(
@@ -109,15 +115,17 @@ if (allEnvironments.length > 0) {
       )
     );
     if (segmentResp == null) {
-      console.log("Failed getting Segments");
+      console.log("Failed getting segments");
       Deno.exit(1);
     }
     const segmentData = await segmentResp.json();
 
-    await writeSourceData(projPath, `segment-${env.key}`, segmentData);
+    await writeSourceData(`${projPath}/segments`, env.key, segmentData);
     const end = Date.now() + 2_000;
     while (Date.now() < end);
   }
+} else if (!inputArgs.extractSegments) {
+  console.log("\nSkipping segment extraction (disabled in config)");
 }
 
 // Get List of all Flags
@@ -161,6 +169,7 @@ console.log(`Found ${flags.length} flags`);
 await writeSourceData(projPath, "flags", flags);
 
 // Get Individual Flag Data //
+console.log("\nExtracting individual flag data...");
 ensureDirSync(`${projPath}/flags`);
 
 for (const [index, flagKey] of flags.entries()) {

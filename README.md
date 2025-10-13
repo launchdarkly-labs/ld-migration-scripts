@@ -342,6 +342,9 @@ destination:                 # Required for migrate step
   projectKey: string         # Destination project key
   domain: string            # Optional: Defaults to app.launchdarkly.com
 
+extraction:                  # Optional - controls what data to extract
+  includeSegments: boolean   # Set to true to extract segments (default: false)
+
 memberMapping:               # Optional - for map-members step
   outputFile: string         # Where to save mapping file
 
@@ -353,12 +356,18 @@ migration:                   # Optional - for migrate step
   environments: string[]
   environmentMapping:
     sourceEnv: destEnv
+  dryRun: boolean           # Preview changes without applying
 
 thirdPartyImport:           # Required for third-party-import step
   inputFile: string          # JSON or CSV file path
   targetProject: string      # Target LD project
   dryRun: boolean           # Validation only
   reportOutput: string      # Optional report path
+
+revert:                     # Optional - for revert step
+  dryRun: boolean           # Preview revert without applying
+  deleteViews: boolean      # Whether to delete views after unlinking
+  viewKeys: string[]        # Specific views to process
 ```
 
 ### Available Steps
@@ -367,6 +376,31 @@ thirdPartyImport:           # Required for third-party-import step
 - **`map-members`** - Creates member ID mappings between instances
 - **`migrate`** - Migrates project to destination
 - **`third-party-import`** - Imports flags from external JSON/CSV files
+- **`revert`** - Reverts a previously executed migration
+
+### Extracted Data Structure
+
+When you run `extract-source`, data is organized as follows:
+
+```
+data/launchdarkly-migrations/source/project/{projectKey}/
+├── project.json           # Project metadata and environments
+├── flags.json            # List of all flag keys
+├── flags/                # Individual flag data
+│   ├── flag-key-1.json
+│   ├── flag-key-2.json
+│   └── ...
+└── segments/             # Segment data (only if includeSegments: true)
+    ├── environment-1.json
+    ├── environment-2.json
+    └── ...
+```
+
+**Note:** Segments are only extracted if:
+- `extraction.includeSegments` is explicitly set to `true` OR
+- `migration.migrateSegments` is set to `true`
+
+By default, segments are **not** extracted unless explicitly needed, preventing unnecessary API calls and storage.
 
 ### Workflow Examples Included
 

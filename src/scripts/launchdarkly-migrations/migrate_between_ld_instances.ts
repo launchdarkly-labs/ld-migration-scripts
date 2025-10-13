@@ -519,8 +519,14 @@ if (inputArgs.migrateSegments) {
   console.log(Colors.gray(`  Processing ${envsToMigrate.length} environment(s) for segments`));
   for (const env of envsToMigrate) {
             const segmentData = await getJson(
-          `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/segment-${env.key}.json`,
+          `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/segments/${env.key}.json`,
         );
+    
+    // Skip if no segment data exists for this environment
+    if (!segmentData || !segmentData.items) {
+      console.log(Colors.yellow(`  ⚠ No segment data found for environment: ${env.key}, skipping...`));
+      continue;
+    }
 
     // Determine destination environment key (mapped or original)
     const destEnvKey = inputArgs.envMap && envMapping[env.key] ? envMapping[env.key] : env.key;
@@ -981,11 +987,11 @@ const handleApprovalWorkflow = async (
         `\t  ⚠ ${env}: Failed to create approval request (status: ${approvalResp.status})`
       ));
       console.log(Colors.gray(`\t    API response: ${errorBody}`));
-      flagsDoubleCheck.push(flagKey);
+      flagsWithErrors.add(flagKey);
     }
   } catch (error) {
     console.log(Colors.red(`\t  ✗ ${env}: Error creating approval request`));
-    flagsDoubleCheck.push(flagKey);
+    flagsWithErrors.add(flagKey);
   }
 };
 
@@ -999,7 +1005,7 @@ const handlePatchResponse = async (
   env: string
 ): Promise<void> => {
   if (status >= 400) {
-    flagsDoubleCheck.push(flagKey);
+    flagsWithErrors.add(flagKey);
     console.log(Colors.red(`\t  ✗ ${env}: Error ${status}`));
     
     if (status === 400) {
@@ -1015,6 +1021,7 @@ const handlePatchResponse = async (
 /**
  * Makes a patch call to update flag environment configuration
  * Handles approval workflows when direct patching requires approval (405)
+ * Retries 404s after a delay (environment may not be ready yet)
  */
 const makePatchCall = async (
   flagKey: string,
@@ -1022,8 +1029,9 @@ const makePatchCall = async (
   env: string,
   maintainerId: string | null,
   fallbackMemberId: string | null,
-  variations: any[]
-): Promise<string[]> => {
+  variations: any[],
+  retryCount: number = 0
+): Promise<Set<string>> => {
   const patchFlagReq = await dryRunAwarePatch(
     inputArgs.dryRun || false,
       apiKey,
@@ -1036,7 +1044,12 @@ const makePatchCall = async (
   
   const flagPatchStatus = patchFlagReq.status;
   
-  if (flagPatchStatus === 405) {
+  if (flagPatchStatus === 404 && retryCount < 2) {
+    // Environment not ready yet, wait and retry
+    console.log(Colors.gray(`\t  ⏳ ${env}: Environment not ready, retrying in 3s... (attempt ${retryCount + 1}/2)`));
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    return await makePatchCall(flagKey, patchReq, env, maintainerId, fallbackMemberId, variations, retryCount + 1);
+  } else if (flagPatchStatus === 405) {
     // Environment requires approval workflow
     await handleApprovalWorkflow(
       flagKey,
@@ -1050,11 +1063,11 @@ const makePatchCall = async (
     await handlePatchResponse(flagPatchStatus, patchFlagReq, flagKey, env);
   }
 
-  return flagsDoubleCheck;
+  return flagsWithErrors;
 };
 
 console.log(Colors.blue("\n🚩 Starting flag migration..."));
-const flagsDoubleCheck: string[] = [];
+const flagsWithErrors: Set<string> = new Set();
 const approvalRequestsCreated: Array<{flag: string, env: string, skippedFields: string[]}> = [];
 const skippedFieldsByFlag: Map<string, Set<string>> = new Map();
 
@@ -1354,8 +1367,8 @@ const printNonMigratedSettingsSection = (
 /**
  * Prints flags with errors section
  */
-const printErrorsSection = (flagsWithErrors: string[]): void => {
-  if (flagsWithErrors.length === 0) return;
+const printErrorsSection = (flagsWithErrors: Set<string>): void => {
+  if (flagsWithErrors.size === 0) return;
   
   console.log(Colors.red("\n❌ FLAGS WITH ERRORS"));
   console.log(Colors.red("The following flags encountered errors during migration:\n"));
@@ -1364,7 +1377,7 @@ const printErrorsSection = (flagsWithErrors: string[]): void => {
     console.log(Colors.red(`  ✗ ${flag}`));
   });
   
-  console.log(Colors.red(`\n  Total: ${flagsWithErrors.length} flag(s) with errors`));
+  console.log(Colors.red(`\n  Total: ${flagsWithErrors.size} flag(s) with errors`));
   console.log(Colors.gray(`  → Review these flags manually`));
 };
 
@@ -1401,7 +1414,7 @@ const getMigrationStatusMessage = (
 const printMigrationSummary = (
   approvals: ApprovalSummary[],
   skippedFields: Map<string, Set<string>>,
-  flagsWithErrors: string[],
+  flagsWithErrors: Set<string>,
   conflictReport: string
 ): void => {
   const divider = "=".repeat(70);
@@ -1418,7 +1431,7 @@ const printMigrationSummary = (
   
   const { message, color } = getMigrationStatusMessage(
     approvals.length,
-    flagsWithErrors.length
+    flagsWithErrors.size
   );
   
   console.log(Colors.blue(`\n${divider}`));
@@ -1430,6 +1443,6 @@ const printMigrationSummary = (
 printMigrationSummary(
   approvalRequestsCreated,
   skippedFieldsByFlag,
-  flagsDoubleCheck,
+  flagsWithErrors,
   conflictTracker.getReport()
 );

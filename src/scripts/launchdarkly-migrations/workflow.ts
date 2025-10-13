@@ -24,6 +24,9 @@ interface WorkflowConfig {
     projectKey: string;
     domain?: string;
   };
+  extraction?: {
+    includeSegments?: boolean;
+  };
   memberMapping?: {
     outputFile?: string;
   };
@@ -160,11 +163,19 @@ const buildExtractSourceArgs = (config: WorkflowConfig): string[] => {
     ["--allow-net", "--allow-read", "--allow-write"]
   );
 
-  return addOptionalArg(
-    [...baseArgs, "-p", config.source.projectKey],
-    "--domain",
-    config.source.domain
-  );
+  let args = [...baseArgs, "-p", config.source.projectKey];
+  args = addOptionalArg(args, "--domain", config.source.domain);
+  
+  // Only extract segments if explicitly enabled AND migration will use them
+  const shouldExtractSegments = 
+    config.extraction?.includeSegments === true || 
+    config.migration?.migrateSegments === true;
+  
+  if (shouldExtractSegments) {
+    args = [...args, "--extract-segments=true"];
+  }
+  
+  return args;
 };
 
 /**
