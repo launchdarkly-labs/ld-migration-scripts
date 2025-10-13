@@ -738,6 +738,130 @@ deno task migrate \
 # 5. Map maintainer IDs
 ```
 
+## Reverting Migrations
+
+If you need to undo a migration (e.g., after a failed or partial migration), you can use the revert functionality to clean up migrated resources.
+
+### Revert Methods
+
+**Via Workflow (Recommended):**
+```bash
+# Preview what will be reverted (dry-run)
+deno task workflow -f examples/workflow-revert-and-migrate.yaml
+
+# Execute the revert
+# Edit the config to set dryRun: false, then run again
+```
+
+**Via Individual Revert Task:**
+```bash
+# Preview revert with config file
+deno task revert -f examples/revert-migration-example.yaml --dry-run
+
+# Execute revert
+deno task revert -f examples/revert-migration-example.yaml
+
+# Or use CLI arguments
+deno task revert -p SOURCE_PROJECT -d DEST_PROJECT -v "migration-view" --dry-run
+```
+
+### What Gets Reverted
+
+The revert process:
+1. **Identifies migrated flags** - Uses source data to know exactly which flags were migrated (smart mode)
+2. **Deletes approval requests** - Removes any pending approval requests for migrated flags
+3. **Unlinks from views** - Removes flags from the target view
+4. **Archives flags** - Archives migrated flags before deletion
+5. **Deletes flags** - Permanently removes migrated flags from destination
+6. **Cleans up segments** - Removes migrated segments (if they were migrated)
+7. **Optionally deletes views** - Can remove the view itself (with `--delete-views` flag)
+
+### Revert Configuration
+
+**YAML Config Example:**
+```yaml
+source:
+  projectKey: source-project
+
+destination:
+  projectKey: dest-project
+
+migration:
+  targetView: "migration-2024"  # View to clean up
+
+revert:
+  dryRun: true                   # Preview first (recommended)
+  deleteViews: false              # Set to true to also delete views
+  # viewKeys:                     # Optional: Only revert specific views
+  #   - migration-view-1
+```
+
+### CLI Options
+
+- `-p, --projKeySource`: Source project key (identifies which flags to revert)
+- `-d, --projKeyDest`: Destination project key (where flags will be deleted)
+- `-v, --targetView`: View key containing migrated flags
+- `--dry-run`: Preview the revert without making changes
+- `--delete-views`: Also delete the view after unlinking all flags
+- `--no-use-source-data`: Disable smart mode (scan all destination flags instead)
+- `-f, --config`: Path to YAML configuration file
+
+### Revert Workflow Examples
+
+**Revert and Re-migrate Pattern:**
+```yaml
+# workflow-revert-and-migrate.yaml
+workflow:
+  steps:
+    - revert      # Clean up previous migration
+    - migrate     # Run migration again with corrected settings
+
+source:
+  projectKey: source-project
+
+destination:
+  projectKey: dest-project
+
+revert:
+  dryRun: true    # Change to false after previewing
+
+migration:
+  assignMaintainerIds: true
+  targetView: "migration-2024"
+  dryRun: true    # Change to false after previewing
+```
+
+**Best Practices:**
+1. **Always use `--dry-run` first** to preview what will be deleted
+2. **Use smart mode** (default) - leverages source data for faster, more accurate reverts
+3. **Back up critical flags** if you're unsure about the revert scope
+4. **Preview the re-migration** with dry-run before executing
+
+### Example Revert Output
+
+```
+=== REVERT MIGRATION (DRY RUN) ===
+Source project: source-project
+Destination project: dest-project
+Target view: migration-2024
+
+Found 50 flags in source data
+Checking which flags exist in destination...
+
+Would revert the following resources:
+  - flag: my-feature-1
+  - flag: my-feature-2
+  - flag: feature-x
+  ... (47 more)
+
+Would delete 3 pending approval requests
+Would unlink 50 flags from view "migration-2024"
+Would delete 50 flags
+Would delete 5 segments
+
+Set dryRun to false to execute the revert.
+```
+
 ## Using Deno Tasks
 
 The project includes predefined Deno tasks for easier execution. These tasks are

@@ -57,6 +57,20 @@ Custom step combinations - run only the steps you need.
 deno task workflow -f examples/workflow-custom-steps.yaml
 ```
 
+### `workflow-revert-and-migrate.yaml`
+Revert a previous migration and then re-run it with corrected settings.
+
+**Usage:**
+```bash
+# Preview both revert and re-migration
+deno task workflow -f examples/workflow-revert-and-migrate.yaml
+
+# After previewing, edit config to set dryRun: false for both steps
+# Then run again to execute
+```
+
+**Pattern:** Useful when you need to clean up a failed or partial migration and start fresh.
+
 ## Migration Configuration Files (Advanced)
 
 **Use these only when you need to run the migrate step separately.**
@@ -106,6 +120,33 @@ Focused on environment mapping for projects with different naming conventions (e
 ```bash
 deno task migrate -f examples/migration-config-env-mapping.yaml
 ```
+
+## Revert Configuration Files
+
+### `revert-migration-example.yaml`
+Configuration for reverting a previously executed migration.
+
+**Usage:**
+```bash
+# Preview the revert (recommended first step)
+deno task revert -f examples/revert-migration-example.yaml --dry-run
+
+# Execute the revert
+deno task revert -f examples/revert-migration-example.yaml
+```
+
+**What it does:**
+- Identifies migrated flags using source data (smart mode)
+- Deletes pending approval requests
+- Unlinks flags from target view
+- Archives and deletes migrated flags
+- Removes migrated segments
+- Optionally deletes views (with `--delete-views` flag)
+
+**When to use:**
+- Cleaning up after a failed migration
+- Preparing to re-run a migration with corrected settings
+- Testing migrations in a safe, reversible way
 
 ## Flag Import Template Files
 
@@ -197,6 +238,8 @@ That's it! The workflow runs all steps automatically.
 | Extract source data only | Workflow | `workflow-extract-only.yaml` |
 | Third-party flag import | Workflow | `workflow-third-party.yaml` |
 | Custom step combinations | Workflow | `workflow-custom-steps.yaml` |
+| **Undo failed migration** | Workflow | `workflow-revert-and-migrate.yaml` |
+| Revert only (no re-migration) | Revert | `revert-migration-example.yaml` |
 | Already have extracted data | Migration | `migration-config.yaml` |
 | Fine-grained CI/CD control | Migration | `migration-config-*.yaml` |
 
