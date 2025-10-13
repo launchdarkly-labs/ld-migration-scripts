@@ -28,12 +28,12 @@ interface TimeEstimate {
  * Tests rate limits for a specific API path
  * @param path The API path to test (e.g., 'flags', 'segments')
  * @param projectKey The project key to use in the test
+ * @param domain The LaunchDarkly domain to test against (default: app.launchdarkly.com)
  * @param debug Whether to log all response headers
  * @returns Rate limit information
  */
-export async function testRateLimits(path: string, projectKey: string, debug = false): Promise<RateLimitInfo> {
+export async function testRateLimits(path: string, projectKey: string, domain = "app.launchdarkly.com", debug = false): Promise<RateLimitInfo> {
   const apiKey = await getDestinationApiKey();
-  const domain = "app.launchdarkly.com";
   
   // Test GET request
   console.log(`\nTesting GET request for ${path}...`);

@@ -16,6 +16,7 @@ interface Arguments {
   project: string;
   dryRun: boolean;
   output?: string;
+  domain?: string;
 }
 
 const inputArgs: Arguments = yargs(Deno.args)
@@ -23,8 +24,10 @@ const inputArgs: Arguments = yargs(Deno.args)
   .alias("p", "project")
   .alias("d", "dry-run")
   .alias("o", "output")
+  .alias("domain", "domain")
   .boolean("d")
   .demandOption(["f", "p"])
+  .describe("domain", "LaunchDarkly domain (default: app.launchdarkly.com)")
   .parse() as Arguments;
 
 async function main() {
@@ -85,7 +88,7 @@ async function main() {
 
     // Get destination API key from config
     const apiKey = await getDestinationApiKey();
-    const domain = "app.launchdarkly.com";
+    const domain = inputArgs.domain || "app.launchdarkly.com";
     
     // Import flags
     console.log("🚀 Starting flag import...\n");

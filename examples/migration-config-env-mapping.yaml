@@ -1,0 +1,26 @@
+# Configuration focused on environment mapping
+# For use with: deno task migrate -f migration-config-env-mapping.yaml
+#
+# Use when source and destination have different environment naming conventions.
+# This assumes you've already extracted source data.
+
+source:
+  projectKey: legacy-app
+
+destination:
+  projectKey: modern-app
+
+migration:
+  # Map abbreviated legacy names to full modern names
+  environmentMapping:
+    prod: production
+    dev: development
+    qa: test
+    stg: staging
+  
+  # Optional: Add conflict prefix for safety
+  conflictPrefix: "legacy-"
+  
+  # Optional: Organize migrated flags in a view
+  targetView: "legacy-migration"
+

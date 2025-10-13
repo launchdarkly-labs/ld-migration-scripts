@@ -1,0 +1,17 @@
+# Extract Source Data Only
+# Use this to download project data without running migration
+
+workflow:
+  steps:
+    - extract-source
+
+source:
+  projectKey: my-project
+  domain: app.launchdarkly.com  # Optional: Defaults to app.launchdarkly.com
+
+# Optional: Control what data to extract
+extraction:
+  includeSegments: true  # Set to true to also extract segments (default: false)
+
+# No destination needed for extract-only workflow
+

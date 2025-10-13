@@ -1,0 +1,24 @@
+# Third-Party Flag Import Workflow
+# Import flags from external sources (JSON/CSV files)
+
+workflow:
+  steps:
+    - third-party-import
+
+destination:
+  projectKey: my-project
+  domain: app.launchdarkly.com  # Optional: Defaults to app.launchdarkly.com
+
+thirdPartyImport:
+  # Input file (JSON or CSV format)
+  inputFile: data/third-party-migrations/import-files/my-flags.json
+  
+  # Target LaunchDarkly project
+  targetProject: my-project
+  
+  # Dry run mode (validation only, no changes)
+  dryRun: false
+  
+  # Optional: Save detailed report
+  reportOutput: data/third-party-migrations/reports/import-report.json
+

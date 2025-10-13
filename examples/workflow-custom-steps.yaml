@@ -1,0 +1,30 @@
+# Custom Workflow Steps
+# Run specific steps in your desired order
+
+workflow:
+  steps:
+    - extract-source
+    - migrate
+    # Note: Skipping map-members, so assignMaintainerIds should be false
+
+source:
+  projectKey: legacy-project
+  domain: app.launchdarkly.com  # Optional: Defaults to app.launchdarkly.com
+
+destination:
+  projectKey: modern-project
+  domain: app.launchdarkly.com  # Optional: Use app.eu.launchdarkly.com for EU instance
+
+migration:
+  # No maintainer mapping since we're skipping map-members step
+  assignMaintainerIds: false
+  
+  migrateSegments: true
+  conflictPrefix: "legacy-"
+  targetView: "legacy-migration"
+  
+  environmentMapping:
+    prod: production
+    dev: development
+    qa: test
+

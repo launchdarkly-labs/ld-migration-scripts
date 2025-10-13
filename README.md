@@ -22,6 +22,8 @@ Features that are currently supported:
 - Feature flags and their configurations
 - Segments and targeting rules
 - Maintainer mapping across different account instances
+- **Views support**: Automatic extraction and creation of views with flag linkage
+- **Conflict resolution**: Automatic handling of resource key conflicts with configurable prefixes
 
 ## Project Structure
 
@@ -45,6 +47,44 @@ root/
 │       ├── import-files/ # Template and import files
 │       └── reports/      # Import operation reports
 ```
+
+## Multi-Region and Custom Instance Support
+
+All scripts support configurable LaunchDarkly domains to work with different instances and regions:
+
+- **US Instance** (default): `app.launchdarkly.com`
+- **EU Instance**: `app.eu.launchdarkly.com`
+- **Custom instances**: Any custom LaunchDarkly domain
+
+### How to Configure Domains
+
+**Via YAML configuration files** (recommended):
+```yaml
+source:
+  projectKey: my-project
+  domain: app.launchdarkly.com  # Default if not specified
+
+destination:
+  projectKey: eu-project
+  domain: app.eu.launchdarkly.com  # EU instance
+```
+
+**Via CLI flags**:
+```bash
+# Source extraction with custom domain
+deno task source -p my-project --domain app.launchdarkly.com
+
+# Migration with different domains
+deno task migrate -p us-project -d eu-project --domain app.eu.launchdarkly.com
+
+# Map members between different instances
+deno task map-members --source-domain app.launchdarkly.com --dest-domain app.eu.launchdarkly.com
+```
+
+**Use cases**:
+- Migrating from US to EU instance
+- Moving between different LaunchDarkly environments (production vs. sandbox)
+- Working with custom or on-premise LaunchDarkly instances
 
 ## Prerequisites
 
@@ -75,16 +115,48 @@ root/
 
 ## Quick Start
 
+### Option 1: Workflow Orchestrator (Recommended)
+
+Run the complete migration workflow from a single YAML config file:
+
+```bash
+# Run full workflow (extract → map → migrate) - the default
+deno task workflow -f examples/workflow-full.yaml
+
+# Or create your own config
+cat > my-migration.yaml <<EOF
+source:
+  projectKey: my-source-project
+destination:
+  projectKey: my-dest-project
+migration:
+  assignMaintainerIds: true
+  conflictPrefix: "imported-"
+  targetView: "migration-2024"
+EOF
+
+deno task workflow -f my-migration.yaml
+```
+
+**Default behavior**: If you don't specify `workflow.steps`, it runs the **full workflow**:
+1. Extract source project data
+2. Map members between instances
+3. Migrate to destination
+
+### Option 2: Individual Steps
+
+Or run migration steps individually:
+
 1. **Download Source Project Data**
 
    Download source project data to `data/launchdarkly-migrations/source/project/SOURCE_PROJECT_KEY/`.
 
    ```bash
-   # Using deno task (recommended)
-   deno task source-from-ld -p SOURCE_PROJECT_KEY
+   # Using workflow config (extract only)
+   deno task workflow -f examples/workflow-extract-only.yaml
 
-   # Or using deno run directly
-   deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/source_from_ld.ts -p SOURCE_PROJECT_KEY
+   # Or using individual task
+   deno task source-from-ld -p SOURCE_PROJECT_KEY
    ```
 
 2. **Create Member ID Mapping**
@@ -93,11 +165,11 @@ root/
    addresses.
 
    ```bash
-   # Using deno task (recommended)
-   deno task map-members
+   # Using workflow (if part of your steps)
+   # Included in default workflow
 
-   # Or using deno run directly
-   deno run --allow-net --allow-read --allow-write src/scripts/map_members.ts
+   # Or using individual task
+   deno task map-members
    ```
 
    This will:
@@ -108,62 +180,687 @@ root/
 
 3. **(Optional) Estimate Migration Time**
 
-   Before running the migration, you can estimate how long it will take based on
-   your project's size and the API rate limits:
+   Before running the migration, you can estimate how long it will take:
 
    ```bash
-   # Using default rate limit (5 requests per 10 seconds)
    deno task estimate-migration-time -p SOURCE_PROJECT_KEY
-
-   # Using custom rate limit
-   deno task estimate-migration-time -p SOURCE_PROJECT_KEY -r CUSTOM_RATE_LIMIT
    ```
-
-   This will analyze your source project and provide:
-   - Total estimated migration time
-   - Resource breakdown (flags, segments, environments)
-   - Time breakdown by resource type
-
-   The estimate is based on the following rate limits:
-   - Flag operations (create/patch): 5 requests per 10 seconds (default) or custom rate limit
-   - Segment operations: No rate limit
-
-   Note: The actual migration time may vary due to network conditions and API
-   response times.
 
 4. **Migrate Project to the Destination account**
 
-   Creates a new project in the target account or migrates resources into an
-   existing project. If you want to preserve flag maintainers, use the `-m` flag
-   to automatically map source maintainer IDs to their destination counterparts.
-
    ```bash
-   # Using deno task (recommended)
-   # To create a new project and migrate everything:
-   deno task migrate -p SOURCE_PROJECT_KEY -d NEW_PROJECT_KEY -m
+   # Using workflow (recommended)
+   deno task workflow -f my-migration.yaml
 
-   # To migrate into an existing project:
-   deno task migrate -p SOURCE_PROJECT_KEY -d EXISTING_PROJECT_KEY -m
+   # Using individual migrate task with config
+   deno task migrate -f examples/migration-config.yaml
 
-   # To skip segment migration:
-   deno task migrate -p SOURCE_PROJECT_KEY -d DESTINATION_PROJECT_KEY -m -s=false
-
-   # Or using deno run directly:
-   deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/migrate_between_ld_instances.ts -p SOURCE_PROJECT_KEY -d DESTINATION_PROJECT_KEY -m
+   # Using CLI arguments
+   deno task migrate -p SOURCE_PROJECT_KEY -d DESTINATION_PROJECT_KEY -m
    ```
-
-   When migrating into an existing project:
-   - The script will check if the target project exists
-   - If it exists, it will skip project creation
-   - It will verify that environments in the source project exist in the target
-     project
-   - Resources will only be migrated for environments that exist in both
-     projects
-   - A warning will be shown for any environments that don't exist in the target
-     project
 
 For more information about using Deno tasks, see
 [Using Deno Tasks](#using-deno-tasks) below.
+
+## Workflow Orchestrator
+
+The workflow orchestrator allows you to run complete end-to-end migrations from a single YAML config file. It supports:
+
+- ✅ **Full workflow automation** - Extract → Map → Migrate in one command
+- ✅ **Selective step execution** - Run only the steps you need
+- ✅ **Third-party imports** - Import flags from external sources
+- ✅ **Default behavior** - Runs full workflow if no steps specified
+
+### Full Workflow (Default)
+
+```yaml
+# workflow-full.yaml
+# No workflow.steps specified = runs ALL steps by default
+
+source:
+  projectKey: us-production
+
+destination:
+  projectKey: eu-production
+
+migration:
+  assignMaintainerIds: true
+  conflictPrefix: "us-"
+  targetView: "us-migration-2024"
+  environments:
+    - production
+    - staging
+  environmentMapping:
+    production: production
+    staging: staging
+```
+
+```bash
+deno task workflow -f workflow-full.yaml
+```
+
+**This automatically runs:**
+1. `extract-source` - Downloads all project data
+2. `map-members` - Creates member ID mappings
+3. `migrate` - Runs the migration
+
+### Extract Source Data Only
+
+```yaml
+# workflow-extract-only.yaml
+workflow:
+  steps:
+    - extract-source
+
+source:
+  projectKey: my-project
+```
+
+```bash
+deno task workflow -f workflow-extract-only.yaml
+```
+
+### Migrate Only (Pre-extracted Data)
+
+```yaml
+# workflow-migrate-only.yaml
+workflow:
+  steps:
+    - migrate
+
+source:
+  projectKey: my-source-project
+
+destination:
+  projectKey: my-dest-project
+
+migration:
+  assignMaintainerIds: false  # No map-members step
+  conflictPrefix: "imported-"
+  targetView: "migration-2024"
+```
+
+```bash
+deno task workflow -f workflow-migrate-only.yaml
+```
+
+### Third-Party Flag Import
+
+```yaml
+# workflow-third-party.yaml
+workflow:
+  steps:
+    - third-party-import
+
+thirdPartyImport:
+  inputFile: data/third-party-migrations/import-files/my-flags.json
+  targetProject: my-project
+  dryRun: false
+```
+
+```bash
+deno task workflow -f workflow-third-party.yaml
+```
+
+### Custom Step Combinations
+
+```yaml
+# workflow-custom.yaml
+workflow:
+  steps:
+    - extract-source
+    - migrate  # Skip map-members
+
+source:
+  projectKey: source-project
+
+destination:
+  projectKey: dest-project
+
+migration:
+  assignMaintainerIds: false  # Must be false when skipping map-members
+  environmentMapping:
+    prod: production
+    dev: development
+```
+
+### Workflow Configuration Structure
+
+```yaml
+workflow:                    # Optional - defaults to full workflow
+  steps:                     # List of steps to execute in order
+    - extract-source         # Download source project data
+    - map-members           # Map member IDs
+    - migrate               # Run migration
+    - third-party-import    # Or import from external sources
+
+source:                      # Required
+  projectKey: string         # Source project key
+  domain: string            # Optional: Defaults to app.launchdarkly.com
+
+destination:                 # Required for migrate step
+  projectKey: string         # Destination project key
+  domain: string            # Optional: Defaults to app.launchdarkly.com
+
+extraction:                  # Optional - controls what data to extract
+  includeSegments: boolean   # Set to true to extract segments (default: false)
+
+memberMapping:               # Optional - for map-members step
+  outputFile: string         # Where to save mapping file
+
+migration:                   # Optional - for migrate step
+  assignMaintainerIds: boolean
+  migrateSegments: boolean
+  conflictPrefix: string
+  targetView: string
+  environments: string[]
+  environmentMapping:
+    sourceEnv: destEnv
+  dryRun: boolean           # Preview changes without applying
+
+thirdPartyImport:           # Required for third-party-import step
+  inputFile: string          # JSON or CSV file path
+  targetProject: string      # Target LD project
+  dryRun: boolean           # Validation only
+  reportOutput: string      # Optional report path
+
+revert:                     # Optional - for revert step
+  dryRun: boolean           # Preview revert without applying
+  deleteViews: boolean      # Whether to delete views after unlinking
+  viewKeys: string[]        # Specific views to process
+```
+
+### Available Steps
+
+- **`extract-source`** - Downloads all data from source project
+- **`map-members`** - Creates member ID mappings between instances
+- **`migrate`** - Migrates project to destination
+- **`third-party-import`** - Imports flags from external JSON/CSV files
+- **`revert`** - Reverts a previously executed migration
+
+### Extracted Data Structure
+
+When you run `extract-source`, data is organized as follows:
+
+```
+data/launchdarkly-migrations/source/project/{projectKey}/
+├── project.json           # Project metadata and environments
+├── flags.json            # List of all flag keys
+├── flags/                # Individual flag data
+│   ├── flag-key-1.json
+│   ├── flag-key-2.json
+│   └── ...
+└── segments/             # Segment data (only if includeSegments: true)
+    ├── environment-1.json
+    ├── environment-2.json
+    └── ...
+```
+
+**Note:** Segments are only extracted if:
+- `extraction.includeSegments` is explicitly set to `true` OR
+- `migration.migrateSegments` is set to `true`
+
+By default, segments are **not** extracted unless explicitly needed, preventing unnecessary API calls and storage.
+
+### Workflow Examples Included
+
+- `examples/workflow-full.yaml` - Complete workflow (default behavior)
+- `examples/workflow-extract-only.yaml` - Extract source data only
+- `examples/workflow-migrate-only.yaml` - Migrate with pre-extracted data
+- `examples/workflow-third-party.yaml` - Third-party flag import
+- `examples/workflow-custom-steps.yaml` - Custom step combinations
+
+## Configuration File Support (Individual Migrate Task)
+
+**Note:** This section covers config files for the **individual** `migrate` task. For complete workflow automation (recommended), see the [Workflow Orchestrator](#workflow-orchestrator) section above.
+
+For running the migrate step separately with a config file, you can use YAML instead of CLI arguments. This makes migrations more maintainable and allows you to version control your migration configurations.
+
+### Creating a Migration Config File
+
+**Note:** For most users, use workflow configs instead (see [Workflow Orchestrator](#workflow-orchestrator) section).
+
+Create a YAML file for the individual migrate task (e.g., `migration-config.yaml`):
+
+```yaml
+# For use with: deno task migrate -f migration-config.yaml
+# This assumes you've already extracted source data
+
+source:
+  projectKey: my-source-project
+  domain: app.launchdarkly.com  # Optional: Defaults to app.launchdarkly.com
+
+destination:
+  projectKey: my-destination-project
+  domain: app.launchdarkly.com  # Optional: Use app.eu.launchdarkly.com for EU
+
+# Migration settings
+migration:
+  assignMaintainerIds: true
+  migrateSegments: true
+  conflictPrefix: "imported-"
+  targetView: "migration-2024"
+  environments:
+    - production
+    - staging
+  environmentMapping:
+    prod: production
+    dev: development
+    stg: staging
+```
+
+### Using Config Files
+
+```bash
+# Use config file for all settings
+deno task migrate -f migration-config.yaml
+
+# Config file with CLI overrides (CLI takes precedence)
+deno task migrate -f config.yaml -c "different-prefix-"
+
+# Combine config file with additional CLI flags
+deno task migrate -f config.yaml -v "additional-view"
+```
+
+### Example Config Files
+
+The `examples/` directory includes several config file templates:
+
+- **`migration-config.yaml`** - Full example with all options documented
+- **`migration-config-simple.yaml`** - Minimal configuration
+- **`migration-config-advanced.yaml`** - Complex migration with all features
+- **`migration-config-env-mapping.yaml`** - Focus on environment mapping
+
+### Config File Benefits
+
+✅ **Version control** - Store migration configs in git
+✅ **Reproducible** - Run the same migration configuration multiple times
+✅ **Maintainable** - Easier to manage complex migrations
+✅ **Documented** - Self-documenting with YAML comments
+✅ **Flexible** - CLI args can override config file values
+
+### Migration Config File Structure
+
+For use with `deno task migrate -f` (not workflow orchestrator):
+
+```yaml
+source:
+  projectKey: string         # Required: Source project key
+  domain: string             # Optional: Defaults to app.launchdarkly.com
+
+destination:
+  projectKey: string         # Required: Destination project key
+  domain: string             # Optional: Defaults to app.launchdarkly.com
+
+migration:                   # Migration settings
+  assignMaintainerIds: boolean          # Default: false
+  migrateSegments: boolean              # Default: true
+  conflictPrefix: string                # Optional
+  targetView: string                    # Optional
+  environments: string[]                # Optional, list format
+  environmentMapping:                   # Optional, key-value mapping
+    sourceEnv: destEnv
+    ...
+```
+
+### Priority Order
+
+When using both config files and CLI arguments:
+1. **CLI arguments** (highest priority)
+2. **Config file values**
+3. **Default values** (lowest priority)
+
+Example:
+```bash
+# Config file has: conflictPrefix: "config-"
+# CLI override:
+deno task migrate -f config.yaml -c "cli-"
+# Result: Uses "cli-" (CLI takes precedence)
+```
+
+## Advanced Features
+
+### Views Support
+
+The migration script automatically handles LaunchDarkly Views (Early Access feature):
+
+- **Automatic extraction**: Discovers all view associations from source flags
+- **View creation**: Creates views in the destination project if they don't exist
+- **View linking**: Preserves view associations when creating flags
+- **Target view**: Optionally link all migrated flags to a specific view
+
+**Usage examples:**
+
+```bash
+# Migrate flags and preserve their view associations
+deno task migrate -p SOURCE_PROJECT -d DEST_PROJECT
+
+# Link all migrated flags to a specific view (in addition to source views)
+deno task migrate -p SOURCE_PROJECT -d DEST_PROJECT -v my-target-view
+
+# The script will automatically:
+# 1. Extract view keys from source flags
+# 2. Create missing views in destination
+# 3. Link flags to views during creation
+```
+
+**Notes:**
+- Views are an Early Access feature in LaunchDarkly
+- If a view already exists in the destination, it will be reused
+- View associations are preserved from the source project
+- The `-v` flag adds an additional view linkage (doesn't replace existing ones)
+
+### Conflict Resolution
+
+When migrating into an existing project, you may encounter resource key conflicts (e.g., a flag with the same key already exists). The conflict resolution feature handles this automatically:
+
+- **Automatic retry**: First attempts to create without prefix, then retries with prefix on conflict (409)
+- **Applies to all resources**: Flags, segments, and other resources
+- **Detailed tracking**: Logs all conflict resolutions with a summary report
+- **Preserves relationships**: Updates all references to use the prefixed keys
+
+**Usage examples:**
+
+```bash
+# Migrate with conflict resolution using 'imported-' prefix
+deno task migrate -p SOURCE_PROJECT -d DEST_PROJECT -c "imported-"
+
+# Example output when conflicts are detected:
+# ⚠ Flag "my-flag" already exists, retrying with prefix...
+# Creating flag: imported-my-flag in Project: DEST_PROJECT
+# Flag created
+
+# At the end of migration, you'll see a report:
+# ============================================================
+# CONFLICT RESOLUTION REPORT
+# ============================================================
+# Total conflicts resolved: 3
+#
+# Conflicts by resource type:
+#   - flag: 2
+#   - segment: 1
+#
+# Conflict resolutions:
+#   - flag: "my-flag" → "imported-my-flag"
+#   - flag: "feature-x" → "imported-feature-x"
+#   - segment: "users-segment" → "imported-users-segment"
+# ============================================================
+```
+
+**Notes:**
+- Only applies when a conflict (HTTP 409) is detected
+- The prefix is applied to both the resource key and name
+- All related patches and configurations use the prefixed key
+- Use a descriptive prefix to easily identify migrated resources (e.g., `migrated-`, `v2-`, `imported-`)
+
+### Environment Mapping
+
+When migrating between projects with **different environment naming conventions**, you can map source environment keys to destination environment keys using the `--env-map` flag:
+
+**Usage examples:**
+
+```bash
+# Map prod → production, dev → development
+deno task migrate \
+  -p source-project \
+  -d dest-project \
+  --env-map "prod:production,dev:development"
+
+# Map multiple environments with different names
+deno task migrate \
+  -p legacy-project \
+  -d new-project \
+  --env-map "prod:production,stg:staging,qa:test"
+
+# Combine with other features
+deno task migrate \
+  -p source-project \
+  -d dest-project \
+  --env-map "prod:production" \
+  -c "migrated-" \
+  -v "legacy-flags"
+```
+
+**Example output:**
+```
+=== Environment Mapping ===
+Source → Destination:
+  prod → production
+  dev → development
+  stg → staging
+Migrating 3 mapped environment(s)
+
+Reading flag 1 of 50 : my-feature
+  Creating flag: my-feature in Project: dest-project
+  Flag created
+  Finished patching flag my-feature for env production
+  Finished patching flag my-feature for env development
+  Finished patching flag my-feature for env staging
+```
+
+**How it works:**
+1. Reads flag configurations from **source** environments (e.g., `prod`, `dev`)
+2. Creates/patches flags in **destination** environments (e.g., `production`, `development`)
+3. Applies to both flags and segments automatically
+4. Validates that destination environments exist before starting
+
+**Notes:**
+- Only mapped source environments will be migrated
+- Destination environments must already exist in the target project
+- If a mapped destination environment doesn't exist, migration will abort with error
+- Environment keys are case-sensitive
+- Can be combined with `-e` flag for additional filtering
+
+**Error handling:**
+```bash
+# If destination environment doesn't exist:
+Error: The following mapped destination environments don't exist in target project:
+  prod → production (destination "production" not found)
+Available destination environments: dev, staging, test
+```
+
+### Environment Filtering
+
+By default, the migration script migrates **all environments** from the source project. You can selectively migrate only specific environments using the `-e` flag:
+
+**Usage examples:**
+
+```bash
+# Migrate only production environment
+deno task migrate -p SOURCE_PROJECT -d DEST_PROJECT -e "production"
+
+# Migrate only non-production environments
+deno task migrate -p SOURCE_PROJECT -d DEST_PROJECT -e "development,staging,test"
+
+# Test migration with just one environment
+deno task migrate -p SOURCE_PROJECT -d test-project -e "development" -c "test-"
+```
+
+**Example output:**
+```
+=== Environment Filtering ===
+Requested environments: production, staging
+Matched environments: production, staging
+Migrating 2 of 5 environments
+
+Segment migration is enabled
+Getting Segments for environment: production
+Getting Segments for environment: staging
+
+Reading flag 1 of 50 : my-feature
+  Creating flag: my-feature in Project: DEST_PROJECT
+  Finished patching flag my-feature for env production
+  Finished patching flag my-feature for env staging
+```
+
+**Notes:**
+- Only the specified environments will be migrated for both flags and segments
+- If an environment doesn't exist in the source, you'll see a warning
+- If none of the requested environments exist, the migration will abort
+- Environment keys must match exactly (case-sensitive)
+
+### Combining Features
+
+You can combine all features for powerful migration workflows:
+
+```bash
+# Full-featured migration with environment mapping
+deno task migrate \
+  -p legacy-project \
+  -d modern-project \
+  --env-map "prod:production,stg:staging" \
+  -c "legacy-" \
+  -v "legacy-migration" \
+  -m
+
+# This will:
+# 1. Map legacy env names (prod → production, stg → staging)
+# 2. Migrate flags/segments with environment mapping applied
+# 3. Handle conflicts by prefixing with "legacy-"
+# 4. Link all flags to "legacy-migration" view
+# 5. Map maintainer IDs from source to destination
+
+# Or combine environment filtering with mapping
+deno task migrate \
+  -p SOURCE_PROJECT \
+  -d EXISTING_PROJECT \
+  -e "prod,dev" \
+  --env-map "prod:production,dev:development" \
+  -c "v2-" \
+  -v "migration-batch-1" \
+  -m
+
+# This will:
+# 1. Only migrate prod and dev environments from source
+# 2. Map them to production and development in destination
+# 3. Handle any conflicts by prefixing with "v2-"
+# 4. Link all flags to "migration-batch-1" view
+# 5. Map maintainer IDs
+```
+
+## Reverting Migrations
+
+If you need to undo a migration (e.g., after a failed or partial migration), you can use the revert functionality to clean up migrated resources.
+
+### Revert Methods
+
+**Via Workflow (Recommended):**
+```bash
+# Preview what will be reverted (dry-run)
+deno task workflow -f examples/workflow-revert-and-migrate.yaml
+
+# Execute the revert
+# Edit the config to set dryRun: false, then run again
+```
+
+**Via Individual Revert Task:**
+```bash
+# Preview revert with config file
+deno task revert -f examples/revert-migration-example.yaml --dry-run
+
+# Execute revert
+deno task revert -f examples/revert-migration-example.yaml
+
+# Or use CLI arguments
+deno task revert -p SOURCE_PROJECT -d DEST_PROJECT -v "migration-view" --dry-run
+```
+
+### What Gets Reverted
+
+The revert process:
+1. **Identifies migrated flags** - Uses source data to know exactly which flags were migrated (smart mode)
+2. **Deletes approval requests** - Removes any pending approval requests for migrated flags
+3. **Unlinks from views** - Removes flags from the target view
+4. **Archives flags** - Archives migrated flags before deletion
+5. **Deletes flags** - Permanently removes migrated flags from destination
+6. **Cleans up segments** - Removes migrated segments (if they were migrated)
+7. **Optionally deletes views** - Can remove the view itself (with `--delete-views` flag)
+
+### Revert Configuration
+
+**YAML Config Example:**
+```yaml
+source:
+  projectKey: source-project
+
+destination:
+  projectKey: dest-project
+
+migration:
+  targetView: "migration-2024"  # View to clean up
+
+revert:
+  dryRun: true                   # Preview first (recommended)
+  deleteViews: false              # Set to true to also delete views
+  # viewKeys:                     # Optional: Only revert specific views
+  #   - migration-view-1
+```
+
+### CLI Options
+
+- `-p, --projKeySource`: Source project key (identifies which flags to revert)
+- `-d, --projKeyDest`: Destination project key (where flags will be deleted)
+- `-v, --targetView`: View key containing migrated flags
+- `--dry-run`: Preview the revert without making changes
+- `--delete-views`: Also delete the view after unlinking all flags
+- `--no-use-source-data`: Disable smart mode (scan all destination flags instead)
+- `-f, --config`: Path to YAML configuration file
+
+### Revert Workflow Examples
+
+**Revert and Re-migrate Pattern:**
+```yaml
+# workflow-revert-and-migrate.yaml
+workflow:
+  steps:
+    - revert      # Clean up previous migration
+    - migrate     # Run migration again with corrected settings
+
+source:
+  projectKey: source-project
+
+destination:
+  projectKey: dest-project
+
+revert:
+  dryRun: true    # Change to false after previewing
+
+migration:
+  assignMaintainerIds: true
+  targetView: "migration-2024"
+  dryRun: true    # Change to false after previewing
+```
+
+**Best Practices:**
+1. **Always use `--dry-run` first** to preview what will be deleted
+2. **Use smart mode** (default) - leverages source data for faster, more accurate reverts
+3. **Back up critical flags** if you're unsure about the revert scope
+4. **Preview the re-migration** with dry-run before executing
+
+### Example Revert Output
+
+```
+=== REVERT MIGRATION (DRY RUN) ===
+Source project: source-project
+Destination project: dest-project
+Target view: migration-2024
+
+Found 50 flags in source data
+Checking which flags exist in destination...
+
+Would revert the following resources:
+  - flag: my-feature-1
+  - flag: my-feature-2
+  - flag: feature-x
+  ... (47 more)
+
+Would delete 3 pending approval requests
+Would unlink 50 flags from view "migration-2024"
+Would delete 50 flags
+Would delete 5 segments
+
+Set dryRun to false to execute the revert.
+```
 
 ## Using Deno Tasks
 
@@ -238,11 +935,14 @@ don't need to specify them manually.
 ### source.ts
 
 - `-p, --projKey`: Source project key
+- `--domain`: (Optional) LaunchDarkly domain, defaults to `app.launchdarkly.com`. Use `app.eu.launchdarkly.com` for EU instances.
 
 ### map_members.ts
 
 - `-o, --output`: (Optional) Output file path, defaults to
   "data/mappings/maintainer_mapping.json"
+- `-s, --source-domain`: (Optional) Source LaunchDarkly domain, defaults to `app.launchdarkly.com`
+- `-d, --dest-domain`: (Optional) Destination LaunchDarkly domain, defaults to `app.launchdarkly.com`
 
 ### migrate.ts
 
@@ -253,6 +953,22 @@ don't need to specify them manually.
   first.
 - `-s, --migrateSegments`: (Optional) Whether to migrate segments, defaults to
   true. Set to false to skip segment migration.
+- `-c, --conflictPrefix`: (Optional) Prefix to use when resolving key conflicts
+  (e.g., 'imported-'). When a resource with a conflicting key is detected, it
+  will be created with this prefix automatically.
+- `-v, --targetView`: (Optional) View key to link all migrated flags to. This
+  will link all flags to the specified view in addition to any views they were
+  already linked to in the source project.
+- `-e, --environments`: (Optional) Comma-separated list of environment keys to
+  migrate (e.g., 'production,staging'). If not specified, all environments will
+  be migrated. Useful for selective environment migration or testing.
+- `--env-map`: (Optional) Environment mapping in format 'source1:dest1,source2:dest2'
+  (e.g., 'prod:production,dev:development'). Maps source environment keys to different
+  destination environment keys. Useful when migrating between projects with different
+  environment naming conventions.
+- `--domain`: (Optional) Destination LaunchDarkly domain, defaults to `app.launchdarkly.com`. Use `app.eu.launchdarkly.com` for EU instances.
+- `-f, --config`: (Optional) Path to YAML configuration file. All migration settings
+  can be specified in the config file. CLI arguments override config file values.
 
 ### estimate_time.ts
 
@@ -265,6 +981,7 @@ don't need to specify them manually.
 - `-p, --project`: Target LaunchDarkly project key
 - `-d, --dry-run`: (Optional) Validate only, no changes made
 - `-o, --output`: (Optional) JSON report output file path
+- `--domain`: (Optional) LaunchDarkly domain, defaults to `app.launchdarkly.com`. Use `app.eu.launchdarkly.com` for EU instances.
 
 ## Notes for the use of the scripts
 

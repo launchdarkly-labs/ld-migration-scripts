@@ -1,0 +1,48 @@
+# LaunchDarkly Migration Configuration (for 'migrate' task)
+# Use this with: deno task migrate -f migration-config.yaml
+#
+# NOTE: This is for the individual 'migrate' task only.
+# For full workflow (extract → map → migrate), use workflow-full.yaml instead.
+#
+# Use this when you've already extracted source data and want to run just the migration step.
+
+# Source project configuration
+source:
+  projectKey: my-source-project
+  domain: app.launchdarkly.com  # Optional: Defaults to app.launchdarkly.com
+
+# Destination project configuration  
+destination:
+  projectKey: my-destination-project
+  domain: app.launchdarkly.com  # Optional: Use app.eu.launchdarkly.com for EU instance
+
+# Migration settings
+migration:
+  # Whether to map maintainer IDs from source to destination (default: false)
+  # Requires running map-members script first
+  assignMaintainerIds: false
+  
+  # Whether to migrate segments (default: true)
+  migrateSegments: true
+  
+  # Prefix to use when resolving resource key conflicts (optional)
+  # If a resource with the same key exists, it will be created with this prefix
+  conflictPrefix: "imported-"
+  
+  # View key to link all migrated flags to (optional)
+  # The view will be created if it doesn't exist
+  targetView: "migration-2024"
+  
+  # List of specific environments to migrate (optional)
+  # If not specified, all environments will be migrated
+  environments:
+    - production
+    - staging
+  
+  # Environment key mapping for projects with different naming conventions (optional)
+  # Maps source environment keys to destination environment keys
+  environmentMapping:
+    prod: production
+    dev: development
+    stg: staging
+

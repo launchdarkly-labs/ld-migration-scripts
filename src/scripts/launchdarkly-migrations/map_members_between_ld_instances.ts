@@ -47,16 +47,16 @@ async function fetchMembers(apiKey: string, domain: string): Promise<Member[]> {
   return allMembers;
 }
 
-async function createMemberMapping(): Promise<MemberMapping> {
+async function createMemberMapping(sourceDomain: string, destDomain: string): Promise<MemberMapping> {
   const sourceApiKey = await getSourceApiKey();
   const destinationApiKey = await getDestinationApiKey();
 
-  console.log("Fetching members from source instance...");
-  const sourceMembers = await fetchMembers(sourceApiKey, "app.launchdarkly.com");
+  console.log(`Fetching members from source instance (${sourceDomain})...`);
+  const sourceMembers = await fetchMembers(sourceApiKey, sourceDomain);
   console.log(`Found ${sourceMembers.length} members in source instance`);
 
-  console.log("Fetching members from destination instance...");
-  const destinationMembers = await fetchMembers(destinationApiKey, "app.launchdarkly.com");
+  console.log(`Fetching members from destination instance (${destDomain})...`);
+  const destinationMembers = await fetchMembers(destinationApiKey, destDomain);
   console.log(`Found ${destinationMembers.length} members in destination instance`);
 
   const mapping: MemberMapping = {};
@@ -76,16 +76,20 @@ async function createMemberMapping(): Promise<MemberMapping> {
 
 async function main() {
   const flags = parse(Deno.args, {
-    string: ["output"],
+    string: ["output", "source-domain", "dest-domain"],
     alias: {
       "output": "o",
+      "source-domain": "s",
+      "dest-domain": "d",
     },
   });
 
   const outputFile = flags.output || "data/launchdarkly-migrations/mappings/maintainer_mapping.json";
+  const sourceDomain = flags["source-domain"] || "app.launchdarkly.com";
+  const destDomain = flags["dest-domain"] || "app.launchdarkly.com";
 
   try {
-    const mapping = await createMemberMapping();
+    const mapping = await createMemberMapping(sourceDomain, destDomain);
     
     // Ensure the output directory exists
     await Deno.mkdir("data/launchdarkly-migrations/mappings", { recursive: true });

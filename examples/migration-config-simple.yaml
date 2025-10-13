@@ -1,0 +1,20 @@
+# Simple migration configuration - just the basics
+# For use with: deno task migrate -f migration-config-simple.yaml
+#
+# This assumes you've already extracted source data.
+# For full workflow, use workflow-full.yaml instead.
+
+source:
+  projectKey: legacy-project
+  domain: app.launchdarkly.com  # Optional: Defaults to app.launchdarkly.com
+
+destination:
+  projectKey: new-project
+  domain: app.launchdarkly.com  # Optional: Use app.eu.launchdarkly.com for EU instance
+
+migration:
+  migrateSegments: true
+  
+  # Preview migration without making changes (optional)
+  # dryRun: true
+
