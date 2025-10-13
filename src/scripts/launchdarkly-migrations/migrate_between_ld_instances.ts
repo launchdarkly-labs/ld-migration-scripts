@@ -390,7 +390,7 @@ if (targetProjectExists) {
   // Get existing environments
   console.log(Colors.blue(`  Fetching existing environments...`));
   const existingEnvs = await getExistingEnvironments(apiKey, domain, inputArgs.projKeyDest);
-  console.log(Colors.gray(`  Found existing environments: ${existingEnvs.join(', ')}`))
+  console.log(Colors.gray(`  Found existing environments: ${existingEnvs.join(', ')}`));
   
   // If environment mapping is enabled, check destination environments exist
   if (inputArgs.envMap) {
