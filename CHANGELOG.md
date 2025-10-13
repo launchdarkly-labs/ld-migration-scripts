@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.0.0] - 2025-10-13
 
 ### Added
 - **Workflow Orchestrator**: Complete end-to-end migration automation from a single YAML config file
@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Revert workflow to undo migrations
 - **Views Support**: Automatic extraction, creation, and linking of LaunchDarkly Views (Early Access feature)
   - Discovers and preserves view associations from source flags
-  - Creates missing views in destination project
+  - Creates missing views in the destination project
   - Optional target view linkage for all migrated flags
 - **YAML Configuration File Support**: Full YAML-based configuration for migrate task
   - Alternative to CLI arguments for better maintainability
@@ -59,12 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Improved error handling and user feedback
 - Better handling of beta API endpoints
 - Segments are now only extracted when explicitly needed (via `extraction.includeSegments` or `migration.migrateSegments`)
-- Migration script now properly handles environments requiring approval workflows
 
 ### Fixed
 - Dry-run mode now correctly validates without making changes
-- Approval requests now use correct variation IDs
-- Prevented creation of duplicate approval requests
 - Fixed handling of environments with approval requirements
 
 ## [2.1.0] - 2025-08-29
