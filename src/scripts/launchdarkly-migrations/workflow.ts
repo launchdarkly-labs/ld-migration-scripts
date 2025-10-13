@@ -122,17 +122,21 @@ async function runMapMembers(config: WorkflowConfig) {
     args.push("--dest-domain", config.destination.domain);
   }
 
-  const command = new Deno.Command("deno", { args });
-  const { code, stdout, stderr } = await command.output();
+  console.log(Colors.gray(`Executing: deno ${args.join(' ')}\n`));
+
+  const command = new Deno.Command("deno", { 
+    args,
+    stdout: "inherit",
+    stderr: "inherit"
+  });
+  const { code } = await command.output();
 
   if (code !== 0) {
-    console.error(Colors.red("Member mapping step failed"));
-    console.error(new TextDecoder().decode(stderr));
+    console.error(Colors.red("\n❌ Member mapping step failed"));
     Deno.exit(1);
   }
 
-  console.log(new TextDecoder().decode(stdout));
-  console.log(Colors.green("✓ Member mapping completed\n"));
+  console.log(Colors.green("\n✓ Member mapping completed\n"));
 }
 
 async function runMigrate(config: WorkflowConfig) {
@@ -243,17 +247,21 @@ async function runThirdPartyImport(config: WorkflowConfig) {
     args.push("--domain", config.destination.domain);
   }
 
-  const command = new Deno.Command("deno", { args });
-  const { code, stdout, stderr } = await command.output();
+  console.log(Colors.gray(`Executing: deno ${args.join(' ')}\n`));
+
+  const command = new Deno.Command("deno", { 
+    args,
+    stdout: "inherit",
+    stderr: "inherit"
+  });
+  const { code } = await command.output();
 
   if (code !== 0) {
-    console.error(Colors.red("Third-party import failed"));
-    console.error(new TextDecoder().decode(stderr));
+    console.error(Colors.red("\n❌ Third-party import failed"));
     Deno.exit(1);
   }
 
-  console.log(new TextDecoder().decode(stdout));
-  console.log(Colors.green("✓ Third-party import completed\n"));
+  console.log(Colors.green("\n✓ Third-party import completed\n"));
 }
 
 async function main() {

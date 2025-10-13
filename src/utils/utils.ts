@@ -69,16 +69,22 @@ export function ldAPIPostRequest(
   body: any,
   useBetaVersion = false,
 ) {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    'User-Agent': 'Project-Migrator-Script',
+    "Authorization": apiKey,
+  };
+  
+  // Only add LD-API-Version header when using beta
+  if (useBetaVersion) {
+    headers["LD-API-Version"] = "beta";
+  }
+  
   const req = new Request(
     `https://${domain}/api/v2/${path}`,
     {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        'User-Agent': 'Project-Migrator-Script',
-        "Authorization": apiKey,
-        "LD-API-Version": useBetaVersion ? "beta" : apiVersion,
-      },
+      headers,
       body: JSON.stringify(body),
     },
   );
@@ -155,14 +161,20 @@ export async function writeSourceData(
 }
 
 export function ldAPIRequest(apiKey: string, domain: string, path: string, useBetaVersion = false) {
+  const headers: Record<string, string> = {
+    "Authorization": apiKey,
+    'User-Agent': 'launchdarkly-project-migrator-script',
+  };
+  
+  // Only add LD-API-Version header when using beta
+  if (useBetaVersion) {
+    headers["LD-API-Version"] = "beta";
+  }
+  
   const req = new Request(
     `https://${domain}/api/v2/${path}`,
     {
-      headers: {
-        "Authorization": apiKey,
-        'User-Agent': 'launchdarkly-project-migrator-script',
-        "LD-API-Version": useBetaVersion ? "beta" : apiVersion,
-      },
+      headers,
     },
   );
 

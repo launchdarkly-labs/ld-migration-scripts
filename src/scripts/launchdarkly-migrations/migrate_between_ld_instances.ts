@@ -159,6 +159,22 @@ console.log(Colors.green("✓ API key loaded"));
 const domain = inputArgs.domain || "app.launchdarkly.com";
 console.log(Colors.gray(`Using domain: ${domain}\n`));
 
+// Get current authenticated member ID for approval request fallback
+let currentMemberId: string | null = null;
+try {
+  const memberReq = ldAPIRequest(apiKey, domain, "members/me");
+  const memberResp = await rateLimitRequest(memberReq, 'members');
+  if (memberResp.status === 200) {
+    const memberData = await memberResp.json();
+    currentMemberId = memberData._id;
+    console.log(Colors.gray(`Authenticated as member: ${memberData.email || currentMemberId}`));
+  } else {
+    console.log(Colors.gray(`Authenticated with service token (approval requests may not notify anyone)`));
+  }
+} catch (error) {
+  console.log(Colors.gray(`Could not determine authenticated user type`));
+}
+
 // Parse environment mapping
 const envMapping: Record<string, string> = {};
 const reverseEnvMapping: Record<string, string> = {};
@@ -465,29 +481,31 @@ if (inputArgs.migrateSegments) {
         
         if (segmentStatus === 201 || segmentStatus === 200) {
           segmentCreated = true;
-          consoleLogger(
-            segmentStatus,
-            `Creating segment ${newSegment.key} status: ${segmentStatus}`,
-          );
-        } else if (segmentStatus === 409 && inputArgs.conflictPrefix && attemptCount === 1) {
-          // Conflict detected, retry with prefix
-          console.log(Colors.yellow(`  ⚠ Segment "${segmentKey}" already exists, retrying with prefix...`));
-          segmentKey = applyConflictPrefix(segment.key, inputArgs.conflictPrefix);
-          segmentName = `${inputArgs.conflictPrefix}${segment.name}`;
-          
-          conflictTracker.addResolution({
-            originalKey: segment.key,
-            resolvedKey: segmentKey,
-            resourceType: 'segment',
-            conflictPrefix: inputArgs.conflictPrefix
-          });
+          console.log(Colors.green(`  ✓ Segment ${newSegment.key} created (status: ${segmentStatus})`));
+        } else if (segmentStatus === 409) {
+          // Segment already exists
+          if (inputArgs.conflictPrefix && attemptCount === 1) {
+            // Conflict detected with prefix enabled, retry with prefix
+            console.log(Colors.yellow(`  ⚠ Segment "${segmentKey}" already exists, retrying with prefix...`));
+            segmentKey = applyConflictPrefix(segment.key, inputArgs.conflictPrefix);
+            segmentName = `${inputArgs.conflictPrefix}${segment.name}`;
+            
+            conflictTracker.addResolution({
+              originalKey: segment.key,
+              resolvedKey: segmentKey,
+              resourceType: 'segment',
+              conflictPrefix: inputArgs.conflictPrefix
+            });
+          } else {
+            // No prefix or second attempt - segment exists, proceed to update it
+            segmentCreated = true;
+            console.log(Colors.yellow(`  ⚠ Segment "${segmentKey}" already exists, will update rules...`));
+            break; // Exit retry loop and proceed to patching
+          }
         } else {
-          consoleLogger(
-            segmentStatus,
-            `Creating segment ${newSegment.key} status: ${segmentStatus}`,
-          );
+          console.log(Colors.red(`  ✗ Error creating segment ${newSegment.key} (status: ${segmentStatus})`));
           if (segmentStatus > 201) {
-            console.log(JSON.stringify(newSegment));
+            console.log(Colors.gray(`  Payload: ${JSON.stringify(newSegment)}`));
           }
           break; // Exit loop on non-conflict errors
         }
@@ -533,6 +551,8 @@ if (inputArgs.migrateSegments) {
 
 console.log(Colors.blue("\n🚩 Starting flag migration..."));
 const flagsDoubleCheck: string[] = [];
+const approvalRequestsCreated: Array<{flag: string, env: string, skippedFields: string[]}> = [];
+const skippedFieldsByFlag: Map<string, Set<string>> = new Map();
 
 interface Variation {
   _id: string;
@@ -555,9 +575,14 @@ for (const [index, flagkey] of flagList.entries()) {
     console.log(Colors.yellow(`\tWarning: Could not load flag data for ${flagkey}, skipping...`));
     continue;
   }
-
+  
   if (!flag.variations) {
-    console.log(Colors.yellow(`\tWarning: Flag ${flagkey} has no variations, skipping...`));
+    console.log(Colors.yellow(`\t⚠ No variations, skipping`));
+    continue;
+  }
+  
+  if (!flag.key || flag.key.trim() === '') {
+    console.log(Colors.red(`\t✗ ERROR: Flag data has empty key! Expected: "${flagkey}"`));
     continue;
   }
 
@@ -568,6 +593,7 @@ for (const [index, flagkey] of flagList.entries()) {
   let attemptCount = 0;
   let flagCreated = false;
   let createdFlagKey = flag.key;
+  let flagMaintainerId: string | null = null;
 
   while (!flagCreated && attemptCount < 2) {
     attemptCount++;
@@ -584,23 +610,14 @@ for (const [index, flagkey] of flagList.entries()) {
 
     // Only assign maintainerId if explicitly requested and mapping exists
     if (inputArgs.assignMaintainerIds) {
-      if (flag.maintainerId) {
-        const euMaintainerId = maintainerMapping[flag.maintainerId];
-        if (euMaintainerId) {
-          newFlag.maintainerId = euMaintainerId;
-          console.log(`\tMapped maintainer: ${flag.maintainerId} -> ${euMaintainerId} for flag: ${flag.key}`);
-        } else {
-          newFlag.maintainerId = null;
-          console.log(`\tNo EU maintainer mapping found for US maintainer: ${flag.maintainerId} for flag: ${flag.key}`);
-        }
+      if (flag.maintainerId && maintainerMapping[flag.maintainerId]) {
+        newFlag.maintainerId = maintainerMapping[flag.maintainerId];
+        flagMaintainerId = newFlag.maintainerId;
       } else {
         newFlag.maintainerId = null;
-        console.log(`\tNo maintainer ID found in source flag: ${flag.key}`);
       }
     } else {
-      // Ensure maintainerId is null if not requested
       newFlag.maintainerId = null;
-      console.log(`\tMaintainer mapping not requested for flag: ${flag.key}`);
     }
 
     if (flag.clientSideAvailability) {
@@ -616,7 +633,8 @@ for (const [index, flagkey] of flagList.entries()) {
       newFlag.defaults = flag.defaults;
     }
 
-    // Add view associations
+    // Collect view associations (but don't add to newFlag yet)
+    // We'll add them after creation due to a bug in LD's beta API
     const viewKeys: string[] = [];
     
     // Add source flag's view associations
@@ -628,24 +646,18 @@ for (const [index, flagkey] of flagList.entries()) {
     if (inputArgs.targetView && !viewKeys.includes(inputArgs.targetView)) {
       viewKeys.push(inputArgs.targetView);
     }
+
+    // DON'T add viewKeys to newFlag - LD's beta API has a bug where including
+    // viewKeys in flag creation causes the key field to be lost during parsing
+    // We'll add views via PATCH after creation
     
-    // Only add viewKeys field if there are views to link
-    if (viewKeys.length > 0) {
-      newFlag.viewKeys = viewKeys;
-      console.log(`\tLinking flag to view(s): ${viewKeys.join(', ')}`);
-    }
-
-    console.log(
-      `\tCreating flag: ${flagKey} in Project: ${inputArgs.projKeyDest}`,
-    );
-
-    // Create the flag with maintainer ID
     const flagResp = await rateLimitRequest(
       ldAPIPostRequest(
         apiKey,
         domain,
         `flags/${inputArgs.projKeyDest}`,
         newFlag,
+        false // Never use beta version for flag creation
       ),
       'flags'
     );
@@ -653,48 +665,104 @@ for (const [index, flagkey] of flagList.entries()) {
     if (flagResp.status == 200 || flagResp.status == 201) {
       flagCreated = true;
       createdFlagKey = flagKey;
-      console.log("\tFlag created");
-      // If maintainer ID was set, verify it was applied correctly
-      if (newFlag.maintainerId) {
-        const createdFlag = await flagResp.json();
-        if (createdFlag.maintainerId !== newFlag.maintainerId) {
-          console.log(Colors.yellow(`\tWarning: Maintainer ID mismatch for flag ${flag.key}`));
-          console.log(Colors.yellow(`\tExpected: ${newFlag.maintainerId}, Got: ${createdFlag.maintainerId}`));
+      console.log(Colors.green(`\t✓ Created`));
+      
+      // Now add flag to views via PATCH (if needed)
+      if (viewKeys.length > 0) {
+        console.log(Colors.cyan(`\t  Adding flag to view(s): ${viewKeys.join(', ')}`));
+        try {
+          const viewPatch = [{
+            op: "add",
+            path: "/viewKeys",
+            value: viewKeys
+          }];
+          
+          const viewPatchResp = await rateLimitRequest(
+            ldAPIPatchRequest(
+              apiKey,
+              domain,
+              `flags/${inputArgs.projKeyDest}/${flagKey}`,
+              viewPatch
+            ),
+            'flags'
+          );
+          
+          if (viewPatchResp.status >= 200 && viewPatchResp.status < 300) {
+            console.log(Colors.green(`\t  ✓ Added to view(s)`));
+          } else {
+            console.log(Colors.yellow(`\t  ⚠ Failed to add to views (status: ${viewPatchResp.status})`));
+          }
+        } catch (error) {
+          console.log(Colors.yellow(`\t  ⚠ Error adding to views: ${error instanceof Error ? error.message : String(error)}`));
         }
       }
-    } else if (flagResp.status === 409 && inputArgs.conflictPrefix && attemptCount === 1) {
-      // Conflict detected, retry with prefix
-      console.log(Colors.yellow(`\t⚠ Flag "${flagKey}" already exists, retrying with prefix...`));
-      flagKey = applyConflictPrefix(flag.key, inputArgs.conflictPrefix);
-      flagName = `${inputArgs.conflictPrefix}${flag.name}`;
-      
-      conflictTracker.addResolution({
-        originalKey: flag.key,
-        resolvedKey: flagKey,
-        resourceType: 'flag',
-        conflictPrefix: inputArgs.conflictPrefix
-      });
+    } else if (flagResp.status === 409) {
+      // Flag already exists
+      if (inputArgs.conflictPrefix && attemptCount === 1) {
+        // Conflict detected with prefix enabled, retry with prefix
+        console.log(Colors.yellow(`\t⚠ Exists, retrying with prefix "${inputArgs.conflictPrefix}"`));
+        flagKey = applyConflictPrefix(flag.key, inputArgs.conflictPrefix);
+        flagName = `${inputArgs.conflictPrefix}${flag.name}`;
+        
+        conflictTracker.addResolution({
+          originalKey: flag.key,
+          resolvedKey: flagKey,
+          resourceType: 'flag',
+          conflictPrefix: inputArgs.conflictPrefix
+        });
+      } else {
+        // No prefix or second attempt - flag exists, proceed to update it
+        flagCreated = true;
+        createdFlagKey = flagKey;
+        console.log(Colors.yellow(`\t⚠ Exists, updating environments...`));
+        
+        // Also add flag to views if needed (since it already exists)
+        if (viewKeys.length > 0) {
+          try {
+            const viewPatch = [{
+              op: "add",
+              path: "/viewKeys",
+              value: viewKeys
+            }];
+            
+            const viewPatchResp = await rateLimitRequest(
+              ldAPIPatchRequest(
+                apiKey,
+                domain,
+                `flags/${inputArgs.projKeyDest}/${flagKey}`,
+                viewPatch
+              ),
+              'flags'
+            );
+            
+            if (viewPatchResp.status >= 200 && viewPatchResp.status < 300) {
+              console.log(Colors.green(`\t  ✓ Added to view(s): ${viewKeys.join(', ')}`));
+            }
+          } catch (error) {
+            // Silently continue if view linking fails
+          }
+        }
+        
+        break; // Exit retry loop and proceed to patching
+      }
     } else {
-      console.log(`Error for flag ${newFlag.key}: ${flagResp.status}`);
+      // Real error
+      console.log(Colors.red(`\t✗ Error ${flagResp.status}`));
       const errorText = await flagResp.text();
-      console.log(`Error details: ${errorText}`);
-      console.log(`Request payload: ${JSON.stringify(newFlag, null, 2)}`);
+      console.log(Colors.red(`\t  ${errorText}`));
       break; // Exit loop on non-conflict errors
     }
   }
 
   // Add flag env settings - use the potentially updated flag key
   if (flagCreated) {
-    console.log(Colors.cyan(`\t📝 Patching flag ${createdFlagKey} for ${envkeys.length} environment(s)...`));
     for (const env of envkeys) {
       if (!flag.environments || !flag.environments[env]) {
-        console.log(Colors.yellow(`\t⚠ Warning: No environment data found for ${env} in flag ${flag.key}, skipping...`));
         continue;
       }
 
       // Determine destination environment key (mapped or original)
       const destEnvKey = inputArgs.envMap && envMapping[env] ? envMapping[env] : env;
-      console.log(Colors.gray(`\t  Source env: ${env} → Destination env: ${destEnvKey}`));
 
       const patchReq: any[] = [];
       const flagEnvData = flag.environments[env];
@@ -728,9 +796,7 @@ for (const [index, flagkey] of flagList.entries()) {
             );
           }
         });
-      await makePatchCall(createdFlagKey, patchReq, destEnvKey);
-
-      console.log(`\tFinished patching flag ${createdFlagKey} for env ${destEnvKey}`);
+      await makePatchCall(createdFlagKey, patchReq, destEnvKey, flagMaintainerId, currentMemberId, flag.variations);
     }
   }
 }
@@ -746,10 +812,120 @@ projectJson.environments.items.forEach((env: any) => {
 //const envList: string[] = ["test"];
 
 
-async function makePatchCall(flagKey: string, patchReq: any[], env: string) {
-  console.log(Colors.cyan(`\t→ Patching flag ${flagKey} for environment ${env}...`));
-  console.log(Colors.gray(`\t  Patch operations: ${patchReq.length} items`));
+/**
+ * Convert JSON Patch format to Semantic Patch format for approval requests
+ * LaunchDarkly approval requests require semantic patches with "kind" field
+ * @param variations - Array of flag variations with _id fields to map indices to UUIDs
+ * @returns Object with semantic patches and array of skipped field names
+ */
+function convertToSemanticPatch(jsonPatches: any[], envKey: string, variations: any[]): { instructions: any[], skippedFields: string[] } {
+  const semanticPatches: any[] = [];
+  const skippedFields = new Set<string>();
   
+  // Helper to convert variation index to UUID
+  const getVariationId = (index: number): string | undefined => {
+    return variations[index]?._id;
+  };
+  
+  for (const patch of jsonPatches) {
+    // Extract the field being modified (after environments/{envKey}/)
+    const pathParts = patch.path.split('/');
+    const envIndex = pathParts.indexOf('environments');
+    if (envIndex === -1) continue;
+    
+    const field = pathParts[envIndex + 2]; // Skip 'environments' and envKey
+    
+    // Convert based on field type - only handle fields we know work
+    if (field === 'on') {
+      // Convert to turnFlagOn or turnFlagOff
+      semanticPatches.push({
+        kind: patch.value === true ? 'turnFlagOn' : 'turnFlagOff'
+      });
+    } else if (field === 'offVariation') {
+      // Update off variation - convert index to UUID
+      const variationId = getVariationId(patch.value);
+      if (variationId) {
+        semanticPatches.push({
+          kind: 'updateOffVariation',
+          variationId
+        });
+      }
+    } else if (field === 'fallthrough') {
+      // Update fallthrough - can be either a simple variation or a rollout
+      const instruction: any = {
+        kind: 'updateFallthroughVariationOrRollout'
+      };
+      
+      if (patch.value.variation !== undefined) {
+        // Simple variation - convert index to UUID
+        const variationId = getVariationId(patch.value.variation);
+        if (variationId) {
+          instruction.variationId = variationId;
+        }
+      } else if (patch.value.rollout) {
+        // Rollout with bucketBy and variations - need to convert variation indices in rollout
+        instruction.rollout = {
+          ...patch.value.rollout,
+          variations: patch.value.rollout.variations?.map((v: any) => ({
+            ...v,
+            variation: getVariationId(v.variation) || v.variation
+          }))
+        };
+      }
+      
+      // Only add if we have either variationId or rollout
+      if (instruction.variationId || instruction.rollout) {
+        semanticPatches.push(instruction);
+      }
+    } else if (field === 'rules') {
+      // For rules, check if it's an add operation
+      if (patch.op === 'add' && patch.path.includes('rules/-')) {
+        const ruleInstruction: any = {
+          kind: 'addRule',
+          clauses: patch.value.clauses || [],
+          ...(patch.value.description && { description: patch.value.description })
+        };
+        
+        // Rules can have either a variation or a rollout
+        if (patch.value.variation !== undefined) {
+          const variationId = getVariationId(patch.value.variation);
+          if (variationId) {
+            ruleInstruction.variationId = variationId;
+          }
+        } else if (patch.value.rollout) {
+          // Convert variation indices in rollout
+          ruleInstruction.rollout = {
+            ...patch.value.rollout,
+            variations: patch.value.rollout.variations?.map((v: any) => ({
+              ...v,
+              variation: getVariationId(v.variation) || v.variation
+            }))
+          };
+        }
+        
+        semanticPatches.push(ruleInstruction);
+      }
+    } else if (field === 'trackEvents') {
+      // Skip trackEvents - not supported in approval requests
+      skippedFields.add(field);
+    } else {
+      // Skip fields we can't convert (targets, contextTargets, prerequisites, etc.)
+      // These will need to be set manually after approval
+      skippedFields.add(field);
+    }
+  }
+  
+  if (skippedFields.size > 0) {
+    console.log(Colors.gray(`\t    ⓘ Skipped fields (set manually after approval): ${Array.from(skippedFields).join(', ')}`));
+  }
+  
+  return {
+    instructions: semanticPatches,
+    skippedFields: Array.from(skippedFields)
+  };
+}
+
+async function makePatchCall(flagKey: string, patchReq: any[], env: string, maintainerId: string | null, fallbackMemberId: string | null, variations: any[]) {
   const patchFlagReq = await rateLimitRequest(
     ldAPIPatchRequest(
       apiKey,
@@ -761,32 +937,157 @@ async function makePatchCall(flagKey: string, patchReq: any[], env: string) {
   );
   const flagPatchStatus = await patchFlagReq.status;
   
-  // Only treat 400+ as errors (200, 201 are success)
-  if (flagPatchStatus >= 400) {
-    flagsDoubleCheck.push(flagKey);
-    console.log(Colors.red(`\t✗ ERROR patching ${flagKey} for env ${env}, Status: ${flagPatchStatus}`));
+  // 405 means environment requires approval workflow
+  if (flagPatchStatus === 405) {
+    console.log(Colors.cyan(`\t  → ${env}: Requires approval, creating approval request...`));
     
+    try {
+      // Convert JSON Patch format to Semantic Patch format for approval requests
+      const conversionResult = convertToSemanticPatch(patchReq, env, variations);
+      
+      console.log(Colors.gray(`\t    Converting ${patchReq.length} JSON patches → ${conversionResult.instructions.length} semantic instructions`));
+      
+      if (conversionResult.instructions.length === 0) {
+        console.log(Colors.yellow(`\t  ⚠ ${env}: No valid instructions to approve, skipping`));
+        return flagsDoubleCheck;
+      }
+      
+      const approvalRequestBody: any = {
+        description: `Migration of flag "${flagKey}" environment "${env}" from project "${inputArgs.projKeySource}"`,
+        instructions: conversionResult.instructions,
+      };
+      
+      // Determine who to notify about the approval request
+      // Priority: 1. Flag maintainer, 2. Current authenticated member, 3. No one (but warn)
+      if (maintainerId) {
+        approvalRequestBody.notifyMemberIds = [maintainerId];
+      } else if (fallbackMemberId) {
+        approvalRequestBody.notifyMemberIds = [fallbackMemberId];
+        console.log(Colors.gray(`\t    No maintainer mapped, notifying creating member`));
+      } else {
+        console.log(Colors.yellow(`\t    ⚠ No one to notify (service token used and no maintainer)`));
+      }
+      
+      // Correct endpoint format: /projects/{projectKey}/flags/{flagKey}/environments/{envKey}/approval-requests
+      const approvalResp = await rateLimitRequest(
+        ldAPIPostRequest(
+          apiKey,
+          domain,
+          `projects/${inputArgs.projKeyDest}/flags/${flagKey}/environments/${env}/approval-requests`,
+          approvalRequestBody
+        ),
+        'approval-requests'
+      );
+      
+      if (approvalResp.status >= 200 && approvalResp.status < 300) {
+        console.log(Colors.green(`\t  ✓ ${env}: Approval request created`));
+        
+        // Track this approval request
+        approvalRequestsCreated.push({
+          flag: flagKey,
+          env: env,
+          skippedFields: conversionResult.skippedFields
+        });
+        
+        // Track skipped fields for this flag
+        if (conversionResult.skippedFields.length > 0) {
+          if (!skippedFieldsByFlag.has(flagKey)) {
+            skippedFieldsByFlag.set(flagKey, new Set());
+          }
+          const flagSkipped = skippedFieldsByFlag.get(flagKey)!;
+          conversionResult.skippedFields.forEach(f => flagSkipped.add(f));
+        }
+      } else {
+        const errorBody = await approvalResp.text();
+        console.log(Colors.yellow(`\t  ⚠ ${env}: Failed to create approval request (status: ${approvalResp.status})`));
+        console.log(Colors.gray(`\t    API response: ${errorBody}`));
+        flagsDoubleCheck.push(flagKey);
+      }
+    } catch (error) {
+      console.log(Colors.red(`\t  ✗ ${env}: Error creating approval request`));
+      flagsDoubleCheck.push(flagKey);
+    }
+  } else if (flagPatchStatus >= 400) {
+    // Other errors (400, 403, 404, etc.)
+    flagsDoubleCheck.push(flagKey);
+    console.log(Colors.red(`\t  ✗ ${env}: Error ${flagPatchStatus}`));
     if (flagPatchStatus == 400) {
       const errorBody = await patchFlagReq.text();
-      console.log(Colors.red(`\t  Error details: ${errorBody}`));
+      console.log(Colors.red(`\t    ${errorBody}`));
     }
   } else if (flagPatchStatus > 201) {
-    // 202-399 range: log as warning but don't fail
-    console.log(Colors.yellow(`\t⚠ Patching ${flagKey} for env ${env}, Status: ${flagPatchStatus}`));
-  } else {
-    // 200-201: Success
-    console.log(Colors.green(`\t✓ Successfully patched ${flagKey} for env ${env}, Status: ${flagPatchStatus}`));
+    console.log(Colors.yellow(`\t  ⚠ ${env}: Status ${flagPatchStatus}`));
   }
+  // Success (200-201) - no logging needed for each env
 
   return flagsDoubleCheck;
 }
 
-if (flagsDoubleCheck.length > 0) {
-  console.log("There are a few flags to double check as they have had an error or warning on the patch")
-  flagsDoubleCheck.forEach((flag) => {
-    console.log(` - ${flag}`)
+// Print final summary report
+console.log(Colors.blue("\n\n" + "=".repeat(70)));
+console.log(Colors.blue("📊 MIGRATION SUMMARY"));
+console.log(Colors.blue("=".repeat(70)));
+
+// 1. Approval Requests
+if (approvalRequestsCreated.length > 0) {
+  console.log(Colors.yellow("\n⏳ APPROVAL REQUESTS CREATED"));
+  console.log(Colors.yellow("The following flags require approval before changes take effect:\n"));
+  
+  // Group by flag
+  const approvalsByFlag = new Map<string, string[]>();
+  approvalRequestsCreated.forEach(req => {
+    if (!approvalsByFlag.has(req.flag)) {
+      approvalsByFlag.set(req.flag, []);
+    }
+    approvalsByFlag.get(req.flag)!.push(req.env);
   });
+  
+  approvalsByFlag.forEach((envs, flag) => {
+    console.log(Colors.cyan(`  📋 ${flag}`));
+    console.log(Colors.gray(`     Environments: ${envs.join(', ')}`));
+  });
+  
+  console.log(Colors.yellow(`\n  Total: ${approvalRequestsCreated.length} approval request(s) across ${approvalsByFlag.size} flag(s)`));
+  console.log(Colors.gray(`  → Review and approve these in the LaunchDarkly UI`));
 }
 
-// Print conflict resolution report
+// 2. Non-migrated settings
+if (skippedFieldsByFlag.size > 0) {
+  console.log(Colors.yellow("\n⚠️  NON-MIGRATED SETTINGS"));
+  console.log(Colors.yellow("The following fields could not be migrated via approval requests:"));
+  console.log(Colors.gray("These will need to be set manually after approvals are applied.\n"));
+  
+  skippedFieldsByFlag.forEach((fields, flag) => {
+    console.log(Colors.cyan(`  📋 ${flag}`));
+    console.log(Colors.gray(`     Fields: ${Array.from(fields).join(', ')}`));
+  });
+  
+  console.log(Colors.yellow(`\n  Total: ${skippedFieldsByFlag.size} flag(s) with non-migrated settings`));
+}
+
+// 3. Errors/Warnings
+if (flagsDoubleCheck.length > 0) {
+  console.log(Colors.red("\n❌ FLAGS WITH ERRORS"));
+  console.log(Colors.red("The following flags encountered errors during migration:\n"));
+  
+  flagsDoubleCheck.forEach((flag) => {
+    console.log(Colors.red(`  ✗ ${flag}`));
+  });
+  
+  console.log(Colors.red(`\n  Total: ${flagsDoubleCheck.length} flag(s) with errors`));
+  console.log(Colors.gray(`  → Review these flags manually`));
+}
+
+// 4. Conflict resolution report
 console.log(conflictTracker.getReport());
+
+// Final summary line
+console.log(Colors.blue("\n" + "=".repeat(70)));
+if (approvalRequestsCreated.length > 0) {
+  console.log(Colors.cyan(`✓ Migration complete with ${approvalRequestsCreated.length} pending approval(s)`));
+} else if (flagsDoubleCheck.length > 0) {
+  console.log(Colors.yellow(`⚠ Migration complete with ${flagsDoubleCheck.length} error(s)`));
+} else {
+  console.log(Colors.green("✓ Migration complete successfully"));
+}
+console.log(Colors.blue("=".repeat(70) + "\n"));
