@@ -211,7 +211,7 @@ console.log(Colors.blue("👥 Loading maintainer mapping..."));
 let maintainerMapping: Record<string, string | null> = {};
 if (inputArgs.assignMaintainerIds) {
   try {
-    maintainerMapping = await getJson("./data/launchdarkly-migrations/mappings/maintainer_mapping.json") || {};
+  maintainerMapping = await getJson("./data/launchdarkly-migrations/mappings/maintainer_mapping.json") || {};
     console.log(Colors.green(`✓ Loaded maintainer mapping with ${Object.keys(maintainerMapping).length} entries`));
   } catch (error) {
     console.log(Colors.yellow(`⚠ Warning: Could not load maintainer mapping file: ${error}`));
@@ -323,15 +323,15 @@ if (targetProjectExists) {
     }
   } else {
     // Original behavior: filter to matching environment keys
-    const missingEnvs = envkeys.filter(key => !existingEnvs.includes(key));
-    if (missingEnvs.length > 0) {
-      console.log(Colors.yellow(`Warning: The following environments from source project don't exist in target project: ${missingEnvs.join(', ')}`));
-      console.log(Colors.yellow('Skipping these environments...'));
-    }
-    
-    // Update envkeys to only include environments that exist in the target project
-    envkeys.length = 0;
-    envkeys.push(...existingEnvs);
+  const missingEnvs = envkeys.filter(key => !existingEnvs.includes(key));
+  if (missingEnvs.length > 0) {
+    console.log(Colors.yellow(`Warning: The following environments from source project don't exist in target project: ${missingEnvs.join(', ')}`));
+    console.log(Colors.yellow('Skipping these environments...'));
+  }
+  
+  // Update envkeys to only include environments that exist in the target project
+  envkeys.length = 0;
+  envkeys.push(...existingEnvs);
   }
 } else {
   console.log(`Creating new project ${inputArgs.projKeyDest}`);
@@ -456,28 +456,28 @@ if (inputArgs.migrateSegments) {
 
       while (!segmentCreated && attemptCount < 2) {
         attemptCount++;
-        
-        const newSegment: any = {
+
+      const newSegment: any = {
           name: segmentName,
           key: segmentKey,
-        };
+      };
 
-        if (segment.tags) newSegment.tags = segment.tags;
-        if (segment.description) newSegment.description = segment.description;
+      if (segment.tags) newSegment.tags = segment.tags;
+      if (segment.description) newSegment.description = segment.description;
 
-        const post = ldAPIPostRequest(
-          apiKey,
-          domain,
+      const post = ldAPIPostRequest(
+        apiKey,
+        domain,
           `segments/${inputArgs.projKeyDest}/${destEnvKey}`,
-          newSegment,
-        )
+        newSegment,
+      )
 
-        const segmentResp = await rateLimitRequest(
-          post,
-          'segments'
-        );
+      const segmentResp = await rateLimitRequest(
+        post,
+        'segments'
+      );
 
-        const segmentStatus = await segmentResp.status;
+      const segmentStatus = await segmentResp.status;
         
         if (segmentStatus === 201 || segmentStatus === 200) {
           segmentCreated = true;
@@ -504,7 +504,7 @@ if (inputArgs.migrateSegments) {
           }
         } else {
           console.log(Colors.red(`  ✗ Error creating segment ${newSegment.key} (status: ${segmentStatus})`));
-          if (segmentStatus > 201) {
+      if (segmentStatus > 201) {
             console.log(Colors.gray(`  Payload: ${JSON.stringify(newSegment)}`));
           }
           break; // Exit loop on non-conflict errors
@@ -513,35 +513,35 @@ if (inputArgs.migrateSegments) {
 
       // Build Segment Patches - use the possibly updated segmentKey
       if (segmentCreated) {
-        const sgmtPatches = [];
+      const sgmtPatches = [];
 
-        if (segment.included?.length > 0) {
-          sgmtPatches.push(buildPatch("included", "add", segment.included));
-        }
-        if (segment.excluded?.length > 0) {
-          sgmtPatches.push(buildPatch("excluded", "add", segment.excluded));
-        }
+      if (segment.included?.length > 0) {
+        sgmtPatches.push(buildPatch("included", "add", segment.included));
+      }
+      if (segment.excluded?.length > 0) {
+        sgmtPatches.push(buildPatch("excluded", "add", segment.excluded));
+      }
 
-        if (segment.rules?.length > 0) {
+      if (segment.rules?.length > 0) {
           console.log(`Copying Segment: ${segmentKey} rules`);
-          sgmtPatches.push(...buildRules(segment.rules));
-        }
+        sgmtPatches.push(...buildRules(segment.rules));
+      }
 
-        const patchRules = await rateLimitRequest(
-          ldAPIPatchRequest(
-            apiKey,
-            domain,
+      const patchRules = await rateLimitRequest(
+        ldAPIPatchRequest(
+          apiKey,
+          domain,
             `segments/${inputArgs.projKeyDest}/${destEnvKey}/${segmentKey}`,
-            sgmtPatches,
-          ),
-          'segments'
-        );
+          sgmtPatches,
+        ),
+        'segments'
+      );
 
-        const segPatchStatus = patchRules.statusText;
-        consoleLogger(
-          patchRules.status,
+      const segPatchStatus = patchRules.statusText;
+      consoleLogger(
+        patchRules.status,
           `Patching segment ${segmentKey} status: ${segPatchStatus}`,
-        );
+      );
       }
     };
   };
@@ -575,7 +575,7 @@ for (const [index, flagkey] of flagList.entries()) {
     console.log(Colors.yellow(`\tWarning: Could not load flag data for ${flagkey}, skipping...`));
     continue;
   }
-  
+
   if (!flag.variations) {
     console.log(Colors.yellow(`\t⚠ No variations, skipping`));
     continue;
@@ -598,18 +598,18 @@ for (const [index, flagkey] of flagList.entries()) {
   while (!flagCreated && attemptCount < 2) {
     attemptCount++;
 
-    const newFlag: any = {
+  const newFlag: any = {
       key: flagKey,
       name: flagName,
-      variations: newVariations,
-      temporary: flag.temporary,
-      tags: flag.tags,
-      description: flag.description,
-      maintainerId: null  // Set to null by default to prevent API from assigning token owner
-    };
+    variations: newVariations,
+    temporary: flag.temporary,
+    tags: flag.tags,
+    description: flag.description,
+    maintainerId: null  // Set to null by default to prevent API from assigning token owner
+  };
 
-    // Only assign maintainerId if explicitly requested and mapping exists
-    if (inputArgs.assignMaintainerIds) {
+  // Only assign maintainerId if explicitly requested and mapping exists
+  if (inputArgs.assignMaintainerIds) {
       if (flag.maintainerId && maintainerMapping[flag.maintainerId]) {
         newFlag.maintainerId = maintainerMapping[flag.maintainerId];
         flagMaintainerId = newFlag.maintainerId;
@@ -618,20 +618,20 @@ for (const [index, flagkey] of flagList.entries()) {
       }
     } else {
       newFlag.maintainerId = null;
-    }
+  }
 
-    if (flag.clientSideAvailability) {
-      newFlag.clientSideAvailability = flag.clientSideAvailability;
-    } else if (flag.includeInSnippet) {
-      newFlag.includeInSnippet = flag.includeInSnippet;
-    }
-    if (flag.customProperties) {
-      newFlag.customProperties = flag.customProperties;
-    }
+  if (flag.clientSideAvailability) {
+    newFlag.clientSideAvailability = flag.clientSideAvailability;
+  } else if (flag.includeInSnippet) {
+    newFlag.includeInSnippet = flag.includeInSnippet;
+  }
+  if (flag.customProperties) {
+    newFlag.customProperties = flag.customProperties;
+  }
 
-    if (flag.defaults) {
-      newFlag.defaults = flag.defaults;
-    }
+  if (flag.defaults) {
+    newFlag.defaults = flag.defaults;
+  }
 
     // Collect view associations (but don't add to newFlag yet)
     // We'll add them after creation due to a bug in LD's beta API
@@ -651,18 +651,18 @@ for (const [index, flagkey] of flagList.entries()) {
     // viewKeys in flag creation causes the key field to be lost during parsing
     // We'll add views via PATCH after creation
     
-    const flagResp = await rateLimitRequest(
-      ldAPIPostRequest(
-        apiKey,
-        domain,
-        `flags/${inputArgs.projKeyDest}`,
-        newFlag,
+  const flagResp = await rateLimitRequest(
+    ldAPIPostRequest(
+      apiKey,
+      domain,
+      `flags/${inputArgs.projKeyDest}`,
+      newFlag,
         false // Never use beta version for flag creation
-      ),
-      'flags'
-    );
+    ),
+    'flags'
+  );
 
-    if (flagResp.status == 200 || flagResp.status == 201) {
+  if (flagResp.status == 200 || flagResp.status == 201) {
       flagCreated = true;
       createdFlagKey = flagKey;
       console.log(Colors.green(`\t✓ Created`));
@@ -744,11 +744,11 @@ for (const [index, flagkey] of flagList.entries()) {
         }
         
         break; // Exit retry loop and proceed to patching
-      }
-    } else {
+    }
+  } else {
       // Real error
       console.log(Colors.red(`\t✗ Error ${flagResp.status}`));
-      const errorText = await flagResp.text();
+    const errorText = await flagResp.text();
       console.log(Colors.red(`\t  ${errorText}`));
       break; // Exit loop on non-conflict errors
     }
@@ -756,46 +756,46 @@ for (const [index, flagkey] of flagList.entries()) {
 
   // Add flag env settings - use the potentially updated flag key
   if (flagCreated) {
-    for (const env of envkeys) {
-      if (!flag.environments || !flag.environments[env]) {
-        continue;
-      }
+  for (const env of envkeys) {
+    if (!flag.environments || !flag.environments[env]) {
+      continue;
+    }
 
       // Determine destination environment key (mapped or original)
       const destEnvKey = inputArgs.envMap && envMapping[env] ? envMapping[env] : env;
 
-      const patchReq: any[] = [];
-      const flagEnvData = flag.environments[env];
-      const parsedData: Record<string, string> = Object.keys(flagEnvData)
-        .filter((key) => !key.includes("salt"))
-        .filter((key) => !key.includes("version"))
-        .filter((key) => !key.includes("lastModified"))
-        .filter((key) => !key.includes("_environmentName"))
-        .filter((key) => !key.includes("_site"))
-        .filter((key) => !key.includes("_summary"))
-        .filter((key) => !key.includes("sel"))
-        .filter((key) => !key.includes("access"))
-        .filter((key) => !key.includes("_debugEventsUntilDate"))
-        .filter((key) => !key.startsWith("_"))
-        .filter((key) => !key.startsWith("-"))
-        .reduce((cur, key) => {
-          return Object.assign(cur, { [key]: flagEnvData[key] });
-        }, {});
+    const patchReq: any[] = [];
+    const flagEnvData = flag.environments[env];
+    const parsedData: Record<string, string> = Object.keys(flagEnvData)
+      .filter((key) => !key.includes("salt"))
+      .filter((key) => !key.includes("version"))
+      .filter((key) => !key.includes("lastModified"))
+      .filter((key) => !key.includes("_environmentName"))
+      .filter((key) => !key.includes("_site"))
+      .filter((key) => !key.includes("_summary"))
+      .filter((key) => !key.includes("sel"))
+      .filter((key) => !key.includes("access"))
+      .filter((key) => !key.includes("_debugEventsUntilDate"))
+      .filter((key) => !key.startsWith("_"))
+      .filter((key) => !key.startsWith("-"))
+      .reduce((cur, key) => {
+        return Object.assign(cur, { [key]: flagEnvData[key] });
+      }, {});
 
-      Object.keys(parsedData)
-        .map((key) => {
-          if (key == "rules") {
+    Object.keys(parsedData)
+      .map((key) => {
+        if (key == "rules") {
             patchReq.push(...buildRules(parsedData[key] as unknown as Rule[], "environments/" + destEnvKey));
-          } else {
-            patchReq.push(
-              buildPatch(
+        } else {
+          patchReq.push(
+            buildPatch(
                 `environments/${destEnvKey}/${key}`,
-                "replace",
-                parsedData[key],
-              ),
-            );
-          }
-        });
+              "replace",
+              parsedData[key],
+            ),
+          );
+        }
+      });
       await makePatchCall(createdFlagKey, patchReq, destEnvKey, flagMaintainerId, currentMemberId, flag.variations);
     }
   }
@@ -939,9 +939,44 @@ async function makePatchCall(flagKey: string, patchReq: any[], env: string, main
   
   // 405 means environment requires approval workflow
   if (flagPatchStatus === 405) {
-    console.log(Colors.cyan(`\t  → ${env}: Requires approval, creating approval request...`));
+    console.log(Colors.cyan(`\t  → ${env}: Requires approval, checking for existing requests...`));
     
     try {
+      // First, check if there are existing pending approval requests
+      const listApprovalsReq = ldAPIRequest(
+        apiKey,
+        domain,
+        `projects/${inputArgs.projKeyDest}/flags/${flagKey}/environments/${env}/approval-requests`
+      );
+      const listApprovalsResp = await rateLimitRequest(listApprovalsReq, 'approval-requests');
+      
+      if (listApprovalsResp.status === 200) {
+        const approvalsData = await listApprovalsResp.json();
+        // Check if there are any active approval requests (pending, scheduled, or failed/declined)
+        // We check these to avoid creating duplicates if a previous migration created one
+        const activeApprovals = approvalsData.items?.filter((req: any) => 
+          req.status === 'pending' || req.status === 'scheduled' || req.status === 'failed'
+        ) || [];
+        
+        if (activeApprovals.length > 0) {
+          const approval = activeApprovals[0];
+          console.log(Colors.yellow(`\t  ⚠ ${env}: Existing approval request found (ID: ${approval._id}, status: ${approval.status})`));
+          console.log(Colors.gray(`\t    Skipping creation to avoid duplicates`));
+          
+          // Still track this as needing approval, but note it already exists
+          approvalRequestsCreated.push({
+            flag: flagKey,
+            env: env,
+            skippedFields: [] // We don't know what fields the existing request covers
+          });
+          
+          return flagsDoubleCheck;
+        }
+      }
+      
+      // No existing request, proceed to create one
+      console.log(Colors.gray(`\t    No existing requests, creating new approval request...`));
+      
       // Convert JSON Patch format to Semantic Patch format for approval requests
       const conversionResult = convertToSemanticPatch(patchReq, env, variations);
       
