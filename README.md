@@ -1,8 +1,8 @@
 # LaunchDarkly Migration Scripts
 
-[![Version](https://img.shields.io/badge/version-3.0.0-blue.svg)](https://github.com/your-username/ld-migration-scripts)
+[![Version](https://img.shields.io/badge/dynamic/json?url=https://raw.githubusercontent.com/launchdarkly-labs/ld-migration-scripts/main/deno.json&query=$.version&label=version&color=blue)](https://github.com/launchdarkly-labs/ld-migration-scripts)
 [![Deno](https://img.shields.io/badge/deno-v2.x-blue.svg)](https://deno.land/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 Set of scripts intended for migrating LaunchDarkly projects between different accounts, regions, or instances. The supported resources include: environments, flags, segments, and maintainer mappings.
 
 ## Overview
@@ -1163,6 +1163,16 @@ You can also manage versions manually:
 - **deno.json**: Update the `version` field
 - **README.md**: Update the version badge
 - **CHANGELOG.md**: Move items from `[Unreleased]` to a new version section
+
+## License
+
+Apache 2.0 - see LICENSE file
+
+## LaunchDarkly Labs Disclaimer
+
+This repository is maintained by LaunchDarkly Labs. While we try to keep it 
+up to date, it is not officially supported by LaunchDarkly. For officially 
+supported SDKs and tools, visit https://launchdarkly.com
 
 ## Support
 
