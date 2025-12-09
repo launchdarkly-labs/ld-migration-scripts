@@ -609,11 +609,27 @@ if (inputArgs.migrateSegments) {
       if (segmentCreated) {
       const sgmtPatches = [];
 
+      // Legacy user targeting (single context kind)
       if (segment.included?.length > 0) {
         sgmtPatches.push(buildPatch("included", "add", segment.included));
       }
       if (segment.excluded?.length > 0) {
         sgmtPatches.push(buildPatch("excluded", "add", segment.excluded));
+      }
+
+      // Multi-context targeting (includedContexts/excludedContexts)
+      // These are used for targeting contexts other than "user" (e.g., organization, device)
+      if (segment.includedContexts?.length > 0) {
+        for (const contextTarget of segment.includedContexts) {
+          sgmtPatches.push(buildPatch("includedContexts/-", "add", contextTarget));
+        }
+        console.log(Colors.gray(`    Adding ${segment.includedContexts.length} includedContexts entries`));
+      }
+      if (segment.excludedContexts?.length > 0) {
+        for (const contextTarget of segment.excludedContexts) {
+          sgmtPatches.push(buildPatch("excludedContexts/-", "add", contextTarget));
+        }
+        console.log(Colors.gray(`    Adding ${segment.excludedContexts.length} excludedContexts entries`));
       }
 
       if (segment.rules?.length > 0) {

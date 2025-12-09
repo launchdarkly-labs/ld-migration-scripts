@@ -7,7 +7,6 @@ import {
   convertToLaunchDarklyFlag,
   createFlagViaAPI,
   generateImportReport,
-  delay
 } from "../../utils/utils.ts";
 import type { ImportFlag, ImportResult } from "../../types/deno.d.ts";
 
@@ -108,12 +107,7 @@ async function main() {
         } else {
           console.log(`   ❌ Failed: ${result.error}`);
         }
-        
-        // Rate limiting delay between requests
-        if (i < flags.length - 1) {
-          await delay(200);
-        }
-        
+        // Rate limiting is handled automatically by rateLimitRequest based on response headers
       } catch (error) {
         const result: ImportResult = {
           key: flag.key,
