@@ -209,7 +209,7 @@ export function ldAPIPostRequest(
   apiKey: string,
   domain: string,
   path: string,
-  body: any,
+  body: Record<string, unknown>,
   useBetaVersion = false,
 ) {
   const headers: Record<string, string> = {
@@ -238,7 +238,7 @@ export function ldAPIPatchRequest(
   apiKey: string,
   domain: string,
   path: string,
-  body: any,
+  body: Record<string, unknown> | Array<Record<string, unknown>>,
 ) {
   const req = new Request(
     `https://${domain}/api/v2/${path}`,
@@ -256,7 +256,7 @@ export function ldAPIPatchRequest(
   return req;
 }
 
-export function buildPatch(key: string, op: string, value: any) {
+export function buildPatch(key: string, op: string, value: unknown) {
   return {
     path: "/" + key,
     op,
@@ -272,20 +272,20 @@ export interface RuleClause {
 export interface Rule {
   clauses: RuleClause[];
   _id: string;
-  generation: number;
-  deleted: boolean;
-  version: number;
-  ref: string;
+  _generation: number;
+  _deleted: boolean;
+  _version: number;
+  _ref: string;
   [key: string]: unknown;
 }
 
 export function buildRules(
   rules: Rule[],
   env?: string,
-): { path: string; op: string; value: any }[] {
-  const newRules: { path: string; op: string; value: any }[] = [];
+): { path: string; op: string; value: unknown }[] {
+  const newRules: { path: string; op: string; value: unknown }[] = [];
   const path = env ? `${env}/rules/-` : "rules/-";
-  rules.map(({ clauses, _id, generation, deleted, version, ref, ...rest }) => {
+  rules.map(({ clauses, _id, _generation, _deleted, _version, _ref, ...rest }) => {
     const newRule = rest;
     const newClauses = { clauses: clauses.map(({ _id, ...rest }) => rest) };
     Object.assign(newRule, newClauses);
@@ -298,7 +298,7 @@ export function buildRules(
 export async function writeSourceData(
   projPath: string,
   dataType: string,
-  data: any,
+  data: unknown,
 ) {
   return await writeJson(`${projPath}/${dataType}.json`, data);
 }
@@ -324,7 +324,7 @@ export function ldAPIRequest(apiKey: string, domain: string, path: string, useBe
   return req;
 }
 
-async function writeJson(filePath: string, o: any) {
+async function writeJson(filePath: string, o: unknown) {
   try {
     await Deno.writeTextFile(filePath, JSON.stringify(o, null, 2));
   } catch (e) {
@@ -381,22 +381,24 @@ function parseCSVFlags(csvContent: string): ImportFlag[] {
       throw new Error(`Line ${i + 1}: Expected ${headers.length} columns, got ${values.length}`);
     }
     
-    const flag: any = {};
+    const rawFlag: Record<string, string> = {};
     headers.forEach((header, index) => {
-      flag[header] = values[index];
+      rawFlag[header] = values[index];
     });
     
-    // Parse variations
-    flag.variations = parseCSVVariations(flag.variations, flag.kind);
-    flag.defaultOnVariation = parseCSVValue(flag.defaultOnVariation, flag.kind);
-    flag.defaultOffVariation = parseCSVValue(flag.defaultOffVariation, flag.kind);
+    // Parse variations and build the ImportFlag
+    const parsedFlag: ImportFlag = {
+      key: rawFlag.key,
+      name: rawFlag.name,
+      description: rawFlag.description,
+      kind: rawFlag.kind as ImportFlag['kind'],
+      variations: parseCSVVariations(rawFlag.variations, rawFlag.kind),
+      defaultOnVariation: parseCSVValue(rawFlag.defaultOnVariation, rawFlag.kind),
+      defaultOffVariation: parseCSVValue(rawFlag.defaultOffVariation, rawFlag.kind),
+      tags: rawFlag.tags ? rawFlag.tags.split(',').map((tag: string) => tag.trim()).filter((tag: string) => tag) : undefined,
+    };
     
-    // Parse tags
-    if (flag.tags) {
-      flag.tags = flag.tags.split(',').map((tag: string) => tag.trim()).filter((tag: string) => tag);
-    }
-    
-    flags.push(flag as ImportFlag);
+    flags.push(parsedFlag);
   }
   
   return flags;
@@ -434,11 +436,11 @@ function parseCSVLine(line: string): string[] {
   return result;
 }
 
-function parseCSVVariations(variationsStr: string, kind: string): (boolean | string | number | any)[] {
+function parseCSVVariations(variationsStr: string, kind: string): (boolean | string | number | Record<string, unknown>)[] {
   switch (kind) {
     case 'boolean':
     case 'number':
-    case 'string':
+    case 'string': {
       const variations = variationsStr.split(',').map((v: string) => v.trim());
       if (kind === 'boolean') {
         return variations.map((v: string) => v === 'true');
@@ -447,6 +449,7 @@ function parseCSVVariations(variationsStr: string, kind: string): (boolean | str
       } else {
         return variations;
       }
+    }
     case 'json':
       // For JSON, we need to handle the case where variations contain multiple JSON objects
       // The variationsStr should be in format: {"obj1"},{"obj2"},{"obj3"}
@@ -480,7 +483,7 @@ function parseCSVVariations(variationsStr: string, kind: string): (boolean | str
   }
 }
 
-function parseCSVValue(value: string, kind: string): any {
+function parseCSVValue(value: string, kind: string): boolean | string | number | Record<string, unknown> {
   switch (kind) {
     case 'boolean':
       return value === 'true';
@@ -554,13 +557,13 @@ export function validateFlagData(flags: ImportFlag[]): { valid: boolean; errors:
 }
 
 export function convertToLaunchDarklyFlag(importFlag: ImportFlag): LaunchDarklyFlag {
-  const variations = importFlag.variations.map((v: any) => ({ value: v }));
+  const variations = importFlag.variations.map((v) => ({ value: v }));
   
   // Find indices for default variations
-  const onIndex = importFlag.variations.findIndex((v: any) => 
+  const onIndex = importFlag.variations.findIndex((v) => 
     importFlag.kind === 'json' ? JSON.stringify(v) === JSON.stringify(importFlag.defaultOnVariation) : v === importFlag.defaultOnVariation
   );
-  const offIndex = importFlag.variations.findIndex((v: any) => 
+  const offIndex = importFlag.variations.findIndex((v) => 
     importFlag.kind === 'json' ? JSON.stringify(v) === JSON.stringify(importFlag.defaultOffVariation) : v === importFlag.defaultOffVariation
   );
   
@@ -591,7 +594,7 @@ export async function createFlagViaAPI(
   const startTime = Date.now();
   
   try {
-    const request = ldAPIPostRequest(apiKey, domain, `flags/${projectKey}`, flag);
+    const request = ldAPIPostRequest(apiKey, domain, `flags/${projectKey}`, flag as unknown as Record<string, unknown>);
     const response = await rateLimitRequest(request, "flags");
     
     if (response.ok) {
@@ -699,7 +702,7 @@ export const createView = async (
   view: View
 ): Promise<ViewOperationResult> => {
   try {
-    const req = ldAPIPostRequest(apiKey, domain, `projects/${projectKey}/views`, view, true);
+    const req = ldAPIPostRequest(apiKey, domain, `projects/${projectKey}/views`, view as unknown as Record<string, unknown>, true);
     const response = await rateLimitRequest(req, 'views');
     
     return isViewCreationSuccess(response.status)
@@ -713,7 +716,7 @@ export const createView = async (
 /**
  * Extracts views from API response data
  */
-const extractViewsFromResponse = (data: any): View[] => 
+const extractViewsFromResponse = (data: { items?: View[] }): View[] => 
   data.items || [];
 
 /**
