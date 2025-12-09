@@ -17,13 +17,116 @@ export async function delay(ms: number) {
   await new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// ==================== Smart Rate Limiter ====================
+
+interface RateLimitState {
+  globalRemaining: number;
+  routeRemaining: number;
+  resetTime: number;  // epoch ms when limit resets
+  lastUpdated: number;
+}
+
+// Track rate limits per route category
+const rateLimitState: Map<string, RateLimitState> = new Map();
+
+// Threshold: when remaining requests fall below this, start waiting proactively
+const PROACTIVE_THRESHOLD = 3;
+
+// Minimum delay between requests even when not rate limited (ms)
+const MIN_REQUEST_SPACING = 50;
+
+/**
+ * Extracts rate limit information from response headers
+ */
+function extractRateLimitHeaders(response: Response): Partial<RateLimitState> {
+  const headers = response.headers;
+  const state: Partial<RateLimitState> = {};
+  
+  // Check for various rate limit header formats LaunchDarkly uses
+  const globalRemaining = headers.get('x-ratelimit-global-remaining');
+  const routeRemaining = headers.get('x-ratelimit-route-remaining') || headers.get('x-ratelimit-remaining');
+  const resetTime = headers.get('x-ratelimit-reset');
+  const retryAfter = headers.get('retry-after');
+  
+  if (globalRemaining) {
+    state.globalRemaining = parseInt(globalRemaining, 10);
+  }
+  
+  if (routeRemaining) {
+    state.routeRemaining = parseInt(routeRemaining, 10);
+  }
+  
+  if (resetTime) {
+    state.resetTime = parseInt(resetTime, 10);
+  } else if (retryAfter) {
+    // retry-after is in seconds, convert to epoch ms
+    state.resetTime = Date.now() + (parseInt(retryAfter, 10) * 1000);
+  }
+  
+  state.lastUpdated = Date.now();
+  
+  return state;
+}
+
+/**
+ * Updates the rate limit state for a route category
+ */
+function updateRateLimitState(routeCategory: string, response: Response): void {
+  const extracted = extractRateLimitHeaders(response);
+  const existing = rateLimitState.get(routeCategory) || {
+    globalRemaining: 100,
+    routeRemaining: 100,
+    resetTime: 0,
+    lastUpdated: 0
+  };
+  
+  rateLimitState.set(routeCategory, {
+    ...existing,
+    ...extracted
+  });
+}
+
+/**
+ * Calculates how long to wait based on current rate limit state
+ */
+function calculateProactiveDelay(routeCategory: string): number {
+  const state = rateLimitState.get(routeCategory);
+  
+  if (!state) {
+    return MIN_REQUEST_SPACING;
+  }
+  
+  const now = Date.now();
+  const remaining = Math.min(state.globalRemaining, state.routeRemaining);
+  
+  // If we have plenty of requests remaining, just use minimum spacing
+  if (remaining > PROACTIVE_THRESHOLD) {
+    return MIN_REQUEST_SPACING;
+  }
+  
+  // If we're low on requests, calculate time until reset
+  if (state.resetTime > now) {
+    const timeUntilReset = state.resetTime - now;
+    // Spread remaining requests across the time until reset
+    const delayPerRequest = remaining > 0 ? Math.ceil(timeUntilReset / remaining) : timeUntilReset;
+    // Add jitter to avoid thundering herd
+    const jitter = Math.floor(Math.random() * 100);
+    return Math.max(delayPerRequest + jitter, MIN_REQUEST_SPACING);
+  }
+  
+  return MIN_REQUEST_SPACING;
+}
+
+/**
+ * Calculates delay when we've been rate limited (429 response)
+ */
 function calculateRateLimitDelay(response: Response): number {
   const now = Date.now();
   const retryAfterHeader = response.headers.get('retry-after');
   const rateLimitResetHeader = response.headers.get('x-ratelimit-reset');
 
   let retryAfter = 0;
-  let rateLmitReset = 0;
+  let rateLimitReset = 0;
 
   if (retryAfterHeader) {
     retryAfter = parseInt(retryAfterHeader, 10) * 1000; // Convert to ms
@@ -31,35 +134,75 @@ function calculateRateLimitDelay(response: Response): number {
 
   if (rateLimitResetHeader) {
     const resetTime = parseInt(rateLimitResetHeader, 10);
-    rateLmitReset = resetTime - now;
+    rateLimitReset = resetTime - now;
   }
                           
-  const delay = Math.max(retryAfter, rateLmitReset);
+  const delayMs = Math.max(retryAfter, rateLimitReset, 1000); // At least 1 second
 
-  // add random jitter
+  // Add random jitter
   const jitter = Math.floor(Math.random() * 100);
-  return delay + jitter;
+  return delayMs + jitter;
 }
 
-export async function rateLimitRequest(req: Request, path: String) {
+/**
+ * Gets the current rate limit state for debugging/logging
+ */
+export function getRateLimitState(routeCategory: string): RateLimitState | undefined {
+  return rateLimitState.get(routeCategory);
+}
+
+/**
+ * Logs rate limit status for a route category
+ */
+export function logRateLimitStatus(routeCategory: string): void {
+  const state = rateLimitState.get(routeCategory);
+  if (state) {
+    const remaining = Math.min(state.globalRemaining, state.routeRemaining);
+    const resetIn = state.resetTime > Date.now() 
+      ? Math.ceil((state.resetTime - Date.now()) / 1000) 
+      : 0;
+    console.log(Colors.gray(`  [Rate Limit] ${routeCategory}: ${remaining} remaining, resets in ${resetIn}s`));
+  }
+}
+
+/**
+ * Smart rate-limited request handler
+ * - Tracks rate limit headers from responses
+ * - Proactively waits when running low on requests
+ * - Handles 429 responses with proper backoff
+ */
+export async function rateLimitRequest(req: Request, routeCategory: string): Promise<Response> {
+  // Proactively wait based on current rate limit state
+  const proactiveDelay = calculateProactiveDelay(routeCategory);
+  if (proactiveDelay > MIN_REQUEST_SPACING) {
+    console.log(Colors.gray(`  Proactive rate limit wait: ${proactiveDelay}ms for ${routeCategory}`));
+  }
+  await delay(proactiveDelay);
+  
   const rateLimitReq = req.clone();
   const res = await fetch(req);
-  let newRes = res;
-  if (res.status == 409 && path == `projects`) {
+  
+  // Update rate limit state from response headers
+  updateRateLimitState(routeCategory, res);
+  
+  // Handle special cases
+  if (res.status === 409 && routeCategory === 'projects') {
     console.warn(Colors.yellow(`It looks like this project has already been created in the destination`));
     console.warn(Colors.yellow(`To avoid errors and possible overwrite, please either:`));
     console.warn(Colors.yellow(`Update your name to a new one, or delete the existing project in the destination instance`));
     Deno.exit(1);
   }
-  if (res.status == 429) {
-    const delay = calculateRateLimitDelay(res);
-    console.log(`Rate Limited for ${req.url} for ${delay}ms`);
-    await new Promise((resolve) => setTimeout(resolve, delay));
-    console.log(`Making new request for request ${req.url}`);
-    newRes = await rateLimitRequest(rateLimitReq, path);
+  
+  // Handle rate limiting (429)
+  if (res.status === 429) {
+    const waitTime = calculateRateLimitDelay(res);
+    console.log(Colors.yellow(`Rate Limited for ${req.url} - waiting ${waitTime}ms`));
+    await delay(waitTime);
+    console.log(`Retrying request for ${req.url}`);
+    return rateLimitRequest(rateLimitReq, routeCategory);
   }
 
-  return newRes;
+  return res;
 }
 
 export function ldAPIPostRequest(

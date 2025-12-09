@@ -5,7 +5,6 @@ import {
 } from "https://deno.land/std@0.149.0/fs/mod.ts";
 import {
   consoleLogger,
-  delay,
   ldAPIRequest,
   rateLimitRequest,
   writeSourceData,
@@ -107,22 +106,53 @@ if (inputArgs.extractSegments && allEnvironments.length > 0) {
   for (const env of allEnvironments) {
     console.log(`Getting segments for environment: ${env.key}`);
 
-    const segmentResp = await fetch(
-      ldAPIRequest(
-        apiKey,
-        domain,
-        `segments/${inputArgs.projKey}/${env.key}?limit=50`
-      )
-    );
-    if (segmentResp == null) {
-      console.log("Failed getting segments");
-      Deno.exit(1);
-    }
-    const segmentData = await segmentResp.json();
+    // Paginate through all segments (API returns max 50 per request)
+    const segmentPageSize: number = 50;
+    let segmentOffset: number = 0;
+    let moreSegments: boolean = true;
+    const allSegments: any[] = [];
+    let segmentPath = `segments/${inputArgs.projKey}/${env.key}?limit=${segmentPageSize}&offset=${segmentOffset}`;
+    
+    while (moreSegments) {
+      const segmentResp = await rateLimitRequest(
+        ldAPIRequest(apiKey, domain, segmentPath),
+        "segments"
+      );
 
-    await writeSourceData(`${projPath}/segments`, env.key, segmentData);
-    const end = Date.now() + 2_000;
-    while (Date.now() < end);
+      if (segmentResp.status > 201) {
+        consoleLogger(segmentResp.status, `Error getting segments: ${segmentResp.status}`);
+        consoleLogger(segmentResp.status, await segmentResp.text());
+      }
+      if (segmentResp == null) {
+        console.log(`Failed getting segments for environment ${env.key}`);
+        break;
+      }
+      
+      const segmentData = await segmentResp.json();
+      const totalCount = segmentData.totalCount || 0;
+      const itemsInPage = segmentData.items?.length || 0;
+      
+      allSegments.push(...segmentData.items);
+
+      console.log(`  Fetched segments ${segmentOffset + 1} to ${segmentOffset + itemsInPage} of ${totalCount}`);
+
+      // Check if there are more segments to fetch using totalCount
+      if (allSegments.length < totalCount) {
+        segmentOffset += segmentPageSize;
+        segmentPath = `segments/${inputArgs.projKey}/${env.key}?limit=${segmentPageSize}&offset=${segmentOffset}`;
+      } else {
+        moreSegments = false;
+      }
+    }
+    
+    // Save all segments for this environment
+    const finalSegmentData = {
+      items: allSegments,
+      totalCount: allSegments.length
+    };
+    
+    await writeSourceData(`${projPath}/segments`, env.key, finalSegmentData);
+    console.log(`  Found ${allSegments.length} segments for environment: ${env.key}`);
   }
 } else if (!inputArgs.extractSegments) {
   console.log("\nSkipping segment extraction (disabled in config)");
@@ -175,14 +205,14 @@ ensureDirSync(`${projPath}/flags`);
 for (const [index, flagKey] of flags.entries()) {
   console.log(`Getting flag ${index + 1} of ${flags.length}: ${flagKey}`);
 
-  await delay(200);
-
-  const flagResp = await fetch(
+  // Use rateLimitRequest which handles delays based on response headers
+  const flagResp = await rateLimitRequest(
     ldAPIRequest(
       apiKey,
       domain,
       `flags/${inputArgs.projKey}/${flagKey}`
-    )
+    ),
+    "flags"
   );
   if (flagResp.status > 201) {
     consoleLogger(

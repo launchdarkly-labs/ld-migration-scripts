@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.2] - 2025-12-09
+
+### Fixed
+- **Segment Pagination**: Fixed segment extraction being limited to 50 segments per environment
+  - Previously relied on `_links.next` which wasn't consistently returned by the API
+  - Now uses `totalCount` from API response to properly paginate through all segments
+  - Improved progress logging to show actual fetched range (e.g., "Fetched segments 1 to 50 of 500")
+
+### Changed
+- **Smart Rate Limiting**: Enhanced rate limit handling using HTTP response headers
+  - Reads `x-ratelimit-global-remaining`, `x-ratelimit-route-remaining`, and `x-ratelimit-reset` headers
+  - Proactive throttling when remaining requests fall below threshold (avoids hitting 429s)
+  - Intelligent delay calculation that spreads requests across the reset window
+  - Proper backoff on 429 responses using `retry-after` or `x-ratelimit-reset` headers
+  - Per-route rate limit tracking for more accurate throttling
+  - Added jitter to prevent thundering herd issues
+
 ## [3.0.1] - 2025-01-14
 
 ### Changed
