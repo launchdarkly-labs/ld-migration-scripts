@@ -6,6 +6,7 @@ import {
   validateFlagData,
   convertToLaunchDarklyFlag,
   createFlagViaAPI,
+  upsertFlagViaAPI,
   generateImportReport,
 } from "../../utils/utils.ts";
 import type { ImportFlag, ImportResult } from "../../types/deno.d.ts";
@@ -14,6 +15,7 @@ interface Arguments {
   file: string;
   project: string;
   dryRun: boolean;
+  upsert: boolean;
   output?: string;
   domain?: string;
 }
@@ -22,11 +24,15 @@ const inputArgs: Arguments = yargs(Deno.args)
   .alias("f", "file")
   .alias("p", "project")
   .alias("d", "dry-run")
+  .alias("u", "upsert")
   .alias("o", "output")
   .alias("domain", "domain")
   .boolean("d")
+  .boolean("u")
+  .default("u", false)
   .demandOption(["f", "p"])
   .describe("domain", "LaunchDarkly domain (default: app.launchdarkly.com)")
+  .describe("upsert", "Update existing flags instead of failing on conflict (409)")
   .parse() as Arguments;
 
 async function main() {
@@ -90,20 +96,23 @@ async function main() {
     const domain = inputArgs.domain || "app.launchdarkly.com";
     
     // Import flags
-    console.log("🚀 Starting flag import...\n");
+    const mode = inputArgs.upsert ? "Upserting" : "Creating";
+    console.log(`🚀 Starting flag import (${mode.toLowerCase()} mode)...\n`);
     const results: ImportResult[] = [];
-    
+
     for (let i = 0; i < flags.length; i++) {
       const flag = flags[i];
-      console.log(`[${i + 1}/${flags.length}] Creating flag: ${Colors.cyan(flag.key)}`);
-      
+      console.log(`[${i + 1}/${flags.length}] ${mode} flag: ${Colors.cyan(flag.key)}`);
+
       try {
         const ldFlag = convertToLaunchDarklyFlag(flag);
-        const result = await createFlagViaAPI(apiKey, domain, inputArgs.project, ldFlag);
+        const result = inputArgs.upsert
+          ? await upsertFlagViaAPI(apiKey, domain, inputArgs.project, ldFlag)
+          : await createFlagViaAPI(apiKey, domain, inputArgs.project, ldFlag);
         results.push(result);
-        
+
         if (result.success) {
-          console.log(`   ✅ Created successfully (${result.timing}ms)`);
+          console.log(`   ✅ ${inputArgs.upsert ? 'Upserted' : 'Created'} successfully (${result.timing}ms)`);
         } else {
           console.log(`   ❌ Failed: ${result.error}`);
         }

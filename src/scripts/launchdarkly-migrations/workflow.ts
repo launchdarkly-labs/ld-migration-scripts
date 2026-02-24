@@ -38,11 +38,14 @@ interface WorkflowConfig {
     environments?: string[];
     environmentMapping?: Record<string, string>;
     dryRun?: boolean;
+    incremental?: boolean;
+    since?: string;
   };
   thirdPartyImport?: {
     inputFile: string;
     targetProject: string;
     dryRun?: boolean;
+    upsert?: boolean;
     reportOutput?: string;
   };
   revert?: {
@@ -244,10 +247,12 @@ const buildMigrationArgs = (config: WorkflowConfig): string[] => {
   args = addBooleanFlag(args, "-m", migration.assignMaintainerIds);
   args = addBooleanFlag(args, "-s=false", migration.migrateSegments === false);
   args = addBooleanFlag(args, "--dry-run", migration.dryRun);
+  args = addBooleanFlag(args, "--incremental", migration.incremental);
   args = addOptionalArg(args, "-c", migration.conflictPrefix);
   args = addOptionalArg(args, "-v", migration.targetView);
   args = addOptionalArg(args, "-e", migration.environments?.join(","));
-  
+  args = addOptionalArg(args, "--since", migration.since);
+
   if (migration.environmentMapping) {
     args = addOptionalArg(args, "--env-map", formatEnvMapping(migration.environmentMapping));
   }
@@ -315,7 +320,8 @@ const buildThirdPartyImportArgs = (config: WorkflowConfig): string[] => {
   ];
 
   const withDryRun = addBooleanFlag(withRequiredArgs, "-d", importConfig.dryRun);
-  const withOutput = addOptionalArg(withDryRun, "-o", importConfig.reportOutput);
+  const withUpsert = addBooleanFlag(withDryRun, "-u", importConfig.upsert);
+  const withOutput = addOptionalArg(withUpsert, "-o", importConfig.reportOutput);
   return addOptionalArg(withOutput, "--domain", config.destination?.domain);
 };
 

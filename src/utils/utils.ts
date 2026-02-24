@@ -295,6 +295,18 @@ export function buildRules(
   return newRules;
 }
 
+export function buildRulesReplace(
+  rules: Rule[],
+  env?: string,
+): { path: string; op: string; value: unknown } {
+  const path = env ? `${env}/rules` : "rules";
+  const cleaned = rules.map(({ _id, _generation, _deleted, _version, _ref, clauses, ...rest }) => ({
+    ...rest,
+    clauses: clauses.map(({ _id, ...clauseRest }) => clauseRest),
+  }));
+  return buildPatch(path, "replace", cleaned);
+}
+
 export async function writeSourceData(
   projPath: string,
   dataType: string,
@@ -618,6 +630,62 @@ export async function createFlagViaAPI(
       error: error instanceof Error ? error.message : String(error)
     };
   }
+}
+
+export async function upsertFlagViaAPI(
+  apiKey: string,
+  domain: string,
+  projectKey: string,
+  flag: LaunchDarklyFlag
+): Promise<ImportResult> {
+  const startTime = Date.now();
+
+  // Try to create first
+  const createResult = await createFlagViaAPI(apiKey, domain, projectKey, flag);
+  if (createResult.success) return createResult;
+
+  // If 409 conflict, the flag already exists — update it via PATCH
+  if (createResult.error?.includes("HTTP 409")) {
+    try {
+      const patches: Array<{ op: string; path: string; value: unknown }> = [
+        { op: "replace", path: "/name", value: flag.name || flag.key },
+        { op: "replace", path: "/description", value: flag.description || "" },
+        { op: "replace", path: "/variations", value: flag.variations },
+        { op: "replace", path: "/defaults", value: flag.defaults },
+      ];
+
+      if (flag.tags) {
+        patches.push({ op: "replace", path: "/tags", value: flag.tags });
+      }
+
+      const request = ldAPIPatchRequest(apiKey, domain, `flags/${projectKey}/${flag.key}`, patches);
+      const response = await rateLimitRequest(request, "flags");
+
+      if (response.ok) {
+        return {
+          key: flag.key,
+          success: true,
+          timing: Date.now() - startTime
+        };
+      } else {
+        const errorText = await response.text();
+        return {
+          key: flag.key,
+          success: false,
+          error: `Upsert PATCH failed — HTTP ${response.status}: ${errorText}`
+        };
+      }
+    } catch (error) {
+      return {
+        key: flag.key,
+        success: false,
+        error: `Upsert PATCH error: ${error instanceof Error ? error.message : String(error)}`
+      };
+    }
+  }
+
+  // Non-409 error, return the original failure
+  return createResult;
 }
 
 export function generateImportReport(results: ImportResult[]): ImportReport {
