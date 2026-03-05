@@ -451,16 +451,17 @@ if (targetProjectExists) {
       Deno.exit(1);
     }
   } else {
-    // Original behavior: filter to matching environment keys
+    // Keep SOURCE env keys; only include those that exist in the target project.
+    // (We must use source keys so that flag.environments[env] matches extracted flag data.)
   const missingEnvs = envkeys.filter(key => !existingEnvs.includes(key));
   if (missingEnvs.length > 0) {
     console.log(Colors.yellow(`Warning: The following environments from source project don't exist in target project: ${missingEnvs.join(', ')}`));
     console.log(Colors.yellow('Skipping these environments...'));
   }
-  
-  // Update envkeys to only include environments that exist in the target project
-  envkeys.length = 0;
-  envkeys.push(...existingEnvs);
+  envkeys = envkeys.filter(key => existingEnvs.includes(key));
+  if (envkeys.length > 0) {
+    console.log(Colors.cyan(`Migrating ${envkeys.length} environment(s) that exist in both projects\n`));
+  }
   }
 } else {
   console.log(`Creating new project ${inputArgs.projKeyDest}`);
@@ -614,7 +615,10 @@ if (inputArgs.migrateSegments) {
     for (const segment of segmentData.items) {
       if (segment.unbounded == true) {
         console.log(Colors.yellow(
-          `Segment: ${segment.key} in Environment ${env.key} is unbounded, skipping`,
+          `Segment: ${segment.key} in Environment ${env.key} is a big segment (unbounded), skipping`,
+        ));
+        console.log(Colors.gray(
+          `  → Unbounded = synced from an external store or very large list; this migration does not copy big segments. Recreate or reconnect in the destination if needed.`,
         ));
         continue;
       }
@@ -1149,8 +1153,9 @@ const handlePatchResponse = async (
     }
   } else if (status > 201) {
     console.log(Colors.yellow(`\t  ⚠ ${env}: Status ${status}`));
+  } else {
+    console.log(Colors.green(`\t  ✓ ${env}: updated`));
   }
-  // Success (200-201) - no logging needed for each env
 };
 
 /**
@@ -1236,7 +1241,8 @@ const makePatchCall = async (
     console.log(Colors.gray(`\t  ✓ ${env}: Already up to date, skipping`));
     return flagsWithErrors;
   }
-  
+
+  console.log(Colors.cyan(`\t  → ${env}: applying changes`));
   const patchFlagReq = await dryRunAwarePatch(
     inputArgs.dryRun || false,
       apiKey,
@@ -1331,8 +1337,37 @@ for (const [index, flagkey] of flagList.entries()) {
         }
       }
       if (allEnvsUnchanged) {
+        // Sync lifecycle (archived/deprecated) even when versions match — LD may not bump version for lifecycle-only changes
+        const destKey = flag.key;
+        let lifecycleSynced = false;
+        try {
+          const destReq = ldAPIRequest(apiKey, domain, `flags/${inputArgs.projKeyDest}/${destKey}`);
+          const destResp = await rateLimitRequest(destReq, 'flags');
+          if (destResp.status === 200) {
+            const destFlag = await destResp.json();
+            const changed = (a: any, b: any) => JSON.stringify(a) !== JSON.stringify(b);
+            const lifecyclePatches: any[] = [];
+            if (flag.archived !== undefined && changed(flag.archived, destFlag.archived))
+              lifecyclePatches.push(buildPatch("archived", "replace", flag.archived));
+            if (flag.deprecated !== undefined && changed(flag.deprecated, destFlag.deprecated))
+              lifecyclePatches.push(buildPatch("deprecated", "replace", flag.deprecated));
+            if (flag.deprecatedDate !== undefined && changed(flag.deprecatedDate, destFlag.deprecatedDate))
+              lifecyclePatches.push(buildPatch("deprecatedDate", "replace", flag.deprecatedDate));
+            if (lifecyclePatches.length > 0) {
+              const patchResp = await dryRunAwarePatch(
+                inputArgs.dryRun || false, apiKey, domain,
+                `flags/${inputArgs.projKeyDest}/${destKey}`, lifecyclePatches, false, 'flags', 'lifecycle (archived/deprecated)');
+              if (patchResp.status >= 200 && patchResp.status < 300) {
+                console.log(Colors.gray(`\t  → synced lifecycle (archived/deprecated)`));
+                lifecycleSynced = true;
+              }
+            }
+          }
+        } catch (_) {
+          // ignore
+        }
         const ts = flag.creationDate ? `, updated ${flag.creationDate}` : '';
-        console.log(Colors.gray(`\t✓ ${flag.key}: unchanged (v${flag._version}${ts}), skipping`));
+        console.log(Colors.gray(`\t✓ ${flag.key}: unchanged (v${flag._version}${ts})${lifecycleSynced ? ', lifecycle synced' : ''}, skipping`));
         // Carry forward the previous manifest entry unchanged
         updatedManifestFlags[flag.key] = prevEntry;
         incrementalSkipCount++;
@@ -1426,7 +1461,6 @@ for (const [index, flagkey] of flagList.entries()) {
     description: flag.description,
     maintainerId: null  // Set to null by default to prevent API from assigning token owner
   };
-
   // Only assign maintainerId if explicitly requested and mapping exists
   if (inputArgs.assignMaintainerIds) {
       if (flag.maintainerId && maintainerMapping[flag.maintainerId]) {
@@ -1451,6 +1485,11 @@ for (const [index, flagkey] of flagList.entries()) {
   if (flag.defaults) {
     newFlag.defaults = flag.defaults;
   }
+
+  // Sync lifecycle state so archived/deprecated match source
+  if (flag.archived !== undefined) newFlag.archived = flag.archived;
+  if (flag.deprecated !== undefined) newFlag.deprecated = flag.deprecated;
+  if (flag.deprecatedDate !== undefined) newFlag.deprecatedDate = flag.deprecatedDate;
 
     // Skip the creation POST if flag already exists
     if (!flagAlreadyExisted) {
@@ -1573,6 +1612,12 @@ for (const [index, flagkey] of flagList.entries()) {
         flagLevelPatches.push(buildPatch("clientSideAvailability", "replace", flag.clientSideAvailability));
       if (flag.customProperties && changed(flag.customProperties, destinationFlag.customProperties))
         flagLevelPatches.push(buildPatch("customProperties", "replace", flag.customProperties));
+      if (flag.archived !== undefined && changed(flag.archived, destinationFlag.archived))
+        flagLevelPatches.push(buildPatch("archived", "replace", flag.archived));
+      if (flag.deprecated !== undefined && changed(flag.deprecated, destinationFlag.deprecated))
+        flagLevelPatches.push(buildPatch("deprecated", "replace", flag.deprecated));
+      if (flag.deprecatedDate !== undefined && changed(flag.deprecatedDate, destinationFlag.deprecatedDate))
+        flagLevelPatches.push(buildPatch("deprecatedDate", "replace", flag.deprecatedDate));
 
       // Variations and defaults must be patched together to avoid index conflicts
       // Strip _id from both sides before comparing
