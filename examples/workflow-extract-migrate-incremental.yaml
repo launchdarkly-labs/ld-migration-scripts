@@ -1,0 +1,24 @@
+# Full sync: extract + migrate (no incremental)
+# Run this FIRST to create the sync manifest. Then use workflow-nick-jordan-incremental.yaml
+# to test incremental (re-extract + migrate with --incremental).
+
+workflow:
+  steps:
+    - extract-source
+    - migrate
+
+source:
+  projectKey: 
+  domain: app.launchdarkly.com
+
+destination:
+  projectKey:   
+  domain: app.launchdarkly.com
+
+extraction:
+  includeSegments: true
+
+migration:
+  migrateSegments: true
+  assignMaintainerIds: false
+  incremental: true  # Full sync; creates sync manifest for incremental runs

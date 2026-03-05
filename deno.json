@@ -1,6 +1,7 @@
 {
   "name": "ld-migration-scripts",
   "version": "3.0.2",
+  "exports": "./src/scripts/launchdarkly-migrations/workflow.ts",
   "description": "LaunchDarkly Project Migration Scripts - Support for LD-to-LD migrations and third-party flag imports",
   "license": "Apache-2.0",
   "deno": ">=2.0.0",

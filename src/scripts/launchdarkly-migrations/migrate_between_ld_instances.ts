@@ -3,6 +3,7 @@ import yargs from "https://deno.land/x/yargs@v17.7.2-deno/deno.ts";
 import {
   buildPatch,
   buildRules,
+  buildRulesReplace,
   consoleLogger,
   getJson,
   ldAPIPatchRequest,
@@ -33,6 +34,32 @@ interface Arguments {
   domain?: string;
   config?: string;
   dryRun?: boolean;
+  incremental?: boolean;
+  since?: string;
+}
+
+interface SyncManifestEnv {
+  version: number;
+  lastModified?: string;
+}
+
+interface SyncManifestFlag {
+  version: number;
+  lastModified?: string;
+  environments: Record<string, SyncManifestEnv>;
+}
+
+interface SyncManifestSegment {
+  version: number;
+  lastModified?: number;
+}
+
+interface SyncManifest {
+  lastSyncTimestamp: string;
+  sourceProject: string;
+  destProject: string;
+  flags: Record<string, SyncManifestFlag>;
+  segments?: Record<string, Record<string, SyncManifestSegment>>; // segments[envKey][segmentKey]
 }
 
 interface MigrationConfig {
@@ -52,6 +79,8 @@ interface MigrationConfig {
     environments?: string[];
     environmentMapping?: Record<string, string>;
     dryRun?: boolean;
+    incremental?: boolean;
+    since?: string;
   };
 }
 
@@ -158,9 +187,12 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .alias("domain", "domain")
   .alias("f", "config")
   .alias("dry-run", "dryRun")
+  .alias("i", "incremental")
+  .alias("since", "since")
   .boolean("m")
   .boolean("s")
   .boolean("dry-run")
+  .boolean("incremental")
   .default("m", false)
   .default("s", true)
   .describe("c", "Prefix to use when resolving key conflicts (e.g., 'imported-')")
@@ -170,6 +202,8 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .describe("domain", "Destination LaunchDarkly domain (default: app.launchdarkly.com)")
   .describe("f", "Path to YAML config file. CLI arguments override config file values.")
   .describe("dry-run", "Preview migration without making any changes")
+  .describe("incremental", "Skip flags unchanged since last sync (version-based)")
+  .describe("since", "Only sync flags modified after this date (ISO 8601, e.g. 2026-01-15)")
   .parse() as unknown) as Arguments;
 
 // Load and merge config file if provided
@@ -198,6 +232,8 @@ if (cliArgs.config) {
         : undefined),
       domain: cliArgs.domain || config.destination?.domain,
       dryRun: cliArgs.dryRun ?? config.options?.dryRun ?? false,
+      incremental: cliArgs.incremental ?? config.options?.incremental ?? false,
+      since: cliArgs.since || config.options?.since,
       config: cliArgs.config
     };
     
@@ -230,6 +266,14 @@ console.log(Colors.gray(`  Environments: ${inputArgs.environments || 'all'}`));
 console.log(Colors.gray(`  Env Mapping: ${inputArgs.envMap || 'none'}`));
 console.log(Colors.gray(`  Domain: ${inputArgs.domain || 'app.launchdarkly.com'}`));
 console.log(Colors.gray(`  Dry Run: ${inputArgs.dryRun || false}`));
+console.log(Colors.gray(`  Incremental: ${inputArgs.incremental || false}`));
+console.log(Colors.gray(`  Since: ${inputArgs.since || 'none'}`));
+
+// Validate --incremental and --since are mutually exclusive
+if (inputArgs.incremental && inputArgs.since) {
+  console.log(Colors.red(`Error: --incremental and --since are mutually exclusive. Use one or the other.`));
+  Deno.exit(1);
+}
 
 if (inputArgs.dryRun) {
   console.log(Colors.yellow("\n⚠️  DRY RUN MODE - No changes will be made"));
@@ -407,16 +451,17 @@ if (targetProjectExists) {
       Deno.exit(1);
     }
   } else {
-    // Original behavior: filter to matching environment keys
+    // Keep SOURCE env keys; only include those that exist in the target project.
+    // (We must use source keys so that flag.environments[env] matches extracted flag data.)
   const missingEnvs = envkeys.filter(key => !existingEnvs.includes(key));
   if (missingEnvs.length > 0) {
     console.log(Colors.yellow(`Warning: The following environments from source project don't exist in target project: ${missingEnvs.join(', ')}`));
     console.log(Colors.yellow('Skipping these environments...'));
   }
-  
-  // Update envkeys to only include environments that exist in the target project
-  envkeys.length = 0;
-  envkeys.push(...existingEnvs);
+  envkeys = envkeys.filter(key => existingEnvs.includes(key));
+  if (envkeys.length > 0) {
+    console.log(Colors.cyan(`Migrating ${envkeys.length} environment(s) that exist in both projects\n`));
+  }
   }
 } else {
   console.log(`Creating new project ${inputArgs.projKeyDest}`);
@@ -515,6 +560,36 @@ if (allViewKeys.size > 0) {
   console.log("No views found in source flags.");
 }
 
+// ==================== Incremental Sync ====================
+
+const syncManifestPath = `./data/launchdarkly-migrations/sync-manifest-${inputArgs.projKeySource}-${inputArgs.projKeyDest}.json`;
+let previousManifest: SyncManifest | null = null;
+const updatedManifestFlags: Record<string, SyncManifestFlag> = {};
+const updatedManifestSegments: Record<string, Record<string, SyncManifestSegment>> = {};
+let incrementalSkipCount = 0;
+let incrementalEnvSkipCount = 0;
+let incrementalSegmentSkipCount = 0;
+
+// Always try to load previous manifest for tracking; only use it for skipping when --incremental
+try {
+  previousManifest = await getJson(syncManifestPath) as SyncManifest | null;
+} catch {
+  // No manifest yet
+}
+
+if (inputArgs.incremental) {
+  if (previousManifest) {
+    const flagCount = Object.keys(previousManifest.flags).length;
+    const segCount = previousManifest.segments
+      ? Object.values(previousManifest.segments).reduce((sum, envSegs) => sum + Object.keys(envSegs).length, 0)
+      : 0;
+    const segPart = segCount > 0 ? `, ${segCount} segments` : '';
+    console.log(Colors.cyan(`\n📋 Incremental sync: loaded manifest from ${previousManifest.lastSyncTimestamp} (${flagCount} flags${segPart} tracked)`));
+  } else {
+    console.log(Colors.cyan(`\n📋 Incremental sync: no previous manifest found, will sync all flags`));
+  }
+}
+
 // Migrate segments if enabled
 console.log(Colors.blue("\n🔷 Starting segment migration..."));
 if (inputArgs.migrateSegments) {
@@ -540,9 +615,25 @@ if (inputArgs.migrateSegments) {
     for (const segment of segmentData.items) {
       if (segment.unbounded == true) {
         console.log(Colors.yellow(
-          `Segment: ${segment.key} in Environment ${env.key} is unbounded, skipping`,
+          `Segment: ${segment.key} in Environment ${env.key} is a big segment (unbounded), skipping`,
+        ));
+        console.log(Colors.gray(
+          `  → Unbounded = synced from an external store or very large list; this migration does not copy big segments. Recreate or reconnect in the destination if needed.`,
         ));
         continue;
+      }
+
+      // Incremental sync: skip segments that haven't changed since last sync
+      if (inputArgs.incremental && previousManifest) {
+        const prevSegment = previousManifest.segments?.[env.key]?.[segment.key];
+        if (prevSegment && segment.version !== undefined && prevSegment.version === segment.version) {
+          console.log(Colors.gray(`    ✓ ${segment.key}: unchanged (v${segment.version}), skipping`));
+          incrementalSegmentSkipCount++;
+          // Carry forward previous manifest entry
+          if (!updatedManifestSegments[env.key]) updatedManifestSegments[env.key] = {};
+          updatedManifestSegments[env.key][segment.key] = prevSegment;
+          continue;
+        }
       }
 
       let segmentKey = segment.key;
@@ -609,32 +700,27 @@ if (inputArgs.migrateSegments) {
       if (segmentCreated) {
       const sgmtPatches = [];
 
-      // Legacy user targeting (single context kind)
+      // Legacy user targeting (single context kind) — use replace for idempotency
       if (segment.included?.length > 0) {
-        sgmtPatches.push(buildPatch("included", "add", segment.included));
+        sgmtPatches.push(buildPatch("included", "replace", segment.included));
       }
       if (segment.excluded?.length > 0) {
-        sgmtPatches.push(buildPatch("excluded", "add", segment.excluded));
+        sgmtPatches.push(buildPatch("excluded", "replace", segment.excluded));
       }
 
-      // Multi-context targeting (includedContexts/excludedContexts)
-      // These are used for targeting contexts other than "user" (e.g., organization, device)
+      // Multi-context targeting — use replace for the whole array for idempotency
       if (segment.includedContexts?.length > 0) {
-        for (const contextTarget of segment.includedContexts) {
-          sgmtPatches.push(buildPatch("includedContexts/-", "add", contextTarget));
-        }
-        console.log(Colors.gray(`    Adding ${segment.includedContexts.length} includedContexts entries`));
+        sgmtPatches.push(buildPatch("includedContexts", "replace", segment.includedContexts));
+        console.log(Colors.gray(`    Replacing ${segment.includedContexts.length} includedContexts entries`));
       }
       if (segment.excludedContexts?.length > 0) {
-        for (const contextTarget of segment.excludedContexts) {
-          sgmtPatches.push(buildPatch("excludedContexts/-", "add", contextTarget));
-        }
-        console.log(Colors.gray(`    Adding ${segment.excludedContexts.length} excludedContexts entries`));
+        sgmtPatches.push(buildPatch("excludedContexts", "replace", segment.excludedContexts));
+        console.log(Colors.gray(`    Replacing ${segment.excludedContexts.length} excludedContexts entries`));
       }
 
       if (segment.rules?.length > 0) {
           console.log(`Copying Segment: ${segmentKey} rules`);
-        sgmtPatches.push(...buildRules(segment.rules));
+        sgmtPatches.push(buildRulesReplace(segment.rules));
       }
 
       const patchRules = await dryRunAwarePatch(
@@ -653,6 +739,15 @@ if (inputArgs.migrateSegments) {
         patchRules.status,
           `Patching segment ${segmentKey} status: ${segPatchStatus}`,
       );
+      }
+
+      // Track segment version for sync manifest only if it was actually created/patched
+      if (segmentCreated) {
+        if (!updatedManifestSegments[env.key]) updatedManifestSegments[env.key] = {};
+        updatedManifestSegments[env.key][segment.key] = {
+          version: segment.version ?? 0,
+          lastModified: segment.lastModifiedDate,
+        };
       }
     };
   };
@@ -769,7 +864,7 @@ const convertRuleInstruction = (
 const convertPatchToSemanticInstruction = (
   patch: any,
   getVariationId: VariationIdMapper
-): { instruction: SemanticInstruction | null, shouldSkip: boolean } => {
+): { instruction: SemanticInstruction | null, shouldSkip: boolean, multipleInstructions?: SemanticInstruction[] } => {
   const field = extractFieldFromPath(patch.path);
   if (!field) return { instruction: null, shouldSkip: false };
 
@@ -781,6 +876,26 @@ const convertPatchToSemanticInstruction = (
     case 'fallthrough':
       return { instruction: convertFallthroughInstruction(patch.value, getVariationId), shouldSkip: false };
     case 'rules':
+      // Handle replace op on entire rules array
+      if (patch.op === 'replace' && Array.isArray(patch.value)) {
+        // NOTE: The LD semantic patch API has no "removeAllRules" instruction.
+        // For approval-required envs, old rules won't be auto-removed.
+        if (patch.value.length > 0) {
+          console.log(Colors.yellow(`\t    ⚠ Approval workflow: converting rules replace to addRule instructions (existing rules cannot be removed via semantic patch)`));
+        }
+        const instructions = patch.value.map((rule: any) => {
+          const inst: SemanticInstruction = { kind: 'addRule', clauses: rule.clauses || [] };
+          if (rule.description) inst.description = rule.description;
+          if (rule.variation !== undefined) {
+            const vid = getVariationId(rule.variation);
+            if (vid) inst.variationId = vid;
+          } else if (rule.rollout) {
+            inst.rollout = convertRolloutVariations(rule.rollout, getVariationId);
+          }
+          return inst;
+        });
+        return { instruction: null, shouldSkip: false, multipleInstructions: instructions };
+      }
       return { instruction: convertRuleInstruction(patch, getVariationId), shouldSkip: false };
     case 'trackEvents':
       return { instruction: null, shouldSkip: true };
@@ -801,17 +916,19 @@ const convertToSemanticPatch = (
   const skippedFields = new Set<string>();
   
   const instructions = jsonPatches.reduce<SemanticInstruction[]>((acc, patch) => {
-    const { instruction, shouldSkip } = convertPatchToSemanticInstruction(patch, getVariationId);
-    
+    const { instruction, shouldSkip, multipleInstructions } = convertPatchToSemanticInstruction(patch, getVariationId);
+
     if (shouldSkip) {
       const field = extractFieldFromPath(patch.path);
       if (field) skippedFields.add(field);
     }
-    
-    if (instruction) {
+
+    if (multipleInstructions) {
+      acc.push(...multipleInstructions);
+    } else if (instruction) {
       acc.push(instruction);
     }
-    
+
     return acc;
   }, []);
 
@@ -1036,8 +1153,9 @@ const handlePatchResponse = async (
     }
   } else if (status > 201) {
     console.log(Colors.yellow(`\t  ⚠ ${env}: Status ${status}`));
+  } else {
+    console.log(Colors.green(`\t  ✓ ${env}: updated`));
   }
-  // Success (200-201) - no logging needed for each env
 };
 
 /**
@@ -1062,51 +1180,35 @@ const wouldPatchChangeEnvironment = (
     const field = pathParts[3];
     
     // Get current value from the environment config
-    let currentValue = currentEnvConfig[field];
+    const currentValue = currentEnvConfig[field];
     
     switch (patch.op) {
       case 'replace':
-        // For replace operations, compare values
-        if (field === 'offVariation' || field === 'on') {
-          // Direct value comparison
-          if (currentValue !== patch.value) {
-            return true;
-          }
-        } else if (field === 'fallthrough') {
-          // Compare fallthrough configuration
-          const currentFallthrough = JSON.stringify(currentValue);
-          const newFallthrough = JSON.stringify(patch.value);
-          if (currentFallthrough !== newFallthrough) {
-            return true;
-          }
-        }
-        break;
-        
-      case 'add':
-        // For add operations (like adding rules), assume change is needed
-        // unless the exact rule already exists at that position
         if (field === 'rules') {
-          // Compare rules array
-          const currentRules = JSON.stringify(currentEnvConfig.rules || []);
-          const newRules = JSON.stringify(patch.value);
-          if (currentRules !== newRules) {
-            return true;
-          }
+          // Strip internal fields from current rules before comparing
+          const cleanCurrent = (currentEnvConfig.rules || []).map((rule: any) => {
+            const { _id, _generation, _deleted, _version, _ref, ...rest } = rule;
+            return { ...rest, clauses: (rest.clauses || []).map(({ _id, ...c }: any) => c) };
+          });
+          if (JSON.stringify(cleanCurrent) !== JSON.stringify(patch.value)) return true;
+        } else if (field === 'offVariation' || field === 'on') {
+          if (currentValue !== patch.value) return true;
         } else {
-          // Other add operations are assumed to be changes
-          return true;
+          if (JSON.stringify(currentValue) !== JSON.stringify(patch.value)) return true;
         }
         break;
-        
+
+      case 'add':
+        // add operations always indicate a change
+        return true;
+
       case 'remove':
-        // Remove operations are changes if the thing exists
         if (currentValue !== undefined && currentValue !== null) {
           return true;
         }
         break;
-        
+
       default:
-        // Unknown operation type, assume it's a change
         return true;
     }
   }
@@ -1139,7 +1241,8 @@ const makePatchCall = async (
     console.log(Colors.gray(`\t  ✓ ${env}: Already up to date, skipping`));
     return flagsWithErrors;
   }
-  
+
+  console.log(Colors.cyan(`\t  → ${env}: applying changes`));
   const patchFlagReq = await dryRunAwarePatch(
     inputArgs.dryRun || false,
       apiKey,
@@ -1180,6 +1283,16 @@ const flagsWithErrors: Set<string> = new Set();
 const approvalRequestsCreated: Array<{flag: string, env: string, skippedFields: string[]}> = [];
 const skippedFieldsByFlag: Map<string, Set<string>> = new Map();
 
+let sinceDate: Date | null = null;
+if (inputArgs.since) {
+  sinceDate = new Date(inputArgs.since);
+  if (isNaN(sinceDate.getTime())) {
+    console.log(Colors.red(`Error: Invalid --since date: "${inputArgs.since}". Use ISO 8601 format (e.g., 2026-01-15).`));
+    Deno.exit(1);
+  }
+  console.log(Colors.cyan(`\n📋 Since filter: only syncing flags modified after ${sinceDate.toISOString()}`));
+}
+
 interface Variation {
   _id: string;
   value: any;
@@ -1200,6 +1313,80 @@ for (const [index, flagkey] of flagList.entries()) {
   if (!flag) {
     console.log(Colors.yellow(`\tWarning: Could not load flag data for ${flagkey}, skipping...`));
     continue;
+  }
+
+  // Incremental sync: check if flag-level AND all environment versions match
+  // Flag-level _version alone isn't reliable — LD doesn't always bump it for env-only changes
+  if (inputArgs.incremental && previousManifest && flag._version !== undefined) {
+    const prevEntry = previousManifest.flags[flag.key];
+    if (prevEntry && prevEntry.version === flag._version) {
+      // Flag-level version matches — check if all environment versions also match
+      let allEnvsUnchanged = true;
+      if (flag.environments && prevEntry.environments) {
+        for (const envKey of envkeys) {
+          const envData = flag.environments[envKey];
+          const prevEnvData = prevEntry.environments[envKey];
+          if (envData && prevEnvData && envData.version !== prevEnvData.version) {
+            allEnvsUnchanged = false;
+            break;
+          }
+          if (envData && !prevEnvData) {
+            allEnvsUnchanged = false;
+            break;
+          }
+        }
+      }
+      if (allEnvsUnchanged) {
+        // Sync lifecycle (archived/deprecated) even when versions match — LD may not bump version for lifecycle-only changes
+        const destKey = flag.key;
+        let lifecycleSynced = false;
+        try {
+          const destReq = ldAPIRequest(apiKey, domain, `flags/${inputArgs.projKeyDest}/${destKey}`);
+          const destResp = await rateLimitRequest(destReq, 'flags');
+          if (destResp.status === 200) {
+            const destFlag = await destResp.json();
+            const changed = (a: any, b: any) => JSON.stringify(a) !== JSON.stringify(b);
+            const lifecyclePatches: any[] = [];
+            if (flag.archived !== undefined && changed(flag.archived, destFlag.archived))
+              lifecyclePatches.push(buildPatch("archived", "replace", flag.archived));
+            if (flag.deprecated !== undefined && changed(flag.deprecated, destFlag.deprecated))
+              lifecyclePatches.push(buildPatch("deprecated", "replace", flag.deprecated));
+            if (flag.deprecatedDate !== undefined && changed(flag.deprecatedDate, destFlag.deprecatedDate))
+              lifecyclePatches.push(buildPatch("deprecatedDate", "replace", flag.deprecatedDate));
+            if (lifecyclePatches.length > 0) {
+              const patchResp = await dryRunAwarePatch(
+                inputArgs.dryRun || false, apiKey, domain,
+                `flags/${inputArgs.projKeyDest}/${destKey}`, lifecyclePatches, false, 'flags', 'lifecycle (archived/deprecated)');
+              if (patchResp.status >= 200 && patchResp.status < 300) {
+                console.log(Colors.gray(`\t  → synced lifecycle (archived/deprecated)`));
+                lifecycleSynced = true;
+              }
+            }
+          }
+        } catch (_) {
+          // ignore
+        }
+        const ts = flag.creationDate ? `, updated ${flag.creationDate}` : '';
+        console.log(Colors.gray(`\t✓ ${flag.key}: unchanged (v${flag._version}${ts})${lifecycleSynced ? ', lifecycle synced' : ''}, skipping`));
+        // Carry forward the previous manifest entry unchanged
+        updatedManifestFlags[flag.key] = prevEntry;
+        incrementalSkipCount++;
+        continue;
+      }
+    }
+  }
+
+  // --since filter: skip flags not modified after the given date
+  if (sinceDate && flag.environments) {
+    const latestModified = Object.values(flag.environments).reduce((latest: number, env: any) => {
+      const envDate = env?.lastModified ? new Date(env.lastModified).getTime() : 0;
+      return Math.max(latest, envDate);
+    }, 0);
+    if (latestModified > 0 && latestModified < sinceDate.getTime()) {
+      console.log(Colors.gray(`\t✓ ${flag.key}: not modified since ${inputArgs.since}, skipping`));
+      incrementalSkipCount++;
+      continue;
+    }
   }
 
   if (!flag.variations) {
@@ -1274,7 +1461,6 @@ for (const [index, flagkey] of flagList.entries()) {
     description: flag.description,
     maintainerId: null  // Set to null by default to prevent API from assigning token owner
   };
-
   // Only assign maintainerId if explicitly requested and mapping exists
   if (inputArgs.assignMaintainerIds) {
       if (flag.maintainerId && maintainerMapping[flag.maintainerId]) {
@@ -1299,6 +1485,11 @@ for (const [index, flagkey] of flagList.entries()) {
   if (flag.defaults) {
     newFlag.defaults = flag.defaults;
   }
+
+  // Sync lifecycle state so archived/deprecated match source
+  if (flag.archived !== undefined) newFlag.archived = flag.archived;
+  if (flag.deprecated !== undefined) newFlag.deprecated = flag.deprecated;
+  if (flag.deprecatedDate !== undefined) newFlag.deprecatedDate = flag.deprecatedDate;
 
     // Skip the creation POST if flag already exists
     if (!flagAlreadyExisted) {
@@ -1375,6 +1566,9 @@ for (const [index, flagkey] of flagList.entries()) {
     }
   }
 
+  // Track per-flag manifest entry as we process environments
+  const flagManifestEnvs: Record<string, SyncManifestEnv> = {};
+
   // Add flag env settings - use the potentially updated flag key
   if (flagCreated) {
     // Fetch the destination flag to get the correct variation IDs and current environment state
@@ -1399,7 +1593,58 @@ for (const [index, flagkey] of flagList.entries()) {
     } catch (error) {
       console.log(Colors.yellow(`\t⚠ Could not fetch destination flag, using source IDs (may cause issues with approval requests and skip detection)`));
     }
-    
+
+    // Update flag-level properties when flag already existed
+    // Only patch properties that have actually changed vs the destination
+    if (flagAlreadyExisted && destinationFlag) {
+      const flagLevelPatches: any[] = [];
+      const changed = (srcVal: any, destVal: any) => JSON.stringify(srcVal) !== JSON.stringify(destVal);
+
+      if (flag.name && changed(flagName, destinationFlag.name))
+        flagLevelPatches.push(buildPatch("name", "replace", flagName));
+      if (flag.description !== undefined && changed(flag.description, destinationFlag.description))
+        flagLevelPatches.push(buildPatch("description", "replace", flag.description));
+      if (flag.tags && changed(flag.tags, destinationFlag.tags))
+        flagLevelPatches.push(buildPatch("tags", "replace", flag.tags));
+      if (flag.temporary !== undefined && changed(flag.temporary, destinationFlag.temporary))
+        flagLevelPatches.push(buildPatch("temporary", "replace", flag.temporary));
+      if (flag.clientSideAvailability && changed(flag.clientSideAvailability, destinationFlag.clientSideAvailability))
+        flagLevelPatches.push(buildPatch("clientSideAvailability", "replace", flag.clientSideAvailability));
+      if (flag.customProperties && changed(flag.customProperties, destinationFlag.customProperties))
+        flagLevelPatches.push(buildPatch("customProperties", "replace", flag.customProperties));
+      if (flag.archived !== undefined && changed(flag.archived, destinationFlag.archived))
+        flagLevelPatches.push(buildPatch("archived", "replace", flag.archived));
+      if (flag.deprecated !== undefined && changed(flag.deprecated, destinationFlag.deprecated))
+        flagLevelPatches.push(buildPatch("deprecated", "replace", flag.deprecated));
+      if (flag.deprecatedDate !== undefined && changed(flag.deprecatedDate, destinationFlag.deprecatedDate))
+        flagLevelPatches.push(buildPatch("deprecatedDate", "replace", flag.deprecatedDate));
+
+      // Variations and defaults must be patched together to avoid index conflicts
+      // Strip _id from both sides before comparing
+      const stripIds = (v: any[]) => v.map(({ _id, ...rest }: any) => rest);
+      const destVarsClean = destinationFlag.variations ? stripIds(destinationFlag.variations) : [];
+      if (newVariations?.length > 0 && changed(newVariations, destVarsClean)) {
+        flagLevelPatches.push(buildPatch("variations", "replace", newVariations));
+        if (flag.defaults) flagLevelPatches.push(buildPatch("defaults", "replace", flag.defaults));
+      } else if (flag.defaults && changed(flag.defaults, destinationFlag.defaults)) {
+        flagLevelPatches.push(buildPatch("defaults", "replace", flag.defaults));
+      }
+
+      if (flagLevelPatches.length > 0) {
+        console.log(Colors.gray(`\tUpdating flag-level properties (${flagLevelPatches.length} field(s))...`));
+        const flagLevelResp = await dryRunAwarePatch(
+          inputArgs.dryRun || false, apiKey, domain,
+          `flags/${inputArgs.projKeyDest}/${createdFlagKey}`, flagLevelPatches, false, 'flags', 'flag-level properties');
+        if (flagLevelResp.status >= 200 && flagLevelResp.status < 300) {
+          console.log(Colors.green(`\t✓ Flag-level properties updated`));
+        } else {
+          const errText = await flagLevelResp.text();
+          console.log(Colors.yellow(`\t⚠ Flag-level update failed (${flagLevelResp.status}): ${errText}`));
+          flagsWithErrors.add(createdFlagKey);
+        }
+      }
+    }
+
   for (const env of envkeys) {
     if (!flag.environments || !flag.environments[env]) {
       continue;
@@ -1408,8 +1653,26 @@ for (const [index, flagkey] of flagList.entries()) {
       // Determine destination environment key (mapped or original)
       const destEnvKey = inputArgs.envMap && envMapping[env] ? envMapping[env] : env;
 
-    const patchReq: any[] = [];
     const flagEnvData = flag.environments[env];
+
+    // Read env version and lastModified before filtering
+    const envVersion = flagEnvData.version as number | undefined;
+    const envLastModified = flagEnvData.lastModified as string | undefined;
+
+    // Incremental sync: skip unchanged environments by version comparison
+    if (inputArgs.incremental && previousManifest) {
+      const prevFlag = previousManifest.flags[flag.key];
+      const prevEnv = prevFlag?.environments?.[env];
+      if (prevEnv && envVersion !== undefined && prevEnv.version === envVersion) {
+        const ts = envLastModified ? `, updated ${envLastModified}` : '';
+        console.log(Colors.gray(`\t  ✓ ${destEnvKey}: unchanged (v${envVersion}${ts}), skipping`));
+        flagManifestEnvs[env] = { version: envVersion, lastModified: envLastModified };
+        incrementalEnvSkipCount++;
+        continue;
+      }
+    }
+
+    const patchReq: any[] = [];
     const parsedData: Record<string, string> = Object.keys(flagEnvData)
       .filter((key) => !key.includes("salt"))
       .filter((key) => !key.includes("version"))
@@ -1429,7 +1692,7 @@ for (const [index, flagkey] of flagList.entries()) {
     Object.keys(parsedData)
       .map((key) => {
         if (key == "rules") {
-            patchReq.push(...buildRules(parsedData[key] as unknown as Rule[], "environments/" + destEnvKey));
+            patchReq.push(buildRulesReplace(parsedData[key] as unknown as Rule[], "environments/" + destEnvKey));
         } else {
           patchReq.push(
             buildPatch(
@@ -1441,8 +1704,47 @@ for (const [index, flagkey] of flagList.entries()) {
         }
       });
       await makePatchCall(createdFlagKey, patchReq, destEnvKey, flagMaintainerId, currentMemberId, destinationVariations, destinationFlag);
+
+    // Track env version in manifest
+    if (envVersion !== undefined) {
+      flagManifestEnvs[env] = { version: envVersion, lastModified: envLastModified };
+    }
     }
   }
+
+  // Track flag version for sync manifest (flag-level lastModified comes from creationDate or _version)
+  updatedManifestFlags[flag.key] = {
+    version: flag._version ?? 0,
+    lastModified: flag.creationDate,
+    environments: flagManifestEnvs,
+  };
+}
+
+// Always write sync manifest so --incremental works on next run
+const manifest: SyncManifest = {
+  lastSyncTimestamp: new Date().toISOString(),
+  sourceProject: inputArgs.projKeySource,
+  destProject: inputArgs.projKeyDest,
+  flags: updatedManifestFlags,
+  segments: Object.keys(updatedManifestSegments).length > 0 ? updatedManifestSegments : undefined,
+};
+try {
+  await Deno.mkdir("./data/launchdarkly-migrations", { recursive: true });
+  await Deno.writeTextFile(syncManifestPath, JSON.stringify(manifest, null, 2));
+  const envCount = Object.values(manifest.flags).reduce((sum, f) => sum + Object.keys(f.environments).length, 0);
+  const segCount = Object.values(updatedManifestSegments).reduce((sum, envSegs) => sum + Object.keys(envSegs).length, 0);
+  const segPart = segCount > 0 ? `, ${segCount} segments` : '';
+  console.log(Colors.green(`\n✓ Sync manifest written to ${syncManifestPath} (${Object.keys(manifest.flags).length} flags, ${envCount} environments${segPart} tracked)`));
+} catch (error) {
+  console.log(Colors.yellow(`\n⚠ Could not write sync manifest: ${error instanceof Error ? error.message : String(error)}`));
+}
+
+if (incrementalSkipCount > 0 || incrementalEnvSkipCount > 0 || incrementalSegmentSkipCount > 0) {
+  const parts = [];
+  if (incrementalSkipCount > 0) parts.push(`${incrementalSkipCount} flag(s)`);
+  if (incrementalEnvSkipCount > 0) parts.push(`${incrementalEnvSkipCount} environment(s)`);
+  if (incrementalSegmentSkipCount > 0) parts.push(`${incrementalSegmentSkipCount} segment(s)`);
+  console.log(Colors.cyan(`\n📋 Incremental sync: skipped ${parts.join(', ')} as unchanged`));
 }
 
 // Send one patch per Flag for all Environments //
