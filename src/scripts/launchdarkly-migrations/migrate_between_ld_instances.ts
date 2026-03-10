@@ -424,35 +424,37 @@ if (inputArgs.envMap) {
   console.log(Colors.cyan(`Migrating ${envkeys.length} mapped environment(s)\n`));
 }
 
-// Check if project exists
-console.log(Colors.blue(`\n🔍 Checking if destination project "${inputArgs.projKeyDest}" exists...`));
+// Destination project must already exist; we do not create projects.
 const targetProjectExists = await checkProjectExists(apiKey, domain, inputArgs.projKeyDest);
 
-if (targetProjectExists) {
-  console.log(Colors.green(`✓ Project ${inputArgs.projKeyDest} already exists, skipping creation`));
-  
-  // Get existing environments
-  console.log(Colors.blue(`  Fetching existing environments...`));
-  const existingEnvs = await getExistingEnvironments(apiKey, domain, inputArgs.projKeyDest);
-  console.log(Colors.gray(`  Found existing environments: ${existingEnvs.join(', ')}`));
-  
-  // If environment mapping is enabled, check destination environments exist
-  if (inputArgs.envMap) {
-    const mappedDestEnvs = envkeys.map(srcKey => envMapping[srcKey]);
-    const missingDestEnvs = mappedDestEnvs.filter(destKey => !existingEnvs.includes(destKey));
-    
-    if (missingDestEnvs.length > 0) {
-      console.log(Colors.red(`Error: The following mapped destination environments don't exist in target project:`));
-      missingDestEnvs.forEach(destKey => {
-        const srcKey = reverseEnvMapping[destKey];
-        console.log(Colors.red(`  ${srcKey} → ${destKey} (destination "${destKey}" not found)`));
-      });
-      console.log(Colors.red(`Available destination environments: ${existingEnvs.join(', ')}`));
-      Deno.exit(1);
-    }
-  } else {
-    // Keep SOURCE env keys; only include those that exist in the target project.
-    // (We must use source keys so that flag.environments[env] matches extracted flag data.)
+if (!targetProjectExists) {
+  console.log(Colors.red(`\n❌ Destination project "${inputArgs.projKeyDest}" does not exist.`));
+  console.log(Colors.yellow(`   Create the project in LaunchDarkly first, then run migration again.`));
+  Deno.exit(1);
+}
+
+// Get existing environments
+console.log(Colors.blue(`  Fetching existing environments for ${inputArgs.projKeyDest}...`));
+const existingEnvs = await getExistingEnvironments(apiKey, domain, inputArgs.projKeyDest);
+console.log(Colors.gray(`  Found existing environments: ${existingEnvs.join(', ')}`));
+
+// If environment mapping is enabled, check destination environments exist
+if (inputArgs.envMap) {
+  const mappedDestEnvs = envkeys.map(srcKey => envMapping[srcKey]);
+  const missingDestEnvs = mappedDestEnvs.filter(destKey => !existingEnvs.includes(destKey));
+
+  if (missingDestEnvs.length > 0) {
+    console.log(Colors.red(`Error: The following mapped destination environments don't exist in target project:`));
+    missingDestEnvs.forEach(destKey => {
+      const srcKey = reverseEnvMapping[destKey];
+      console.log(Colors.red(`  ${srcKey} → ${destKey} (destination "${destKey}" not found)`));
+    });
+    console.log(Colors.red(`Available destination environments: ${existingEnvs.join(', ')}`));
+    Deno.exit(1);
+  }
+} else {
+  // Keep SOURCE env keys; only include those that exist in the target project.
+  // (We must use source keys so that flag.environments[env] matches extracted flag data.)
   const missingEnvs = envkeys.filter(key => !existingEnvs.includes(key));
   if (missingEnvs.length > 0) {
     console.log(Colors.yellow(`Warning: The following environments from source project don't exist in target project: ${missingEnvs.join(', ')}`));
@@ -462,37 +464,6 @@ if (targetProjectExists) {
   if (envkeys.length > 0) {
     console.log(Colors.cyan(`Migrating ${envkeys.length} environment(s) that exist in both projects\n`));
   }
-  }
-} else {
-  console.log(`Creating new project ${inputArgs.projKeyDest}`);
-  const projPost: any = {
-    key: inputArgs.projKeyDest,
-    name: inputArgs.projKeyDest,
-    tags: projectJson.tags,
-    environments: buildEnv,
-  };
-
-  if (projectJson.defaultClientSideAvailability) {
-    projPost.defaultClientSideAvailability = projectJson.defaultClientSideAvailability;
-  } else {
-    projPost.includeInSnippetByDefault = projectJson.includeInSnippetByDefault;
-  }
-
-  const projResp = await dryRunAwarePost(
-    inputArgs.dryRun || false,
-    apiKey,
-    domain,
-    `projects`,
-    projPost,
-    false,
-    'projects'
-  );
-
-  consoleLogger(
-    projResp.status,
-    `Creating Project: ${inputArgs.projKeyDest} Status: ${projResp.status}`,
-  );
-  await projResp.json();
 }
 
 // View Management //
