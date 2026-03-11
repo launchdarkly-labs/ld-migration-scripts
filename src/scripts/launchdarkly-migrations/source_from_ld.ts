@@ -7,6 +7,7 @@ import {
   consoleLogger,
   ldAPIRequest,
   rateLimitRequest,
+  rateLimitRequestConcurrent,
   writeSourceData,
 } from "../../utils/utils.ts";
 import { getSourceApiKey } from "../../utils/api_keys.ts";
@@ -198,35 +199,32 @@ console.log(`Found ${flags.length} flags`);
 
 await writeSourceData(projPath, "flags", flags);
 
-// Get Individual Flag Data //
-console.log("\nExtracting individual flag data...");
+// Get Individual Flag Data (up to 10 concurrent GETs)
+const EXTRACT_GET_CONCURRENCY = 10;
+console.log(`\nExtracting individual flag data (${flags.length} flags, concurrency ${EXTRACT_GET_CONCURRENCY})...`);
 ensureDirSync(`${projPath}/flags`);
 
-for (const [index, flagKey] of flags.entries()) {
-  console.log(`Getting flag ${index + 1} of ${flags.length}: ${flagKey}`);
+const flagRequests = flags.map((flagKey: string) => ({
+  req: ldAPIRequest(apiKey, domain, `flags/${inputArgs.projKey}/${flagKey}`),
+  routeCategory: "flags" as const,
+}));
+const flagResponses = await rateLimitRequestConcurrent(flagRequests, EXTRACT_GET_CONCURRENCY);
 
-  // Use rateLimitRequest which handles delays based on response headers
-  const flagResp = await rateLimitRequest(
-    ldAPIRequest(
-      apiKey,
-      domain,
-      `flags/${inputArgs.projKey}/${flagKey}`
-    ),
-    "flags"
-  );
+for (let i = 0; i < flags.length; i++) {
+  const flagKey = flags[i];
+  const flagResp = flagResponses[i];
+  if (flagResp == null) {
+    console.log(`Failed getting flag '${flagKey}'`);
+    Deno.exit(1);
+  }
   if (flagResp.status > 201) {
     consoleLogger(
       flagResp.status,
       `Error getting flag '${flagKey}': ${flagResp.status}`
     );
     consoleLogger(flagResp.status, await flagResp.text());
+    continue;
   }
-  if (flagResp == null) {
-    console.log("Failed getting flag '${flagKey}'");
-    Deno.exit(1);
-  }
-
   const flagData = await flagResp.json();
-
   await writeSourceData(`${projPath}/flags`, flagKey, flagData);
 }

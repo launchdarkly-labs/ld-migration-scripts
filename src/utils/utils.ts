@@ -205,6 +205,33 @@ export async function rateLimitRequest(req: Request, routeCategory: string): Pro
   return res;
 }
 
+/**
+ * Run multiple rate-limited GET requests with a concurrency cap.
+ * Each request still goes through rateLimitRequest (delays, 429 retry, state tracking).
+ * Returns responses in the same order as the input array.
+ */
+export async function rateLimitRequestConcurrent(
+  items: Array<{ req: Request; routeCategory: string }>,
+  concurrency: number = 10
+): Promise<Response[]> {
+  if (items.length === 0) return [];
+  const limit = Math.max(1, Math.min(concurrency, items.length));
+  const results: Response[] = new Array(items.length);
+  let nextIndex = 0;
+
+  async function worker(): Promise<void> {
+    while (true) {
+      const i = nextIndex++;
+      if (i >= items.length) return;
+      results[i] = await rateLimitRequest(items[i].req, items[i].routeCategory);
+    }
+  }
+
+  const workers = Array.from({ length: limit }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
 export function ldAPIPostRequest(
   apiKey: string,
   domain: string,
