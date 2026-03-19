@@ -47,6 +47,7 @@ interface SyncManifestEnv {
 interface SyncManifestFlag {
   version: number;
   lastModified?: string;
+  contentHash?: string;  // Hash of variations+defaults+env config; LD may not bump version for value-only changes
   environments: Record<string, SyncManifestEnv>;
 }
 
@@ -532,6 +533,19 @@ if (allViewKeys.size > 0) {
 }
 
 // ==================== Incremental Sync ====================
+
+/** Hash of migratable flag content; LD may not bump version for variation value changes */
+async function flagContentHash(flag: any, envKeys: string[]): Promise<string> {
+  const stripIds = (v: any[]) => (v || []).map(({ _id, ...rest }: any) => rest);
+  const stripRuleIds = (r: any) => ({ ...r, clauses: (r.clauses || []).map(({ _id, ...c }: any) => c) });
+  const envs: Record<string, unknown> = {};
+  for (const k of envKeys) {
+    const e = flag.environments?.[k];
+    if (e) envs[k] = { offVariation: e.offVariation, fallthrough: e.fallthrough, rules: (e.rules || []).map(stripRuleIds) };
+  }
+  const payload = { variations: stripIds(flag.variations || []), defaults: flag.defaults, envs };
+  return sha256HexUtf8(JSON.stringify(payload));
+}
 
 const syncManifestPath = `./data/launchdarkly-migrations/sync-manifest-${inputArgs.projKeySource}-${inputArgs.projKeyDest}.json`;
 let previousManifest: SyncManifest | null = null;
@@ -1308,41 +1322,44 @@ for (const [index, flagkey] of flagList.entries()) {
         }
       }
       if (allEnvsUnchanged) {
-        // Sync lifecycle (archived/deprecated) even when versions match — LD may not bump version for lifecycle-only changes
-        const destKey = flag.key;
-        let lifecycleSynced = false;
-        try {
-          const destReq = ldAPIRequest(apiKey, domain, `flags/${inputArgs.projKeyDest}/${destKey}`);
-          const destResp = await rateLimitRequest(destReq, 'flags');
-          if (destResp.status === 200) {
-            const destFlag = await destResp.json();
-            const changed = (a: any, b: any) => JSON.stringify(a) !== JSON.stringify(b);
-            const lifecyclePatches: any[] = [];
-            if (flag.archived !== undefined && changed(flag.archived, destFlag.archived))
-              lifecyclePatches.push(buildPatch("archived", "replace", flag.archived));
-            if (flag.deprecated !== undefined && changed(flag.deprecated, destFlag.deprecated))
-              lifecyclePatches.push(buildPatch("deprecated", "replace", flag.deprecated));
-            if (flag.deprecatedDate !== undefined && changed(flag.deprecatedDate, destFlag.deprecatedDate))
-              lifecyclePatches.push(buildPatch("deprecatedDate", "replace", flag.deprecatedDate));
-            if (lifecyclePatches.length > 0) {
-              const patchResp = await dryRunAwarePatch(
-                inputArgs.dryRun || false, apiKey, domain,
-                `flags/${inputArgs.projKeyDest}/${destKey}`, lifecyclePatches, false, 'flags', 'lifecycle (archived/deprecated)');
-              if (patchResp.status >= 200 && patchResp.status < 300) {
-                console.log(Colors.gray(`\t  → synced lifecycle (archived/deprecated)`));
-                lifecycleSynced = true;
+        const currentHash = await flagContentHash(flag, envkeys);
+        if (!prevEntry.contentHash || prevEntry.contentHash !== currentHash) allEnvsUnchanged = false;
+        if (allEnvsUnchanged) {
+          // Sync lifecycle (archived/deprecated) even when versions match — LD may not bump version for lifecycle-only changes
+          const destKey = flag.key;
+          let lifecycleSynced = false;
+          try {
+            const destReq = ldAPIRequest(apiKey, domain, `flags/${inputArgs.projKeyDest}/${destKey}`);
+            const destResp = await rateLimitRequest(destReq, 'flags');
+            if (destResp.status === 200) {
+              const destFlag = await destResp.json();
+              const changed = (a: any, b: any) => JSON.stringify(a) !== JSON.stringify(b);
+              const lifecyclePatches: any[] = [];
+              if (flag.archived !== undefined && changed(flag.archived, destFlag.archived))
+                lifecyclePatches.push(buildPatch("archived", "replace", flag.archived));
+              if (flag.deprecated !== undefined && changed(flag.deprecated, destFlag.deprecated))
+                lifecyclePatches.push(buildPatch("deprecated", "replace", flag.deprecated));
+              if (flag.deprecatedDate !== undefined && changed(flag.deprecatedDate, destFlag.deprecatedDate))
+                lifecyclePatches.push(buildPatch("deprecatedDate", "replace", flag.deprecatedDate));
+              if (lifecyclePatches.length > 0) {
+                const patchResp = await dryRunAwarePatch(
+                  inputArgs.dryRun || false, apiKey, domain,
+                  `flags/${inputArgs.projKeyDest}/${destKey}`, lifecyclePatches, false, 'flags', 'lifecycle (archived/deprecated)');
+                if (patchResp.status >= 200 && patchResp.status < 300) {
+                  console.log(Colors.gray(`\t  → synced lifecycle (archived/deprecated)`));
+                  lifecycleSynced = true;
+                }
               }
             }
+          } catch (_) {
+            // ignore
           }
-        } catch (_) {
-          // ignore
+          const ts = flag.creationDate ? `, updated ${flag.creationDate}` : '';
+          console.log(Colors.gray(`\t✓ ${flag.key}: unchanged (v${flag._version}${ts})${lifecycleSynced ? ', lifecycle synced' : ''}, skipping`));
+          updatedManifestFlags[flag.key] = { ...prevEntry, contentHash: currentHash };
+          incrementalSkipCount++;
+          continue;
         }
-        const ts = flag.creationDate ? `, updated ${flag.creationDate}` : '';
-        console.log(Colors.gray(`\t✓ ${flag.key}: unchanged (v${flag._version}${ts})${lifecycleSynced ? ', lifecycle synced' : ''}, skipping`));
-        // Carry forward the previous manifest entry unchanged
-        updatedManifestFlags[flag.key] = prevEntry;
-        incrementalSkipCount++;
-        continue;
       }
     }
   }
@@ -1590,27 +1607,67 @@ for (const [index, flagkey] of flagList.entries()) {
       if (flag.deprecatedDate !== undefined && changed(flag.deprecatedDate, destinationFlag.deprecatedDate))
         flagLevelPatches.push(buildPatch("deprecatedDate", "replace", flag.deprecatedDate));
 
-      // Variations and defaults must be patched together to avoid index conflicts
-      // Strip _id from both sides before comparing
+      // Variations: avoid "Cannot delete the default on variation" via targeted updates
       const stripIds = (v: any[]) => v.map(({ _id, ...rest }: any) => rest);
       const destVarsClean = destinationFlag.variations ? stripIds(destinationFlag.variations) : [];
-      if (newVariations?.length > 0 && changed(newVariations, destVarsClean)) {
-        flagLevelPatches.push(buildPatch("variations", "replace", newVariations));
-        if (flag.defaults) flagLevelPatches.push(buildPatch("defaults", "replace", flag.defaults));
-      } else if (flag.defaults && changed(flag.defaults, destinationFlag.defaults)) {
-        flagLevelPatches.push(buildPatch("defaults", "replace", flag.defaults));
+      const variationsChanged = newVariations?.length > 0 && changed(newVariations, destVarsClean);
+      const destCount = destinationFlag.variations?.length ?? 0;
+      const newCount = newVariations?.length ?? 0;
+      const existingMatch = destCount > 0 && newCount >= destCount &&
+        newVariations.slice(0, destCount).every((v, i) => JSON.stringify(v) === JSON.stringify(destVarsClean[i]));
+      const useReplace = newCount < destCount || (newCount > destCount && !existingMatch);
+
+      let envPrePatchOk = true;
+      if (variationsChanged && useReplace) {
+        const safeIdx = 0;
+        const prePatches: any[] = [buildPatch("defaults", "replace", { onVariation: safeIdx, offVariation: safeIdx })];
+        for (const [key, env] of Object.entries(destinationFlag.environments || {})) {
+          const e = env as any;
+          if (!e) continue;
+          if (e.offVariation !== safeIdx) prePatches.push(buildPatch(`environments/${key}/offVariation`, "replace", safeIdx));
+          if (e.fallthrough) prePatches.push(buildPatch(`environments/${key}/fallthrough`, "replace", { variation: safeIdx }));
+        }
+        console.log(Colors.gray(`\tPre-patching defaults + env (${prePatches.length} patch(es)) before variations...`));
+        const resp = await dryRunAwarePatch(inputArgs.dryRun || false, apiKey, domain,
+          `flags/${inputArgs.projKeyDest}/${createdFlagKey}`, prePatches, false, 'flags', 'pre-patch');
+        if (resp.status < 200 || resp.status >= 300) {
+          console.log(Colors.yellow(`\t⚠ Pre-patch failed (${resp.status}): ${await resp.text()}`));
+          flagsWithErrors.add(createdFlagKey);
+          envPrePatchOk = false;
+        } else console.log(Colors.green(`\t✓ Pre-patch applied`));
       }
+
+      if (variationsChanged && envPrePatchOk) {
+        if (newCount > destCount && existingMatch) {
+          for (let i = destCount; i < newCount; i++) flagLevelPatches.push({ path: "/variations/-", op: "add", value: newVariations[i] });
+        } else if (newCount === destCount) {
+          for (let i = 0; i < newCount; i++) {
+            const src = newVariations[i], dest = destVarsClean[i];
+            if (!dest) continue;
+            if (src?.value !== dest?.value) flagLevelPatches.push({ path: `/variations/${i}/value`, op: "replace", value: src?.value });
+            if (src?.name !== dest?.name && src?.name !== undefined) flagLevelPatches.push({ path: `/variations/${i}/name`, op: "replace", value: src?.name });
+          }
+        } else {
+          flagLevelPatches.push(buildPatch("variations", "replace", newVariations));
+        }
+      }
+      if (!variationsChanged && flag.defaults && changed(flag.defaults, destinationFlag.defaults))
+        flagLevelPatches.push(buildPatch("defaults", "replace", flag.defaults));
 
       if (flagLevelPatches.length > 0) {
         console.log(Colors.gray(`\tUpdating flag-level properties (${flagLevelPatches.length} field(s))...`));
-        const flagLevelResp = await dryRunAwarePatch(
-          inputArgs.dryRun || false, apiKey, domain,
+        const flagLevelResp = await dryRunAwarePatch(inputArgs.dryRun || false, apiKey, domain,
           `flags/${inputArgs.projKeyDest}/${createdFlagKey}`, flagLevelPatches, false, 'flags', 'flag-level properties');
         if (flagLevelResp.status >= 200 && flagLevelResp.status < 300) {
           console.log(Colors.green(`\t✓ Flag-level properties updated`));
+          if (variationsChanged && flag.defaults) {
+            const dr = await dryRunAwarePatch(inputArgs.dryRun || false, apiKey, domain,
+              `flags/${inputArgs.projKeyDest}/${createdFlagKey}`, [buildPatch("defaults", "replace", flag.defaults)], false, 'flags', 'defaults');
+            if (dr.status >= 200 && dr.status < 300) console.log(Colors.green(`\t✓ Defaults updated`));
+            else { console.log(Colors.yellow(`\t⚠ Defaults failed (${dr.status})`)); flagsWithErrors.add(createdFlagKey); }
+          }
         } else {
-          const errText = await flagLevelResp.text();
-          console.log(Colors.yellow(`\t⚠ Flag-level update failed (${flagLevelResp.status}): ${errText}`));
+          console.log(Colors.yellow(`\t⚠ Flag-level update failed (${flagLevelResp.status}): ${await flagLevelResp.text()}`));
           flagsWithErrors.add(createdFlagKey);
         }
       }
@@ -1683,10 +1740,11 @@ for (const [index, flagkey] of flagList.entries()) {
     }
   }
 
-  // Track flag version for sync manifest (flag-level lastModified comes from creationDate or _version)
+  // Track flag version + content hash for sync manifest
   updatedManifestFlags[flag.key] = {
     version: flag._version ?? 0,
     lastModified: flag.creationDate,
+    contentHash: await flagContentHash(flag, envkeys),
     environments: flagManifestEnvs,
   };
 }

@@ -1,5 +1,26 @@
 {
   "version": "5",
+  "specifiers": {
+    "jsr:@std/cli@*": "1.0.28",
+    "npm:jsondiffpatch@*": "0.7.3"
+  },
+  "jsr": {
+    "@std/cli@1.0.28": {
+      "integrity": "74ef9b976db59ca6b23a5283469c9072be6276853807a83ec6c7ce412135c70a"
+    }
+  },
+  "npm": {
+    "@dmsnell/diff-match-patch@1.1.0": {
+      "integrity": "sha512-yejLPmM5pjsGvxS9gXablUSbInW7H976c/FJ4iQxWIm7/38xBySRemTPDe34lhg1gVLbJntX0+sH0jYfU+PN9A=="
+    },
+    "jsondiffpatch@0.7.3": {
+      "integrity": "sha512-zd4dqFiXSYyant2WgSXAZ9+yYqilNVvragVNkNRn2IFZKgjyULNrKRznqN4Zon0MkLueCg+3QaPVCnDAVP20OQ==",
+      "dependencies": [
+        "@dmsnell/diff-match-patch"
+      ],
+      "bin": true
+    }
+  },
   "redirects": {
     "https://deno.land/std/fmt/colors.ts": "https://deno.land/std@0.224.0/fmt/colors.ts",
     "https://deno.land/std/fmt/printf.ts": "https://deno.land/std@0.224.0/fmt/printf.ts",
