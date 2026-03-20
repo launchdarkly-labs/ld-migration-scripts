@@ -537,6 +537,7 @@ const syncManifestPath = `./data/launchdarkly-migrations/sync-manifest-${inputAr
 let previousManifest: SyncManifest | null = null;
 const updatedManifestFlags: Record<string, SyncManifestFlag> = {};
 const updatedManifestSegments: Record<string, Record<string, SyncManifestSegment>> = {};
+const segmentsWithErrors: Set<string> = new Set();
 let incrementalSkipCount = 0;
 let incrementalEnvSkipCount = 0;
 let incrementalSegmentSkipCount = 0;
@@ -710,15 +711,19 @@ if (inputArgs.migrateSegments) {
         patchRules.status,
           `Patching segment ${segmentKey} status: ${segPatchStatus}`,
       );
-      }
 
-      // Track segment version for sync manifest only if it was actually created/patched
-      if (segmentCreated) {
+      // Track segment version for sync manifest only when created/patched successfully
+      const segmentPatchOk = patchRules.status >= 200 && patchRules.status < 300;
+      if (segmentPatchOk) {
         if (!updatedManifestSegments[env.key]) updatedManifestSegments[env.key] = {};
         updatedManifestSegments[env.key][segment.key] = {
           version: segment.version ?? 0,
           lastModified: segment.lastModifiedDate,
         };
+      } else {
+        segmentsWithErrors.add(`${env.key}:${segment.key}`);
+        console.log(Colors.gray(`    → Skipped manifest update for segment ${segment.key} (patch failed; will retry next run)`));
+      }
       }
     };
   };
@@ -1683,12 +1688,16 @@ for (const [index, flagkey] of flagList.entries()) {
     }
   }
 
-  // Track flag version for sync manifest (flag-level lastModified comes from creationDate or _version)
-  updatedManifestFlags[flag.key] = {
-    version: flag._version ?? 0,
-    lastModified: flag.creationDate,
-    environments: flagManifestEnvs,
-  };
+  // Track flag version for sync manifest only when successfully created/updated (no errors)
+  if (flagCreated && !flagsWithErrors.has(flag.key)) {
+    updatedManifestFlags[flag.key] = {
+      version: flag._version ?? 0,
+      lastModified: flag.creationDate,
+      environments: flagManifestEnvs,
+    };
+  } else if (flagsWithErrors.has(flag.key)) {
+    console.log(Colors.gray(`\t  → Skipped manifest update for ${flag.key} (errors occurred; will retry next run)`));
+  }
 }
 
 // Always write sync manifest so --incremental works on next run
@@ -1708,6 +1717,13 @@ try {
   console.log(Colors.green(`\n✓ Sync manifest written to ${syncManifestPath} (${Object.keys(manifest.flags).length} flags, ${envCount} environments${segPart} tracked)`));
 } catch (error) {
   console.log(Colors.yellow(`\n⚠ Could not write sync manifest: ${error instanceof Error ? error.message : String(error)}`));
+}
+
+if (flagsWithErrors.size > 0 || segmentsWithErrors.size > 0) {
+  const parts = [];
+  if (flagsWithErrors.size > 0) parts.push(`${flagsWithErrors.size} flag(s)`);
+  if (segmentsWithErrors.size > 0) parts.push(`${segmentsWithErrors.size} segment(s)`);
+  console.log(Colors.yellow(`\n⚠ ${parts.join(', ')} omitted from manifest due to errors (will retry next run)`));
 }
 
 if (incrementalSkipCount > 0 || incrementalEnvSkipCount > 0 || incrementalSegmentSkipCount > 0) {
