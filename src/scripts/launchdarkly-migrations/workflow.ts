@@ -40,6 +40,9 @@ interface WorkflowConfig {
     dryRun?: boolean;
     incremental?: boolean;
     since?: string;
+    includeFlags?: string[];
+    excludeFlags?: string[];
+    concurrency?: number;
   };
   thirdPartyImport?: {
     inputFile: string;
@@ -56,7 +59,7 @@ interface WorkflowConfig {
 }
 
 interface Arguments {
-  config: string;
+  config?: string;
 }
 
 type StepName = 'extract-source' | 'map-members' | 'migrate' | 'third-party-import' | 'revert';
@@ -68,9 +71,18 @@ const DEFAULT_WORKFLOW_STEPS: StepName[] = ["extract-source", "map-members", "mi
 
 const inputArgs: Arguments = yargs(Deno.args)
   .alias("f", "config")
-  .demandOption(["config"])
+  .option("config", { type: "string", description: "Path to workflow configuration YAML file" })
   .describe("f", "Path to workflow configuration YAML file")
   .parse() as Arguments;
+
+// Allow positional YAML path: deno task workflow examples/workflow-full.yaml
+const configPath = inputArgs.config ?? (Deno.args.length > 0 && !Deno.args[0].startsWith("-") && /\.(yaml|yml)$/i.test(Deno.args[0]) ? Deno.args[0] : undefined);
+if (!configPath) {
+  console.log(Colors.red("Error: No workflow config specified. Use -f <file> or pass the YAML file path."));
+  console.log(Colors.gray("  deno task workflow -f examples/workflow-full.yaml"));
+  console.log(Colors.gray("  deno task workflow examples/workflow-full.yaml"));
+  Deno.exit(1);
+}
 
 // ==================== Config Loading ====================
 
@@ -252,6 +264,9 @@ const buildMigrationArgs = (config: WorkflowConfig): string[] => {
   args = addOptionalArg(args, "-v", migration.targetView);
   args = addOptionalArg(args, "-e", migration.environments?.join(","));
   args = addOptionalArg(args, "--since", migration.since);
+  args = addOptionalArg(args, "--include-flags", migration.includeFlags?.length ? migration.includeFlags.join(",") : undefined);
+  args = addOptionalArg(args, "--exclude-flags", migration.excludeFlags?.length ? migration.excludeFlags.join(",") : undefined);
+  args = addOptionalArg(args, "--concurrency", migration.concurrency != null ? String(migration.concurrency) : undefined);
 
   if (migration.environmentMapping) {
     args = addOptionalArg(args, "--env-map", formatEnvMapping(migration.environmentMapping));
@@ -360,7 +375,7 @@ const buildRevertArgs = (config: WorkflowConfig): string[] => {
   );
 
   // Use the config file itself as the -f parameter (revert reads from it)
-  const withConfigFile = [...baseArgs, "-f", inputArgs.config];
+  const withConfigFile = [...baseArgs, "-f", configPath];
   
   // Add optional flags
   let args = addBooleanFlag(withConfigFile, "--dry-run", revertConfig.dryRun);
@@ -432,7 +447,7 @@ const printWorkflowHeader = (config: WorkflowConfig, steps: string[]): void => {
   
   console.log(Colors.blue(`\n🚀 LaunchDarkly Migration Workflow`));
   console.log(Colors.blue(`${divider}\n`));
-  console.log(Colors.cyan(`Configuration loaded: ${inputArgs.config}`));
+  console.log(Colors.cyan(`Configuration loaded: ${configPath}`));
   console.log(Colors.cyan(`Source Project: ${config.source.projectKey}`));
   
   if (config.destination?.projectKey) {
@@ -464,7 +479,7 @@ const getWorkflowSteps = (config: WorkflowConfig): string[] =>
  * Main workflow orchestration function
  */
 const main = async (): Promise<void> => {
-  const config = await loadConfig(inputArgs.config);
+  const config = await loadConfig(configPath);
   const steps = getWorkflowSteps(config);
   
   printWorkflowHeader(config, steps);

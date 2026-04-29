@@ -21,9 +21,26 @@ Complete end-to-end migration workflow that runs all steps automatically:
 **Usage:**
 ```bash
 deno task workflow -f examples/workflow-full.yaml
+
+# Or pass the YAML as a positional argument (no -f needed)
+deno task workflow examples/workflow-full.yaml
+
+# Or use the shortcut task
+deno task workflow:full
 ```
 
 **Key feature:** If you don't specify `workflow.steps`, it runs the FULL workflow by default!
+
+### `workflow-extract-migrate-incremental.yaml`
+Re-export source data then sync only changed flags (incremental migration).
+
+**Usage:**
+```bash
+deno task workflow -f examples/workflow-extract-migrate-incremental.yaml
+
+# Or use the shortcut task
+deno task workflow:incremental
+```
 
 ### `workflow-extract-only.yaml`
 Extract source project data without running migration.
@@ -91,6 +108,8 @@ Complete example showing all available migration options:
 - View organization
 - Environment filtering
 - Environment key mapping
+- Include/exclude flag filtering
+- Parallel migration concurrency
 
 **Usage:**
 ```bash
@@ -181,6 +200,8 @@ cp examples/workflow-full.yaml my-migration.yaml
 
 # 3. Run complete migration with one command
 deno task workflow -f my-migration.yaml
+# or simply:
+deno task workflow my-migration.yaml
 ```
 
 That's it! The workflow runs all steps automatically.
@@ -235,6 +256,7 @@ That's it! The workflow runs all steps automatically.
 | Use Case | Config Type | Example File |
 |----------|-------------|--------------|
 | **Complete migration (recommended)** | Workflow | `workflow-full.yaml` |
+| Incremental sync (after initial) | Workflow | `workflow-extract-migrate-incremental.yaml` |
 | Extract source data only | Workflow | `workflow-extract-only.yaml` |
 | Third-party flag import | Workflow | `workflow-third-party.yaml` |
 | Custom step combinations | Workflow | `workflow-custom-steps.yaml` |

@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-04-29
+
+### Added
+
+- **Include / exclude flags**: Migrate only specific flags or skip others
+  - `migration.includeFlags` (YAML array or `--include-flags` comma-separated): only these flag keys are migrated
+  - `migration.excludeFlags` (YAML array or `--exclude-flags` comma-separated): these flag keys are skipped
+  - Supported in workflow YAMLs and in the migrate task (CLI and config file)
+- **Parallel flag migration**: Migrate up to N flags at a time (default 10)
+  - `migration.concurrency` in workflow YAML or `--concurrency N` for the migrate task
+  - Speeds up migration by processing multiple flags concurrently; rate limiting still applies
+
+### Fixed
+
+- **Flag keys that differ only by case now migrate as separate flags**
+  Extract now writes each flag's data to an index-prefixed file (`flags/0-my-flag.json`, `flags/1-other-flag.json`, ...) instead of using just the flag key as the filename. On case-insensitive filesystems (e.g. macOS default), keys like `Flag-one` and `flag-one` no longer overwrite the same file, while remaining human-browsable. Migrate tries the index-prefixed path first and falls back to pure index, SHA-based, and plain key paths, so existing extractions continue to work.
+
 ## [3.0.2] - 2025-12-09
 
 ### Fixed
