@@ -228,6 +228,9 @@ await Promise.all(
     }
 
     const flagData = await flagResp.json();
-    await writeSourceData(`${projPath}/flags`, `${flagKey}-${await sha256HexUtf8(flagKey)}`, flagData);
+    // Use index-prefixed filenames so flags that differ only by case (e.g. "Flag-one" vs "flag-one")
+    // get separate files on case-insensitive filesystems (e.g. macOS default).
+    // Format: {index}-{flagKey}.json — keeps files human-browsable.
+    await writeSourceData(`${projPath}/flags`, `${index}-${flagKey}`, flagData);
   })
 );

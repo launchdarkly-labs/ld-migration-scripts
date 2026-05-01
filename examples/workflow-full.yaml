@@ -49,3 +49,15 @@ migration:
     production: production
     staging: staging
 
+  # Include only these flag keys (optional — omit to migrate all)
+  # includeFlags:
+  #   - feature-one
+  #   - feature-two
+
+  # Exclude these flag keys (optional)
+  # excludeFlags:
+  #   - deprecated-flag
+
+  # Migrate up to N flags in parallel (optional, default: 10)
+  # concurrency: 10
+

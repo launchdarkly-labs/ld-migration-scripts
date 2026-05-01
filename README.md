@@ -25,6 +25,9 @@ Features that are currently supported:
 - Maintainer mapping across different account instances
 - **Views support**: Automatic extraction and creation of views with flag linkage
 - **Conflict resolution**: Automatic handling of resource key conflicts with configurable prefixes
+- **Include/exclude flags**: Migrate only specific flags or exclude certain flags from migration
+- **Parallel flag migration**: Migrate multiple flags concurrently for faster migrations
+- **Case-sensitive flag storage**: Flags that differ only by case are stored separately (index-prefixed filenames)
 
 ## Project Structure
 
@@ -123,6 +126,13 @@ Run the complete migration workflow from a single YAML config file:
 ```bash
 # Run full workflow (extract → map → migrate) - the default
 deno task workflow -f examples/workflow-full.yaml
+
+# Or pass the YAML as a positional argument (no -f needed)
+deno task workflow examples/workflow-full.yaml
+
+# Shortcut tasks for common workflows
+deno task workflow:full          # runs examples/workflow-full.yaml
+deno task workflow:incremental   # runs examples/workflow-extract-migrate-incremental.yaml
 
 # Or create your own config
 cat > my-migration.yaml <<EOF
@@ -358,6 +368,9 @@ migration:                   # Optional - for migrate step
   environmentMapping:
     sourceEnv: destEnv
   dryRun: boolean           # Preview changes without applying
+  includeFlags: string[]    # Only migrate these flag keys
+  excludeFlags: string[]    # Skip these flag keys
+  concurrency: number       # Parallel flag migrations (default: 10)
 
 thirdPartyImport:           # Required for third-party-import step
   inputFile: string          # JSON or CSV file path
@@ -386,16 +399,18 @@ When you run `extract-source`, data is organized as follows:
 ```
 data/launchdarkly-migrations/source/project/{projectKey}/
 ├── project.json           # Project metadata and environments
-├── flags.json            # List of all flag keys
-├── flags/                # Individual flag data
-│   ├── flag-key-1.json
-│   ├── flag-key-2.json
+├── flags.json            # List of all flag keys (ordered)
+├── flags/                # Individual flag data (index-prefixed filenames)
+│   ├── 0-my-flag.json    # First flag's data
+│   ├── 1-other-flag.json # Second flag's data
 │   └── ...
 └── segments/             # Segment data (only if includeSegments: true)
     ├── environment-1.json
     ├── environment-2.json
     └── ...
 ```
+
+**Note:** Flag data files use index-prefixed filenames (`0-flag-key.json`, `1-flag-key.json`, ...) to avoid case collisions on case-insensitive filesystems (e.g. macOS) while remaining human-browsable. The migrate script also supports older SHA-based and key-based filenames for backward compatibility.
 
 **Note:** Segments are only extracted if:
 - `extraction.includeSegments` is explicitly set to `true` OR
@@ -493,7 +508,7 @@ destination:
   projectKey: string         # Required: Destination project key
   domain: string             # Optional: Defaults to app.launchdarkly.com
 
-migration:                   # Migration settings
+migration:                   # Migration settings (also accepts "options:" as alias)
   assignMaintainerIds: boolean          # Default: false
   migrateSegments: boolean              # Default: true
   conflictPrefix: string                # Optional
@@ -502,7 +517,12 @@ migration:                   # Migration settings
   environmentMapping:                   # Optional, key-value mapping
     sourceEnv: destEnv
     ...
+  includeFlags: string[]                # Optional: only migrate these flag keys
+  excludeFlags: string[]                # Optional: skip these flag keys
+  concurrency: number                   # Optional: parallel flags (default: 10)
 ```
+
+**Note:** Config files accept either `migration:` or `options:` as the key for migration settings.
 
 ### Priority Order
 
@@ -700,6 +720,55 @@ Reading flag 1 of 50 : my-feature
 - If none of the requested environments exist, the migration will abort
 - Environment keys must match exactly (case-sensitive)
 
+### Include / Exclude Flags
+
+Migrate only specific flags or exclude certain flags from migration:
+
+**Via YAML config:**
+```yaml
+migration:
+  # Only migrate these flags
+  includeFlags:
+    - feature-one
+    - feature-two
+
+  # Or exclude specific flags
+  excludeFlags:
+    - deprecated-flag
+    - experimental-feature
+```
+
+**Via CLI:**
+```bash
+# Only migrate specific flags
+deno task migrate -p SOURCE -d DEST --include-flags "feature-one,feature-two"
+
+# Exclude specific flags
+deno task migrate -p SOURCE -d DEST --exclude-flags "deprecated-flag,experimental-feature"
+```
+
+Omit both to migrate all extracted flags. If `includeFlags` is set, only those flags are migrated. `excludeFlags` is applied after `includeFlags`.
+
+### Parallel Flag Migration
+
+By default, up to 10 flags are migrated concurrently. Adjust with `--concurrency`:
+
+```bash
+# Migrate 20 flags in parallel
+deno task migrate -p SOURCE -d DEST --concurrency 20
+
+# Sequential migration (1 at a time)
+deno task migrate -p SOURCE -d DEST --concurrency 1
+```
+
+**Via YAML config:**
+```yaml
+migration:
+  concurrency: 20
+```
+
+Rate limiting still applies per-request, so higher concurrency speeds up migrations with many flags that have few environments.
+
 ### Combining Features
 
 You can combine all features for powerful migration workflows:
@@ -873,11 +942,14 @@ configured in `deno.json` and include all necessary permissions.
 ```json
 {
   "tasks": {
-    "source-from-ld": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/source_from_ld.ts",
-    "map-members": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/map_members_between_ld_instances.ts",
-    "migrate": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/migrate_between_ld_instances.ts",
-    "estimate-migration-time": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/estimate_migration_time.ts",
-    "import-flags": "deno run --allow-net --allow-read --allow-write src/scripts/third-party-migrations/import_flags_from_external.ts"
+    "workflow": "...",
+    "workflow:full": "deno task workflow -- -f examples/workflow-full.yaml",
+    "workflow:incremental": "deno task workflow -- -f examples/workflow-extract-migrate-incremental.yaml",
+    "source-from-ld": "...",
+    "map-members": "...",
+    "migrate": "...",
+    "estimate-migration-time": "...",
+    "import-flags": "..."
   }
 }
 ```
@@ -970,6 +1042,13 @@ don't need to specify them manually.
 - `--domain`: (Optional) Destination LaunchDarkly domain, defaults to `app.launchdarkly.com`. Use `app.eu.launchdarkly.com` for EU instances.
 - `-f, --config`: (Optional) Path to YAML configuration file. All migration settings
   can be specified in the config file. CLI arguments override config file values.
+- `--include-flags`: (Optional) Comma-separated list of flag keys to migrate. Only
+  these flags will be migrated. Cannot be combined with `--exclude-flags` meaningfully
+  (include is applied first, then exclude).
+- `--exclude-flags`: (Optional) Comma-separated list of flag keys to exclude from
+  migration. These flags will be skipped.
+- `--concurrency`: (Optional) Max number of flags to migrate in parallel. Defaults
+  to 10. Speeds up large migrations while rate limiting still applies.
 
 ### estimate_time.ts
 

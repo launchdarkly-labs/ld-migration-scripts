@@ -37,6 +37,9 @@ interface Arguments {
   dryRun?: boolean;
   incremental?: boolean;
   since?: string;
+  includeFlags?: string;
+  excludeFlags?: string;
+  concurrency?: number;
 }
 
 interface SyncManifestEnv {
@@ -82,7 +85,12 @@ interface MigrationConfig {
     dryRun?: boolean;
     incremental?: boolean;
     since?: string;
+    includeFlags?: string[];
+    excludeFlags?: string[];
+    concurrency?: number;
   };
+  /** Alias for options — YAML configs may use migration: instead of options: */
+  migration?: MigrationConfig["options"];
 }
 
 // ==================== Dry Run Helpers ====================
@@ -190,6 +198,11 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .alias("dry-run", "dryRun")
   .alias("i", "incremental")
   .alias("since", "since")
+  .alias("include-flags", "includeFlags")
+  .alias("exclude-flags", "excludeFlags")
+  .alias("concurrency", "concurrency")
+  .number("concurrency")
+  .default("concurrency", 10)
   .boolean("m")
   .boolean("s")
   .boolean("dry-run")
@@ -205,6 +218,9 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .describe("dry-run", "Preview migration without making any changes")
   .describe("incremental", "Skip flags unchanged since last sync (version-based)")
   .describe("since", "Only sync flags modified after this date (ISO 8601, e.g. 2026-01-15)")
+  .describe("include-flags", "Comma-separated list of flag keys to migrate (only these flags)")
+  .describe("exclude-flags", "Comma-separated list of flag keys to exclude from migration")
+  .describe("concurrency", "Max number of flags to migrate in parallel (default: 10)")
   .parse() as unknown) as Arguments;
 
 // Load and merge config file if provided
@@ -214,27 +230,31 @@ if (cliArgs.config) {
   try {
     const configContent = await Deno.readTextFile(cliArgs.config);
     const config = parseYaml(configContent) as MigrationConfig;
-    
+    const opts = config.options ?? config.migration;
+
     // Merge config file with CLI args (CLI args take precedence)
     inputArgs = {
       projKeySource: cliArgs.projKeySource || config.source.projectKey,
       projKeyDest: cliArgs.projKeyDest || config.destination.projectKey,
-      assignMaintainerIds: cliArgs.assignMaintainerIds !== undefined && cliArgs.assignMaintainerIds !== false 
-        ? cliArgs.assignMaintainerIds 
-        : config.options?.assignMaintainerIds ?? false,
+      assignMaintainerIds: cliArgs.assignMaintainerIds !== undefined && cliArgs.assignMaintainerIds !== false
+        ? cliArgs.assignMaintainerIds
+        : opts?.assignMaintainerIds ?? false,
       migrateSegments: cliArgs.migrateSegments !== undefined && cliArgs.migrateSegments !== true
         ? cliArgs.migrateSegments
-        : config.options?.migrateSegments ?? true,
-      conflictPrefix: cliArgs.conflictPrefix || config.options?.conflictPrefix,
-      targetView: cliArgs.targetView || config.options?.targetView,
-      environments: cliArgs.environments || config.options?.environments?.join(','),
-      envMap: cliArgs.envMap || (config.options?.environmentMapping 
-        ? Object.entries(config.options.environmentMapping).map(([k, v]) => `${k}:${v}`).join(',')
+        : opts?.migrateSegments ?? true,
+      conflictPrefix: cliArgs.conflictPrefix || opts?.conflictPrefix,
+      targetView: cliArgs.targetView || opts?.targetView,
+      environments: cliArgs.environments || opts?.environments?.join(','),
+      envMap: cliArgs.envMap || (opts?.environmentMapping
+        ? Object.entries(opts.environmentMapping).map(([k, v]) => `${k}:${v}`).join(',')
         : undefined),
       domain: cliArgs.domain || config.destination?.domain,
-      dryRun: cliArgs.dryRun ?? config.options?.dryRun ?? false,
-      incremental: cliArgs.incremental ?? config.options?.incremental ?? false,
-      since: cliArgs.since || config.options?.since,
+      dryRun: cliArgs.dryRun ?? opts?.dryRun ?? false,
+      incremental: cliArgs.incremental ?? opts?.incremental ?? false,
+      since: cliArgs.since || opts?.since,
+      includeFlags: cliArgs.includeFlags ?? (opts?.includeFlags?.length ? opts.includeFlags.join(",") : undefined),
+      excludeFlags: cliArgs.excludeFlags ?? (opts?.excludeFlags?.length ? opts.excludeFlags.join(",") : undefined),
+      concurrency: cliArgs.concurrency ?? opts?.concurrency ?? 10,
       config: cliArgs.config
     };
     
@@ -269,6 +289,9 @@ console.log(Colors.gray(`  Domain: ${inputArgs.domain || 'app.launchdarkly.com'}
 console.log(Colors.gray(`  Dry Run: ${inputArgs.dryRun || false}`));
 console.log(Colors.gray(`  Incremental: ${inputArgs.incremental || false}`));
 console.log(Colors.gray(`  Since: ${inputArgs.since || 'none'}`));
+console.log(Colors.gray(`  Include Flags: ${inputArgs.includeFlags || 'all'}`));
+console.log(Colors.gray(`  Exclude Flags: ${inputArgs.excludeFlags || 'none'}`));
+console.log(Colors.gray(`  Concurrency: ${inputArgs.concurrency ?? 10}`));
 
 // Validate --incremental and --since are mutually exclusive
 if (inputArgs.incremental && inputArgs.since) {
@@ -473,7 +496,7 @@ const allViewKeys = new Set<string>();
 
 // Extract views from flags
 console.log(Colors.blue("\n📋 Loading flag list..."));
-const flagList: Array<string> = await getJson(
+let flagList: Array<string> = await getJson(
   `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/flags.json`,
 );
 
@@ -483,11 +506,41 @@ if (!flagList) {
 }
 console.log(Colors.green(`✓ Loaded ${flagList.length} flags`));
 
-console.log("Extracting view associations from source flags...");
+// Apply include/exclude flag filters
+if (inputArgs.includeFlags) {
+  const includeSet = new Set(
+    inputArgs.includeFlags.split(",").map((s) => s.trim()).filter(Boolean)
+  );
+  if (includeSet.size > 0) {
+    const before = flagList.length;
+    flagList = flagList.filter((k) => includeSet.has(k));
+    console.log(Colors.cyan(`  Include filter: ${flagList.length} of ${before} flag(s) match includeFlags`));
+  }
+}
+if (inputArgs.excludeFlags) {
+  const excludeSet = new Set(
+    inputArgs.excludeFlags.split(",").map((s) => s.trim()).filter(Boolean)
+  );
+  if (excludeSet.size > 0) {
+    const before = flagList.length;
+    flagList = flagList.filter((k) => !excludeSet.has(k));
+    console.log(Colors.cyan(`  Exclude filter: ${before - flagList.length} flag(s) excluded, ${flagList.length} remaining`));
+  }
+}
+
 const flagsDir = `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/flags`;
-for (const flagkey of flagList) {
-  const d = await sha256HexUtf8(flagkey);
-  const flag = await getJson(`${flagsDir}/${flagkey}-${d}.json`) ?? await getJson(`${flagsDir}/${flagkey}.json`);
+
+// Try index-prefixed filename first (new format), then pure index, then SHA-based, then plain key (legacy)
+async function getFlagDataByIndexOrKey(index: number, key: string): Promise<any> {
+  return await getJson(`${flagsDir}/${index}-${key}.json`)
+    ?? await getJson(`${flagsDir}/${index}.json`)
+    ?? await getJson(`${flagsDir}/${key}-${await sha256HexUtf8(key)}.json`)
+    ?? await getJson(`${flagsDir}/${key}.json`);
+}
+
+console.log("Extracting view associations from source flags...");
+for (const [viewIndex, flagkey] of flagList.entries()) {
+  const flag = await getFlagDataByIndexOrKey(viewIndex, flagkey);
   if (flag && flag.viewKeys && Array.isArray(flag.viewKeys)) {
     flag.viewKeys.forEach((viewKey: string) => allViewKeys.add(viewKey));
   }
@@ -1272,18 +1325,26 @@ interface Variation {
 }
 
 // Creating Global Flags //
-console.log(Colors.blue(`\n🏁 Creating ${flagList.length} flags in destination project...\n`));
-for (const [index, flagkey] of flagList.entries()) {
+const CONCURRENCY = Math.max(1, inputArgs.concurrency ?? 10);
+console.log(Colors.blue(`\n🏁 Creating ${flagList.length} flags in destination project (concurrency: ${CONCURRENCY})...\n`));
+
+interface FlagProcessResult {
+  incrementalSkipCountDelta: number;
+  incrementalEnvSkipCountDelta: number;
+}
+
+async function processOneFlag(index: number, flagkey: string): Promise<FlagProcessResult> {
+  let incrementalSkipCountDelta = 0;
+  let incrementalEnvSkipCountDelta = 0;
+
   // Read flag
   console.log(Colors.cyan(`\n[${index + 1}/${flagList.length}] Processing flag: ${flagkey}`));
 
-  const flagsDir = `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/flags`;
-  const d = await sha256HexUtf8(flagkey);
-  const flag = await getJson(`${flagsDir}/${flagkey}-${d}.json`) ?? await getJson(`${flagsDir}/${flagkey}.json`);
+  const flag = await getFlagDataByIndexOrKey(index, flagkey);
 
   if (!flag) {
     console.log(Colors.yellow(`\tWarning: Could not load flag data for ${flagkey}, skipping...`));
-    continue;
+    return { incrementalSkipCountDelta: 0, incrementalEnvSkipCountDelta: 0 };
   }
 
   // Incremental sync: check if flag-level AND all environment versions match
@@ -1341,8 +1402,8 @@ for (const [index, flagkey] of flagList.entries()) {
         console.log(Colors.gray(`\t✓ ${flag.key}: unchanged (v${flag._version}${ts})${lifecycleSynced ? ', lifecycle synced' : ''}, skipping`));
         // Carry forward the previous manifest entry unchanged
         updatedManifestFlags[flag.key] = prevEntry;
-        incrementalSkipCount++;
-        continue;
+        incrementalSkipCountDelta++;
+        return { incrementalSkipCountDelta, incrementalEnvSkipCountDelta };
       }
     }
   }
@@ -1355,19 +1416,19 @@ for (const [index, flagkey] of flagList.entries()) {
     }, 0);
     if (latestModified > 0 && latestModified < sinceDate.getTime()) {
       console.log(Colors.gray(`\t✓ ${flag.key}: not modified since ${inputArgs.since}, skipping`));
-      incrementalSkipCount++;
-      continue;
+      incrementalSkipCountDelta++;
+      return { incrementalSkipCountDelta, incrementalEnvSkipCountDelta };
     }
   }
 
   if (!flag.variations) {
     console.log(Colors.yellow(`\t⚠ No variations, skipping`));
-    continue;
+    return { incrementalSkipCountDelta, incrementalEnvSkipCountDelta };
   }
-  
+
   if (!flag.key || flag.key.trim() === '') {
     console.log(Colors.red(`\t✗ ERROR: Flag data has empty key! Expected: "${flagkey}"`));
-    continue;
+    return { incrementalSkipCountDelta, incrementalEnvSkipCountDelta };
   }
 
   const newVariations = flag.variations.map(({ _id, ...rest }: Variation) => rest);
@@ -1638,7 +1699,7 @@ for (const [index, flagkey] of flagList.entries()) {
         const ts = envLastModified ? `, updated ${envLastModified}` : '';
         console.log(Colors.gray(`\t  ✓ ${destEnvKey}: unchanged (v${envVersion}${ts}), skipping`));
         flagManifestEnvs[env] = { version: envVersion, lastModified: envLastModified };
-        incrementalEnvSkipCount++;
+        incrementalEnvSkipCountDelta++;
         continue;
       }
     }
@@ -1689,6 +1750,19 @@ for (const [index, flagkey] of flagList.entries()) {
     lastModified: flag.creationDate,
     environments: flagManifestEnvs,
   };
+
+  return { incrementalSkipCountDelta, incrementalEnvSkipCountDelta };
+}
+
+// Run flag migration with concurrency limit
+const entries = [...flagList.entries()];
+for (let offset = 0; offset < entries.length; offset += CONCURRENCY) {
+  const chunk = entries.slice(offset, offset + CONCURRENCY);
+  const results = await Promise.all(chunk.map(([idx, key]) => processOneFlag(idx, key)));
+  for (const r of results) {
+    incrementalSkipCount += r.incrementalSkipCountDelta;
+    incrementalEnvSkipCount += r.incrementalEnvSkipCountDelta;
+  }
 }
 
 // Always write sync manifest so --incremental works on next run

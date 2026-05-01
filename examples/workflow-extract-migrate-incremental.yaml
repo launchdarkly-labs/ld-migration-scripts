@@ -21,4 +21,16 @@ extraction:
 migration:
   migrateSegments: true
   assignMaintainerIds: false
-  incremental: true  # Full sync; creates sync manifest for incremental runs
+  incremental: true  # Only sync flags/segments changed since last run
+
+  # Include only these flag keys (optional — omit to migrate all)
+  # includeFlags:
+  #   - feature-one
+  #   - feature-two
+
+  # Exclude these flag keys (optional)
+  # excludeFlags:
+  #   - deprecated-flag
+
+  # Migrate up to N flags in parallel (optional, default: 10)
+  # concurrency: 10
