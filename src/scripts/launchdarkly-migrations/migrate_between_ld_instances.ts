@@ -985,6 +985,17 @@ if (inputArgs.migrateSegments) {
         patchRules.status,
           `Patching segment ${segmentKey} status: ${segPatchStatus}`,
       );
+      if (patchRules.status >= 400) {
+        // Surface the API's reason — status text alone hides the cause
+        // (e.g. which patch operation was rejected and why).
+        const errBody = await patchRules.text().catch(() => "");
+        console.log(Colors.red(`    ✗ ${segmentKey} patch rejected: ${errBody.slice(0, 500)}`));
+        console.log(Colors.gray(
+          `    Patch ops: ${sgmtPatches.map((p) => `${p.op} ${p.path} (${
+            Array.isArray(p.value) ? p.value.length + " values" : typeof p.value
+          })`).join(", ")}`,
+        ));
+      }
       }
 
       // Track segment version for sync manifest only if it was actually created/patched
