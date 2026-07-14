@@ -181,9 +181,9 @@ export class KeyRegistry {
   }
 }
 
-/** LD tags may not contain ':'; sanitize the rest conservatively. */
+/** LD tag names may include only letters, numbers, '.', '_', and '-'. */
 export function sanitizeTag(tag: string): string {
-  return tag.replace(/[^A-Za-z0-9._\- ]+/g, "-").trim();
+  return tag.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-{2,}/g, "-").replace(/^-+|-+$/g, "");
 }
 
 // ==================== Context kinds ====================
@@ -777,13 +777,14 @@ export function mapEnvironment(
     ));
   }
 
-  notes.push(note(
-    "PARTIAL",
-    "flag",
-    item,
-    `Percentage rollouts re-bucket at cutover: Split and LD hash differently, so individual ` +
-      `users may switch treatments even at identical percentages`,
-  ));
+  const rebucketNote = () =>
+    note(
+      "PARTIAL",
+      "flag",
+      item,
+      `Percentage rollouts re-bucket at cutover: Split and LD hash differently, so individual ` +
+        `users may switch treatments even at identical percentages`,
+    );
 
   // ---- Prerequisite shape ----
   const prereqShape = tryPrerequisiteShape(def);
@@ -802,6 +803,7 @@ export function mapEnvironment(
         def.defaultTreatment,
       );
       const fallthrough = outcome ?? { variation: offVariation };
+      if ("rollout" in fallthrough) notes.push(rebucketNote());
       notes.push(note(
         "FULL",
         "flag",
@@ -866,6 +868,10 @@ export function mapEnvironment(
     def.defaultTreatment,
   );
   const fallthrough = fallthroughOutcome ?? { variation: offVariation };
+
+  if ("rollout" in fallthrough || rules.some((r) => r.rollout !== undefined)) {
+    notes.push(rebucketNote());
+  }
 
   return {
     envConfig: {
