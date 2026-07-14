@@ -24,7 +24,7 @@ import { ensureDirSync } from "https://deno.land/std@0.149.0/fs/mod.ts";
 import * as Colors from "https://deno.land/std@0.149.0/fmt/colors.ts";
 import { writeSourceData } from "../../utils/utils.ts";
 import { getSplitApiKey } from "../../utils/api_keys.ts";
-import { SplitClient } from "../../utils/split/client.ts";
+import { SplitApiError, SplitClient } from "../../utils/split/client.ts";
 import {
   decideVariations,
   KeyRegistry,
@@ -228,11 +228,42 @@ for (const env of selectedEnvs) {
   envSegments.push(bucket);
 
   // Standard segments active in this environment (+ member keys).
-  const inEnv = await client.listSegmentsInEnvironment(workspace.id, env.id);
-  for (const seg of inEnv) {
-    if (inputArgs.tag && !segmentMetaByName.has(seg.name)) continue;
-    const keys = await client.getSegmentKeys(env.id, seg.name);
-    bucket.keysByName.set(seg.name, keys);
+  // The env-level segment list can return a raw 500 ("Error listing segments
+  // for environment", observed live 2026-07); fall back to probing every
+  // workspace segment's keys endpoint — a 404 there means the segment simply
+  // is not active in this environment.
+  let inEnvNames: string[];
+  try {
+    const inEnv = await client.listSegmentsInEnvironment(workspace.id, env.id);
+    inEnvNames = inEnv.map((s) => s.name);
+  } catch (error) {
+    console.log(Colors.yellow(
+      `  ⚠ ${env.name}: could not list segments in environment (${
+        error instanceof Error ? error.message : error
+      }); probing each workspace segment's keys instead`,
+    ));
+    inEnvNames = segmentMetas.map((s) => s.name);
+  }
+  // Key fetches page 100 at a time — a 10k-member segment is ~100 sequential
+  // requests, so narrate progress rather than sitting silent.
+  console.log(Colors.gray(`  Fetching member keys for ${inEnvNames.length} segment(s) in ${env.name}...`));
+  for (const name of inEnvNames) {
+    if (inputArgs.tag && !segmentMetaByName.has(name)) continue;
+    try {
+      const keys = await client.getSegmentKeys(env.id, name, (fetched, total) => {
+        if (fetched % 2000 === 0) {
+          console.log(Colors.gray(`    …${name}: ${fetched}${total !== undefined ? `/${total}` : ""} key(s)`));
+        }
+      });
+      bucket.keysByName.set(name, keys);
+      console.log(Colors.gray(`    ✓ ${name}: ${keys.length} key(s)`));
+    } catch (error) {
+      if (error instanceof SplitApiError && error.status === 404) {
+        console.log(Colors.gray(`    · ${name}: not active in this environment`));
+        continue;
+      }
+      throw error;
+    }
   }
 
   // Rule-based segments.
@@ -426,4 +457,4 @@ console.log(Colors.yellow(`\nGlobal caveats:`));
 for (const w of report.globalWarnings) console.log(Colors.yellow(`  • ${w}`));
 
 console.log(Colors.green(`\n✓ Source data written to ${projPath}`));
-console.log(Colors.gray(`Next: deno task migrate -- -p ${inputArgs.projKey} -d <destination-project> --dry-run`));
+console.log(Colors.gray(`Next: deno task migrate -p ${inputArgs.projKey} -d <destination-project> --dry-run`));
