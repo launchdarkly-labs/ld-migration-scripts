@@ -1,6 +1,6 @@
 {
   "name": "ld-migration-scripts",
-  "version": "3.0.2",
+  "version": "3.2.0",
   "exports": "./src/scripts/launchdarkly-migrations/workflow.ts",
   "description": "LaunchDarkly Project Migration Scripts - Support for LD-to-LD migrations and third-party flag imports",
   "license": "Apache-2.0",
@@ -25,6 +25,8 @@
     "revert": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/revert_migration.ts",
     "estimate-migration-time": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/estimate_migration_time.ts",
     "import-flags": "deno run --allow-net --allow-read --allow-write src/scripts/third-party-migrations/import_flags_from_external.ts",
+    "source-from-split": "deno run --allow-net --allow-read --allow-write --allow-env src/scripts/third-party-migrations/source_from_split.ts",
+    "test": "deno test src/",
     "version:show": "./scripts/check-version.sh",
     "version:bump:patch": "./scripts/bump-version.sh patch",
     "version:bump:minor": "./scripts/bump-version.sh minor",

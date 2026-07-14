@@ -30,10 +30,25 @@ interface WorkflowConfig {
   memberMapping?: {
     outputFile?: string;
   };
+  splitExtract?: {
+    /** Split workspace (project) ID or name */
+    workspace: string;
+    /** Only extract Split flags/segments with this tag */
+    tag?: string;
+    /** Split environment names to extract (default: all) */
+    environments?: string[];
+    /** Split env name → LD env key */
+    environmentMapping?: Record<string, string>;
+    /** Split API host override */
+    baseUrl?: string;
+    /** Tag applied to imported resources (default: imported-from-split) */
+    ldTag?: string;
+  };
   migration?: {
     assignMaintainerIds?: boolean;
     migrateSegments?: boolean;
     conflictPrefix?: string;
+    onConflict?: string;
     targetView?: string;
     environments?: string[];
     environmentMapping?: Record<string, string>;
@@ -62,7 +77,7 @@ interface Arguments {
   config?: string;
 }
 
-type StepName = 'extract-source' | 'map-members' | 'migrate' | 'third-party-import' | 'revert';
+type StepName = 'extract-source' | 'split-extract' | 'map-members' | 'migrate' | 'third-party-import' | 'revert';
 type CommandOptions = { args: string[]; stdout: "inherit"; stderr: "inherit" };
 
 // ==================== Configuration ====================
@@ -203,6 +218,52 @@ const runExtractSource = async (config: WorkflowConfig): Promise<void> => {
   printStepCompletion("Source data extraction completed");
 };
 
+// ==================== Split Extract Step ====================
+
+/**
+ * Validates Split extract configuration
+ */
+const validateSplitExtractConfig = (config: WorkflowConfig): void => {
+  if (!config.splitExtract?.workspace) {
+    console.log(Colors.red("Error: splitExtract.workspace is required for the split-extract step"));
+    Deno.exit(1);
+  }
+};
+
+/**
+ * Builds arguments for the Split extract command
+ */
+const buildSplitExtractArgs = (config: WorkflowConfig): string[] => {
+  const split = config.splitExtract!;
+  const baseArgs = buildBaseRunArgs(
+    "src/scripts/third-party-migrations/source_from_split.ts",
+    ["--allow-net", "--allow-read", "--allow-write", "--allow-env"]
+  );
+
+  let args = [...baseArgs, "-w", split.workspace, "-p", config.source.projectKey];
+  args = addOptionalArg(args, "-t", split.tag);
+  args = addOptionalArg(args, "-e", split.environments?.join(","));
+  args = addOptionalArg(args, "--split-base-url", split.baseUrl);
+  args = addOptionalArg(args, "--ld-tag", split.ldTag);
+
+  if (split.environmentMapping) {
+    args = addOptionalArg(args, "--env-map", formatEnvMapping(split.environmentMapping));
+  }
+
+  return args;
+};
+
+/**
+ * Runs the Split workspace extract step
+ */
+const runSplitExtract = async (config: WorkflowConfig): Promise<void> => {
+  printStepHeader("STEP", "Extract Split Workspace");
+  validateSplitExtractConfig(config);
+  const args = buildSplitExtractArgs(config);
+  await executeCommand(args, "Split extract step");
+  printStepCompletion("Split extraction completed");
+};
+
 // ==================== Map Members Step ====================
 
 /**
@@ -261,6 +322,7 @@ const buildMigrationArgs = (config: WorkflowConfig): string[] => {
   args = addBooleanFlag(args, "--dry-run", migration.dryRun);
   args = addBooleanFlag(args, "--incremental", migration.incremental);
   args = addOptionalArg(args, "-c", migration.conflictPrefix);
+  args = addOptionalArg(args, "--on-conflict", migration.onConflict);
   args = addOptionalArg(args, "-v", migration.targetView);
   args = addOptionalArg(args, "-e", migration.environments?.join(","));
   args = addOptionalArg(args, "--since", migration.since);
@@ -409,6 +471,7 @@ type StepExecutor = (config: WorkflowConfig) => Promise<void>;
  */
 const STEP_EXECUTORS: Record<StepName, StepExecutor> = {
   'extract-source': runExtractSource,
+  'split-extract': runSplitExtract,
   'map-members': runMapMembers,
   'migrate': runMigrate,
   'third-party-import': runThirdPartyImport,

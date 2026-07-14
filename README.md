@@ -28,6 +28,11 @@ Features that are currently supported:
 - **Include/exclude flags**: Migrate only specific flags or exclude certain flags from migration
 - **Parallel flag migration**: Migrate multiple flags concurrently for faster migrations
 - **Case-sensitive flag storage**: Flags that differ only by case are stored separately (index-prefixed filenames)
+- **Split (Harness FME) migration**: Full-fidelity import of a Split workspace — targeting rules, segments (standard/rule-based/large), individual targets, traffic types as context kinds, flag dependencies as prerequisites — with a fidelity report (see [docs/SPLIT-MAPPING.md](docs/SPLIT-MAPPING.md))
+- **Context kinds**: Created in the destination from `contextKinds.json` when a source adapter provides them
+- **Big segments**: Created (not skipped) and members loaded via CSV import when the source data includes them
+- **Prerequisites**: Flags migrate in dependency order so prerequisite links land correctly
+- **Interactive conflict handling**: `--on-conflict prompt|skip|overwrite|prefix|abort`
 
 ## Project Structure
 
@@ -313,6 +318,47 @@ thirdPartyImport:
 deno task workflow -f workflow-third-party.yaml
 ```
 
+### Split (Harness FME) Migration
+
+Migrates a Split workspace — flags with full targeting, segments, context
+kinds, and prerequisites — into an existing LaunchDarkly project. Requires a
+Split Admin API key (`SPLIT_API_KEY` env var or `split_api_key` in
+`config/api_keys.json`).
+
+```yaml
+# workflow-split.yaml
+workflow:
+  steps:
+    - split-extract
+    - migrate
+
+source:
+  projectKey: split-workspace   # local label for the extracted data
+
+destination:
+  projectKey: my-ld-project
+
+splitExtract:
+  workspace: Default            # Split workspace ID or name
+  environmentMapping:
+    Prod-Default: production
+    Staging: test
+
+migration:
+  dryRun: true                  # review, then flip to false
+  onConflict: prompt
+```
+
+```bash
+SPLIT_API_KEY=... deno task workflow -- -f examples/workflow-split.yaml
+```
+
+The extract step writes `split-fidelity-report.json` alongside the source
+data, listing every mapping decision as FULL/PARTIAL/MANUAL/SKIPPED — review
+it before the real run. Mapping semantics are documented in
+[docs/SPLIT-MAPPING.md](docs/SPLIT-MAPPING.md). Split experiments and metric
+definitions cannot be exported via Split's public API and are not migrated.
+
 ### Custom Step Combinations
 
 ```yaml
@@ -387,6 +433,7 @@ revert:                     # Optional - for revert step
 ### Available Steps
 
 - **`extract-source`** - Downloads all data from source project
+- **`split-extract`** - Extracts a Split (Harness FME) workspace via the Split Admin API into the same source-data format
 - **`map-members`** - Creates member ID mappings between instances
 - **`migrate`** - Migrates project to destination
 - **`third-party-import`** - Imports flags from external JSON/CSV files
@@ -424,6 +471,7 @@ By default, segments are **not** extracted unless explicitly needed, preventing 
 - `examples/workflow-extract-only.yaml` - Extract source data only
 - `examples/workflow-migrate-only.yaml` - Migrate with pre-extracted data
 - `examples/workflow-third-party.yaml` - Third-party flag import
+- `examples/workflow-split.yaml` - Split (Harness FME) → LaunchDarkly migration
 - `examples/workflow-custom-steps.yaml` - Custom step combinations
 
 ## Configuration File Support (Individual Migrate Task)

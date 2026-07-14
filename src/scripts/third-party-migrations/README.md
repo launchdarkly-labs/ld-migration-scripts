@@ -5,6 +5,46 @@ This directory contains scripts for importing data from external sources into La
 ## Scripts
 
 - **`import_flags_from_external.ts`** - Imports feature flags from JSON or CSV files
+- **`source_from_split.ts`** - Extracts a Split (Harness FME) workspace into the LD-to-LD source-data format for full-fidelity migration
+
+## Split (Harness FME) Migration
+
+`source_from_split.ts` reads a Split workspace via the Split Admin API and
+writes the same source-data directory that `source-from-ld` produces, so the
+standard `migrate` step performs all LaunchDarkly writes. This migrates far
+more than the product Split import integration (which only imports flag
+names, variations, default rules, and tags):
+
+- Per-environment targeting rules (full matcher translation), percentage
+  rollouts, and individual targets
+- Standard, rule-based, and large segments (large segments are created empty
+  — Split's API cannot export their members)
+- Traffic types as context kinds
+- Flag dependencies (`IN_SPLIT`) as prerequisites where expressible
+- Per-treatment dynamic configurations as JSON variations
+- Flag sets as `flagset.<name>` tags
+
+Not migratable (no Split export API): experiments, metric definitions, and
+large segment membership. See [docs/SPLIT-MAPPING.md](../../../docs/SPLIT-MAPPING.md)
+for the complete mapping specification.
+
+```bash
+# API key from env (or split_api_key in config/api_keys.json)
+export SPLIT_API_KEY=...
+
+# Extract a workspace (read-only against Split; writes local files only)
+deno task source-from-split -- -w "My Workspace" -p split-workspace \
+  --env-map "Prod-Default:production,Staging:test"
+
+# Review the fidelity report
+cat data/launchdarkly-migrations/source/project/split-workspace/split-fidelity-report.json
+
+# Dry-run the migration into an existing LD project, then run for real
+deno task migrate -- -p split-workspace -d my-ld-project --dry-run
+deno task migrate -- -p split-workspace -d my-ld-project --on-conflict prompt
+```
+
+Or run both steps from one config: `deno task workflow -- -f examples/workflow-split.yaml`
 
 ## Data Structure
 

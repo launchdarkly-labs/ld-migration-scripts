@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0] - 2026-07-14
+
+### Added
+
+- **Split (Harness FME) → LaunchDarkly migration** (`source_from_split.ts`, `deno task source-from-split`, workflow step `split-extract`)
+  - Extracts a Split workspace via the Split Admin API and writes the standard source-data directory, so the existing `migrate` step performs all LaunchDarkly writes
+  - Migrates per-environment targeting rules (full 24-matcher translation table), percentage rollouts, individual targets, per-treatment dynamic configurations (as JSON variations), traffic types (as context kinds), standard/rule-based/large segments, flag sets (as `flagset.<name>` tags), and `IN_SPLIT` dependencies (as prerequisites where expressible)
+  - Emits `split-fidelity-report.json` classifying every mapping decision as FULL/PARTIAL/MANUAL/SKIPPED; complete mapping spec in `docs/SPLIT-MAPPING.md`
+  - Split API key via `SPLIT_API_KEY` env var or `split_api_key` in `config/api_keys.json`
+- **Context kinds**: migrate creates context kinds from `contextKinds.json` (PUT `projects/{proj}/context-kinds/{key}`) before segments and flags
+- **Big segments**: unbounded segments are now created instead of skipped; members provided by a source adapter (`_importKeys`) are loaded via the segment CSV import endpoint (chunked, replace-then-merge, status polling)
+- **Prerequisites**: flags migrate in topological dependency levels so prerequisite flags exist before dependents; cycles are detected and reported
+- **`--on-conflict prompt|skip|overwrite|prefix|abort`** (`migration.onConflict`): interactive per-conflict prompting with apply-to-all answers; defaults preserve existing behavior (prefix when `-c` is set, else overwrite)
+- `deno task test` runs the unit test suite
+
 ## [3.1.0] - 2026-04-29
 
 ### Added
