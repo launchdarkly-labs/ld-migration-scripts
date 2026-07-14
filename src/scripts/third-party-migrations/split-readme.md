@@ -205,6 +205,16 @@ Admin API and extracts the entire workspace:
 | Key sanitization | Assumes names are valid LD keys | Deterministic `KeyRegistry` sanitization with collision handling |
 | Fidelity accounting | None | FULL/PARTIAL/MANUAL/SKIPPED ledger + `split-fidelity-report.json` |
 | API resilience | Basic pagination | 429/5xx retry with backoff, 60s timeouts, envelope-shape quirks, env-segment-list 500 fallback |
+| Experiment configurations | ❌ *Split API cannot export* | ❌ *Split API cannot export* |
+| Metric definitions | ❌ *Split API cannot export* | ❌ *Split API cannot export* |
+| Experiment results | ❌ *Split API cannot export* | ❌ *Split API cannot export* |
+| Large segment members | ❌ *Split API cannot export* | ❌ *Split API cannot export* — segment created empty (metadata only) |
+| Historical events | ❌ *Split events API is write-only* | ❌ *Split events API is write-only* |
+
+The last five rows are hard limits of the Split public Admin API — **no**
+migration tooling can export them, regardless of implementation. Re-create
+metrics and experiments in LaunchDarkly by hand, and re-import large
+segment membership from your source of truth.
 
 The architecture also differs: the product integration writes flags
 directly into LaunchDarkly, while this tool is a **source adapter** — it
