@@ -342,6 +342,38 @@ Deno.test("treatment segments become prepended segmentMatch rules serving that t
   assertEquals(envConfig.rules[1].clauses[0].attribute, "plan");
 });
 
+Deno.test("treatment segment targeting duplicated by an IN_SEGMENT rule collapses to one rule", () => {
+  const d = def({
+    treatments: [{ name: "on", segments: ["Beta Testers"] }, { name: "off" }],
+    rules: [{
+      condition: { matchers: [{ type: "IN_SEGMENT", string: "Beta Testers" }] },
+      buckets: [{ treatment: "on", size: 100 }],
+    }],
+  });
+  const { envConfig, notes } = mapEnvironment(d, decisionFor(d), ctx(), "production");
+  assertEquals(envConfig.rules.length, 1);
+  assertEquals(envConfig.rules[0].clauses[0].op, "segmentMatch");
+  assertEquals(envConfig.rules[0].variation, 0);
+  assertEquals(
+    notes.some((n) => n.level === "FULL" && n.message.includes("identical clauses and outcome")),
+    true,
+  );
+});
+
+Deno.test("same segment serving DIFFERENT treatments keeps both rules", () => {
+  const d = def({
+    treatments: [{ name: "on", segments: ["Beta Testers"] }, { name: "off" }],
+    rules: [{
+      condition: { matchers: [{ type: "IN_SEGMENT", string: "Beta Testers" }] },
+      buckets: [{ treatment: "off", size: 100 }],
+    }],
+  });
+  const { envConfig } = mapEnvironment(d, decisionFor(d), ctx(), "production");
+  assertEquals(envConfig.rules.length, 2);
+  assertEquals(envConfig.rules[0].variation, 0);
+  assertEquals(envConfig.rules[1].variation, 1);
+});
+
 // ==================== Prerequisites (IN_SPLIT) ====================
 
 const prereqDef = () =>

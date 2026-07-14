@@ -858,6 +858,32 @@ export function mapEnvironment(
   }
   rules = [...segmentRules, ...rules];
 
+  // Split flags commonly reference the same segment twice — once via
+  // treatment-level segment targeting and once via an IN_SEGMENT rule. Both
+  // map to identical LD rules; a later rule with the same clauses and
+  // outcome as an earlier one is unreachable in LD's top-down evaluation,
+  // so exact duplicates are dropped.
+  const seenRuleSignatures = new Set<string>();
+  rules = rules.filter((r) => {
+    const signature = JSON.stringify({
+      clauses: r.clauses,
+      variation: r.variation,
+      rollout: r.rollout,
+    });
+    if (seenRuleSignatures.has(signature)) {
+      notes.push(note(
+        "FULL",
+        "rule",
+        item,
+        `Dropped a rule with identical clauses and outcome to an earlier rule ` +
+          `(typically treatment segment targeting plus an IN_SEGMENT rule for the same segment)`,
+      ));
+      return false;
+    }
+    seenRuleSignatures.add(signature);
+    return true;
+  });
+
   // ---- Fallthrough (default rule) ----
   const fallthroughOutcome = bucketsToOutcome(
     def.defaultRule ?? [],
