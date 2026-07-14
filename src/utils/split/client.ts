@@ -30,6 +30,10 @@ const PAGE_SIZE = 50;
 /** Max page size for the segment keys endpoint. */
 const KEYS_PAGE_SIZE = 100;
 const MAX_429_RETRIES = 5;
+/** Env-scoped list endpoints intermittently return raw 500s (observed live). */
+const MAX_5XX_RETRIES = 2;
+/** Abort requests that never respond (hangs observed against Split). */
+const REQUEST_TIMEOUT_MS = 60_000;
 
 export class SplitApiError extends Error {
   constructor(
@@ -76,15 +80,31 @@ export class SplitClient {
       url.searchParams.set(key, String(value));
     }
 
-    for (let attempt = 0; ; attempt++) {
+    for (let attempt = 0, serverErrors = 0; ; attempt++) {
       const req = new Request(url.toString(), {
         headers: {
           "Authorization": `Bearer ${this.apiKey}`,
           "Content-Type": "application/json",
           "User-Agent": "ld-migration-scripts/split-source-adapter",
         },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
-      const resp = await this.fetchFn(req);
+      let resp: Response;
+      try {
+        resp = await this.fetchFn(req);
+      } catch (e) {
+        const timedOut = e instanceof DOMException &&
+          (e.name === "TimeoutError" || e.name === "AbortError");
+        if (timedOut && serverErrors < MAX_5XX_RETRIES) {
+          serverErrors++;
+          await this.delayFn(1000 * serverErrors);
+          continue;
+        }
+        if (timedOut) {
+          throw new SplitApiError(408, path, `no response after ${REQUEST_TIMEOUT_MS / 1000}s`);
+        }
+        throw e;
+      }
 
       if (resp.status === 429 && attempt < MAX_429_RETRIES) {
         const retryAfter = parseInt(resp.headers.get("retry-after") ?? "", 10);
@@ -94,6 +114,15 @@ export class SplitClient {
           : Math.min(1000 * 2 ** attempt, 30_000);
         await resp.body?.cancel();
         await this.delayFn(waitMs);
+        continue;
+      }
+
+      // Intermittent raw 500s were observed on env-scoped list endpoints;
+      // retry briefly before surfacing.
+      if (resp.status >= 500 && serverErrors < MAX_5XX_RETRIES) {
+        serverErrors++;
+        await resp.body?.cancel();
+        await this.delayFn(1000 * serverErrors);
         continue;
       }
 
@@ -124,7 +153,15 @@ export class SplitClient {
     const results: T[] = [];
     let offset = 0;
     while (true) {
-      const page = await this.get<SplitPage<T>>(path, { ...params, limit, offset });
+      const page = await this.get<SplitPage<T> | T[]>(path, { ...params, limit, offset });
+      // Some endpoints return a BARE ARRAY instead of the documented
+      // objects/offset/limit/totalCount envelope (observed live on
+      // rule-based-segments in-environment, whose docs show {objects});
+      // treat it as the complete, non-paginated result.
+      if (Array.isArray(page)) {
+        results.push(...page);
+        break;
+      }
       const objects = page.objects ?? [];
       if (objects.length === 0) break;
       results.push(...objects);
@@ -198,7 +235,13 @@ export class SplitClient {
    * NOTE: this endpoint's envelope is {keys, count, offset, limit} — not the
    * usual objects/totalCount page.
    */
-  async getSegmentKeys(environmentId: string, segmentName: string): Promise<string[]> {
+  async getSegmentKeys(
+    environmentId: string,
+    segmentName: string,
+    /** Called after each page with (fetched, total?) — large segments page
+     * 100 keys at a time, so callers can show progress instead of silence. */
+    onProgress?: (fetched: number, total?: number) => void,
+  ): Promise<string[]> {
     const keys: string[] = [];
     let offset = 0;
     while (true) {
@@ -210,6 +253,7 @@ export class SplitClient {
       if (pageKeys.length === 0) break;
       keys.push(...pageKeys.map((k) => k.key));
       offset += pageKeys.length;
+      onProgress?.(offset, typeof page.count === "number" ? page.count : undefined);
       if (typeof page.count === "number" && offset >= page.count) break;
     }
     return keys;
