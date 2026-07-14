@@ -8,6 +8,7 @@ import {
   getJson,
   ldAPIPatchRequest,
   ldAPIPostRequest,
+  ldAPIPutRequest,
   ldAPIRequest,
   rateLimitRequest,
   sha256HexUtf8,
@@ -29,6 +30,7 @@ interface Arguments {
   assignMaintainerIds: boolean;
   migrateSegments: boolean;
   conflictPrefix?: string;
+  onConflict?: string;
   targetView?: string;
   environments?: string;
   envMap?: string;
@@ -79,6 +81,7 @@ interface MigrationConfig {
     assignMaintainerIds?: boolean;
     migrateSegments?: boolean;
     conflictPrefix?: string;
+    onConflict?: string;
     targetView?: string;
     environments?: string[];
     environmentMapping?: Record<string, string>;
@@ -190,6 +193,8 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .alias("m", "assignMaintainerIds")
   .alias("s", "migrateSegments")
   .alias("c", "conflictPrefix")
+  .alias("on-conflict", "onConflict")
+  .choices("on-conflict", ["prompt", "skip", "overwrite", "prefix", "abort"])
   .alias("v", "targetView")
   .alias("e", "environments")
   .alias("env-map", "envMap")
@@ -210,6 +215,7 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .default("m", false)
   .default("s", true)
   .describe("c", "Prefix to use when resolving key conflicts (e.g., 'imported-')")
+  .describe("on-conflict", "What to do when a flag/segment key already exists: prompt (interactive), skip, overwrite (default), prefix (requires -c), abort")
   .describe("v", "View key to link all migrated flags to")
   .describe("e", "Comma-separated list of environment keys to migrate (e.g., 'production,staging')")
   .describe("env-map", "Environment mapping in format 'source1:dest1,source2:dest2' (e.g., 'prod:production,dev:development')")
@@ -243,6 +249,7 @@ if (cliArgs.config) {
         ? cliArgs.migrateSegments
         : opts?.migrateSegments ?? true,
       conflictPrefix: cliArgs.conflictPrefix || opts?.conflictPrefix,
+      onConflict: cliArgs.onConflict || opts?.onConflict,
       targetView: cliArgs.targetView || opts?.targetView,
       environments: cliArgs.environments || opts?.environments?.join(','),
       envMap: cliArgs.envMap || (opts?.environmentMapping
@@ -282,6 +289,7 @@ console.log(Colors.gray(`  Destination: ${inputArgs.projKeyDest}`));
 console.log(Colors.gray(`  Assign Maintainers: ${inputArgs.assignMaintainerIds}`));
 console.log(Colors.gray(`  Migrate Segments: ${inputArgs.migrateSegments}`));
 console.log(Colors.gray(`  Conflict Prefix: ${inputArgs.conflictPrefix || 'none'}`));
+console.log(Colors.gray(`  On Conflict: ${inputArgs.onConflict || (inputArgs.conflictPrefix ? 'prefix' : 'overwrite')}`));
 console.log(Colors.gray(`  Target View: ${inputArgs.targetView || 'none'}`));
 console.log(Colors.gray(`  Environments: ${inputArgs.environments || 'all'}`));
 console.log(Colors.gray(`  Env Mapping: ${inputArgs.envMap || 'none'}`));
@@ -357,6 +365,77 @@ const conflictTracker = new ConflictTracker();
 if (inputArgs.conflictPrefix) {
   console.log(Colors.cyan(`Conflict prefix enabled: "${inputArgs.conflictPrefix}"`));
   console.log(Colors.cyan(`Resources with conflicting keys will be created with this prefix.`));
+}
+
+// ==================== Conflict Resolution Strategy ====================
+
+type ConflictAction = 'overwrite' | 'skip' | 'prefix' | 'abort';
+
+// Default preserves historical behavior: prefix when -c is set, else overwrite.
+const onConflictMode: string = inputArgs.onConflict ??
+  (inputArgs.conflictPrefix ? 'prefix' : 'overwrite');
+
+if (onConflictMode === 'prefix' && !inputArgs.conflictPrefix) {
+  console.log(Colors.red(`Error: --on-conflict prefix requires a conflict prefix (-c).`));
+  Deno.exit(1);
+}
+
+// Remembered "apply to all" answer from interactive prompting.
+let rememberedConflictAction: ConflictAction | null = null;
+// Serializes prompts so concurrent flag processing doesn't interleave questions.
+let promptLock: Promise<unknown> = Promise.resolve();
+
+/**
+ * Decides what to do with an existing destination resource, according to
+ * --on-conflict. In prompt mode, asks interactively (with "apply to all"
+ * options); outside a TTY or in dry-run mode, prompt falls back to overwrite.
+ */
+async function resolveConflictAction(
+  resourceType: 'flag' | 'segment',
+  key: string,
+): Promise<ConflictAction> {
+  if (onConflictMode !== 'prompt') return onConflictMode as ConflictAction;
+  if (rememberedConflictAction) return rememberedConflictAction;
+
+  if (inputArgs.dryRun) {
+    console.log(Colors.gray(`    [DRY RUN] ${resourceType} "${key}" exists — would prompt (treating as overwrite)`));
+    return 'overwrite';
+  }
+  if (!Deno.stdin.isTerminal()) {
+    console.log(Colors.yellow(`  ⚠ ${resourceType} "${key}" exists; not a TTY, defaulting to overwrite`));
+    return 'overwrite';
+  }
+
+  const ask = async (): Promise<ConflictAction> => {
+    const prefixChoices = inputArgs.conflictPrefix ? ", [p]refix, [P] prefix all" : "";
+    while (true) {
+      const answer = prompt(
+        Colors.yellow(
+          `  ⚠ ${resourceType} "${key}" already exists. ` +
+            `[o]verwrite, [s]kip, [a]bort, [O] overwrite all, [S] skip all${prefixChoices}:`,
+        ),
+      );
+      switch (answer) {
+        case 'o': return 'overwrite';
+        case 's': return 'skip';
+        case 'a': return 'abort';
+        case 'O': rememberedConflictAction = 'overwrite'; return 'overwrite';
+        case 'S': rememberedConflictAction = 'skip'; return 'skip';
+        case 'p': if (inputArgs.conflictPrefix) return 'prefix'; break;
+        case 'P': if (inputArgs.conflictPrefix) { rememberedConflictAction = 'prefix'; return 'prefix'; } break;
+      }
+      console.log(Colors.gray(`    Unrecognized answer "${answer}"`));
+    }
+  };
+
+  const result = promptLock.then(() => rememberedConflictAction ?? ask());
+  promptLock = result.catch(() => {});
+  return await result;
+}
+
+function abortOnConflict(resourceType: string, key: string): never {
+  console.log(Colors.red(`\n❌ Aborting: ${resourceType} "${key}" already exists in the destination (--on-conflict abort).`));
+  Deno.exit(1);
 }
 
 // Load maintainer mapping if needed
@@ -614,6 +693,121 @@ if (inputArgs.incremental) {
   }
 }
 
+// ==================== Context Kinds ====================
+// Optional contextKinds.json in the source dir (written by source adapters
+// like source_from_split.ts). Kinds must exist before segments and flag
+// targeting reference them.
+
+const contextKinds = await getJson(
+  `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/contextKinds.json`,
+) as Array<{ key: string; name: string; description?: string }> | undefined;
+
+if (contextKinds && contextKinds.length > 0) {
+  console.log(Colors.blue(`\n🧩 Creating ${contextKinds.length} context kind(s)...`));
+  for (const kind of contextKinds) {
+    const body: Record<string, unknown> = { name: kind.name };
+    if (kind.description) body.description = kind.description;
+
+    if (inputArgs.dryRun) {
+      console.log(Colors.gray(`    [DRY RUN] Would PUT projects/${inputArgs.projKeyDest}/context-kinds/${kind.key}`));
+      continue;
+    }
+    const resp = await rateLimitRequest(
+      ldAPIPutRequest(apiKey, domain, `projects/${inputArgs.projKeyDest}/context-kinds/${kind.key}`, body),
+      'context-kinds',
+    );
+    if (resp.status >= 200 && resp.status < 300) {
+      console.log(Colors.green(`  ✓ Context kind "${kind.key}" upserted`));
+    } else {
+      console.log(Colors.red(`  ✗ Context kind "${kind.key}" failed (${resp.status}): ${await resp.text()}`));
+    }
+  }
+}
+
+// ==================== Big Segment CSV Import ====================
+
+/** LD big segment CSV imports cap at 1M rows / 40MB per file. */
+const BIG_SEGMENT_IMPORT_ROW_LIMIT = 1_000_000;
+
+const csvEscape = (key: string): string =>
+  /[",\n\r]/.test(key) ? `"${key.replaceAll('"', '""')}"` : key;
+
+/**
+ * Loads big segment members via POST segments/{proj}/{env}/{key}/imports
+ * (multipart CSV, no header row). The first chunk replaces existing members
+ * so reruns are idempotent; subsequent chunks merge.
+ */
+async function importBigSegmentMembers(
+  projKey: string,
+  envKey: string,
+  segmentKey: string,
+  keys: string[],
+): Promise<void> {
+  const chunks: string[][] = [];
+  for (let i = 0; i < keys.length; i += BIG_SEGMENT_IMPORT_ROW_LIMIT) {
+    chunks.push(keys.slice(i, i + BIG_SEGMENT_IMPORT_ROW_LIMIT));
+  }
+
+  for (const [chunkIndex, chunk] of chunks.entries()) {
+    const mode = chunkIndex === 0 ? "replace" : "merge";
+    if (inputArgs.dryRun) {
+      console.log(Colors.gray(
+        `    [DRY RUN] Would import ${chunk.length} member(s) into big segment ${segmentKey} (${envKey}, mode=${mode})`,
+      ));
+      continue;
+    }
+
+    const csv = chunk.map(csvEscape).join("\n");
+    const form = new FormData();
+    form.append("file", new Blob([csv], { type: "text/csv" }), `${segmentKey}.csv`);
+    form.append("mode", mode);
+
+    const req = new Request(
+      `https://${domain}/api/v2/segments/${projKey}/${envKey}/${segmentKey}/imports`,
+      {
+        method: "POST",
+        headers: { "Authorization": apiKey, "User-Agent": "Project-Migrator-Script" },
+        body: form,
+      },
+    );
+    const resp = await rateLimitRequest(req, 'segments');
+
+    if (resp.status < 200 || resp.status >= 300) {
+      console.log(Colors.red(
+        `  ✗ Big segment import failed for ${segmentKey} (${resp.status}): ${await resp.text()}`,
+      ));
+      return;
+    }
+
+    // 204 with a Location header pointing at the import status resource.
+    const location = resp.headers.get("location");
+    const importId = location?.split("/").pop();
+    console.log(Colors.green(
+      `  ✓ Big segment ${segmentKey}: ${chunk.length} member(s) submitted (mode=${mode})`,
+    ));
+
+    if (importId) {
+      for (let attempt = 0; attempt < 10; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        const statusResp = await rateLimitRequest(
+          ldAPIRequest(apiKey, domain, `segments/${projKey}/${envKey}/${segmentKey}/imports/${importId}`),
+          'segments',
+        );
+        if (statusResp.status !== 200) break;
+        const status = (await statusResp.json()).status;
+        if (status === "completed") {
+          console.log(Colors.green(`    ✓ Import completed`));
+          break;
+        }
+        if (status === "failed" || status === "cancelled") {
+          console.log(Colors.red(`    ✗ Import ${status}`));
+          break;
+        }
+      }
+    }
+  }
+}
+
 // Migrate segments if enabled
 console.log(Colors.blue("\n🔷 Starting segment migration..."));
 if (inputArgs.migrateSegments) {
@@ -635,16 +829,20 @@ if (inputArgs.migrateSegments) {
     // Determine destination environment key (mapped or original)
     const destEnvKey = inputArgs.envMap && envMapping[env.key] ? envMapping[env.key] : env.key;
 
-    // We are ignoring big segments/synced segments for now
     for (const segment of segmentData.items) {
-      if (segment.unbounded == true) {
+      // Big (unbounded) segments are created with unbounded=true; members can
+      // be loaded via CSV import when the source data provides _importKeys
+      // (e.g. from the Split source adapter). Big segments synced from an
+      // external store in the SOURCE LD project have no exportable members —
+      // those are created empty with a warning.
+      const isBigSegment = segment.unbounded == true;
+      if (isBigSegment && !segment._importKeys?.length) {
         console.log(Colors.yellow(
-          `Segment: ${segment.key} in Environment ${env.key} is a big segment (unbounded), skipping`,
+          `Segment: ${segment.key} in Environment ${env.key} is a big segment (unbounded) with no exported members`,
         ));
         console.log(Colors.gray(
-          `  → Unbounded = synced from an external store or very large list; this migration does not copy big segments. Recreate or reconnect in the destination if needed.`,
+          `  → It will be created empty. Reconnect its sync or re-import members via CSV in the destination.`,
         ));
-        continue;
       }
 
       // Incremental sync: skip segments that haven't changed since last sync
@@ -675,6 +873,10 @@ if (inputArgs.migrateSegments) {
 
       if (segment.tags) newSegment.tags = segment.tags;
       if (segment.description) newSegment.description = segment.description;
+      if (isBigSegment) {
+        newSegment.unbounded = true;
+        if (segment.unboundedContextKind) newSegment.unboundedContextKind = segment.unboundedContextKind;
+      }
 
       const segmentResp = await dryRunAwarePost(
         inputArgs.dryRun || false,
@@ -692,13 +894,21 @@ if (inputArgs.migrateSegments) {
           segmentCreated = true;
           console.log(Colors.green(`  ✓ Segment ${newSegment.key} created (status: ${segmentStatus})`));
         } else if (segmentStatus === 409) {
-          // Segment already exists
-          if (inputArgs.conflictPrefix && attemptCount === 1) {
+          // Segment already exists — resolve according to --on-conflict
+          const action = attemptCount === 1
+            ? await resolveConflictAction('segment', segmentKey)
+            : 'overwrite';
+          if (action === 'abort') {
+            abortOnConflict('segment', segmentKey);
+          } else if (action === 'skip') {
+            console.log(Colors.gray(`  → Segment "${segmentKey}" exists, skipping`));
+            break; // segmentCreated stays false: no patching, no manifest entry
+          } else if (action === 'prefix' && inputArgs.conflictPrefix && attemptCount === 1) {
             // Conflict detected with prefix enabled, retry with prefix
             console.log(Colors.yellow(`  ⚠ Segment "${segmentKey}" already exists, retrying with prefix...`));
             segmentKey = applyConflictPrefix(segment.key, inputArgs.conflictPrefix);
             segmentName = `${inputArgs.conflictPrefix}${segment.name}`;
-            
+
             conflictTracker.addResolution({
               originalKey: segment.key,
               resolvedKey: segmentKey,
@@ -706,7 +916,7 @@ if (inputArgs.migrateSegments) {
               conflictPrefix: inputArgs.conflictPrefix
             });
           } else {
-            // No prefix or second attempt - segment exists, proceed to update it
+            // Overwrite (or second attempt) - segment exists, proceed to update it
             segmentCreated = true;
             console.log(Colors.yellow(`  ⚠ Segment "${segmentKey}" already exists, will update rules...`));
             break; // Exit retry loop and proceed to patching
@@ -720,8 +930,20 @@ if (inputArgs.migrateSegments) {
         }
       }
 
+      // Big segments: load members via the CSV import endpoint instead of patches
+      if (segmentCreated && isBigSegment) {
+        if (segment._importKeys?.length) {
+          await importBigSegmentMembers(
+            inputArgs.projKeyDest,
+            destEnvKey,
+            segmentKey,
+            segment._importKeys as string[],
+          );
+        }
+      }
+
       // Build Segment Patches - use the possibly updated segmentKey
-      if (segmentCreated) {
+      if (segmentCreated && !isBigSegment) {
       const sgmtPatches = [];
 
       // Legacy user targeting (single context kind) — use replace for idempotency
@@ -1451,14 +1673,20 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
     const checkFlagResp = await rateLimitRequest(checkFlagReq, 'flags');
     
     if (checkFlagResp.status === 200) {
-      // Flag already exists
-      if (inputArgs.conflictPrefix) {
+      // Flag already exists — resolve according to --on-conflict
+      const action = await resolveConflictAction('flag', flagKey);
+      if (action === 'abort') {
+        abortOnConflict('flag', flagKey);
+      } else if (action === 'skip') {
+        console.log(Colors.gray(`\t→ Flag already exists, skipping (--on-conflict)`));
+        return { incrementalSkipCountDelta, incrementalEnvSkipCountDelta };
+      } else if (action === 'prefix' && inputArgs.conflictPrefix) {
         // Conflict prefix enabled - we'll try creating with prefix
         console.log(Colors.yellow(`\t⚠ Flag exists, will try with prefix "${inputArgs.conflictPrefix}"`));
         flagKey = applyConflictPrefix(flag.key, inputArgs.conflictPrefix);
         flagName = `${inputArgs.conflictPrefix}${flag.name}`;
         flagAlreadyExisted = false; // Will attempt creation with prefixed key
-        
+
         conflictTracker.addResolution({
           originalKey: flag.key,
           resolvedKey: flagKey,
@@ -1466,7 +1694,7 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
           conflictPrefix: inputArgs.conflictPrefix
         });
       } else {
-        // No conflict prefix - update existing flag
+        // Overwrite - update existing flag
         flagCreated = true;
         flagAlreadyExisted = true;
         createdFlagKey = flagKey;
@@ -1754,14 +1982,76 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
   return { incrementalSkipCountDelta, incrementalEnvSkipCountDelta };
 }
 
-// Run flag migration with concurrency limit
+// ==================== Prerequisite-aware ordering ====================
+// Flags referenced as prerequisites must exist (with their variations) before
+// dependents patch environments, so order flags into topological levels:
+// level 0 has no prerequisites within this migration, level 1 depends only on
+// level 0, and so on. Levels run sequentially; flags within a level run
+// concurrently. Cycles are reported and processed last in source order.
+
+async function computeTopologicalLevels(
+  entries: Array<[number, string]>,
+): Promise<Array<Array<[number, string]>>> {
+  const keySet = new Set(entries.map(([, key]) => key));
+  const depsByKey = new Map<string, Set<string>>();
+
+  for (const [index, key] of entries) {
+    const flag = await getFlagDataByIndexOrKey(index, key);
+    const deps = new Set<string>();
+    for (const envData of Object.values(flag?.environments ?? {})) {
+      for (const prereq of (envData as any)?.prerequisites ?? []) {
+        // Only order against flags that are part of this migration
+        if (prereq?.key && keySet.has(prereq.key) && prereq.key !== key) {
+          deps.add(prereq.key);
+        }
+      }
+    }
+    depsByKey.set(key, deps);
+  }
+
+  const hasAnyPrereqs = [...depsByKey.values()].some((deps) => deps.size > 0);
+  if (!hasAnyPrereqs) return [entries];
+
+  const levels: Array<Array<[number, string]>> = [];
+  const placed = new Set<string>();
+  let remaining = [...entries];
+
+  while (remaining.length > 0) {
+    const ready = remaining.filter(([, key]) =>
+      [...depsByKey.get(key)!].every((dep) => placed.has(dep))
+    );
+    if (ready.length === 0) {
+      // Cycle: process the rest in source order with a warning
+      console.log(Colors.yellow(
+        `⚠ Prerequisite cycle detected among: ${remaining.map(([, k]) => k).join(', ')} — ` +
+          `migrating in source order; some prerequisite patches may fail and need a re-run`,
+      ));
+      levels.push(remaining);
+      break;
+    }
+    levels.push(ready);
+    ready.forEach(([, key]) => placed.add(key));
+    remaining = remaining.filter(([, key]) => !placed.has(key));
+  }
+
+  console.log(Colors.cyan(
+    `\n📐 Prerequisites detected: migrating in ${levels.length} dependency level(s) ` +
+      `(${levels.map((l) => l.length).join(' → ')})`,
+  ));
+  return levels;
+}
+
+// Run flag migration with concurrency limit, honoring prerequisite order
 const entries = [...flagList.entries()];
-for (let offset = 0; offset < entries.length; offset += CONCURRENCY) {
-  const chunk = entries.slice(offset, offset + CONCURRENCY);
-  const results = await Promise.all(chunk.map(([idx, key]) => processOneFlag(idx, key)));
-  for (const r of results) {
-    incrementalSkipCount += r.incrementalSkipCountDelta;
-    incrementalEnvSkipCount += r.incrementalEnvSkipCountDelta;
+const levels = await computeTopologicalLevels(entries);
+for (const level of levels) {
+  for (let offset = 0; offset < level.length; offset += CONCURRENCY) {
+    const chunk = level.slice(offset, offset + CONCURRENCY);
+    const results = await Promise.all(chunk.map(([idx, key]) => processOneFlag(idx, key)));
+    for (const r of results) {
+      incrementalSkipCount += r.incrementalSkipCountDelta;
+      incrementalEnvSkipCount += r.incrementalEnvSkipCountDelta;
+    }
   }
 }
 

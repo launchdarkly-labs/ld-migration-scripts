@@ -240,6 +240,27 @@ export function ldAPIPostRequest(
   return req;
 }
 
+export function ldAPIPutRequest(
+  apiKey: string,
+  domain: string,
+  path: string,
+  body: Record<string, unknown>,
+) {
+  const req = new Request(
+    `https://${domain}/api/v2/${path}`,
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        'User-Agent': 'Project-Migrator-Script',
+        "Authorization": apiKey,
+      },
+      body: JSON.stringify(body),
+    },
+  );
+  return req;
+}
+
 export function ldAPIPatchRequest(
   apiKey: string,
   domain: string,
