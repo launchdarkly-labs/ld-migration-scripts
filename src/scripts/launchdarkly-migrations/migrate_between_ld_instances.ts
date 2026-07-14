@@ -145,6 +145,13 @@ async function dryRunAwarePost(
   );
 }
 
+// LD caps segment patches at 1500 target operations per request ("Total
+// number of operations on targets must not exceed batch limit of 1500"),
+// counting every target value in a replace. Oversized target lists are
+// split: the initial replace carries at most this many values and the
+// remainder is appended in follow-up patches.
+const SEGMENT_TARGET_BATCH_LIMIT = 1500;
+
 /**
  * Wraps PATCH requests with dry-run support
  */
@@ -945,23 +952,58 @@ if (inputArgs.migrateSegments) {
       // Build Segment Patches - use the possibly updated segmentKey
       if (segmentCreated && !isBigSegment) {
       const sgmtPatches = [];
+      // Target values beyond the per-request batch limit get appended in
+      // follow-up patches after the initial replace succeeds.
+      const followUpBatches: { label: string; ops: { op: string; path: string; value: unknown }[] }[] = [];
+      let targetBudget = SEGMENT_TARGET_BATCH_LIMIT;
 
       // Legacy user targeting (single context kind) — use replace for idempotency
-      if (segment.included?.length > 0) {
-        sgmtPatches.push(buildPatch("included", "replace", segment.included));
-      }
-      if (segment.excluded?.length > 0) {
-        sgmtPatches.push(buildPatch("excluded", "replace", segment.excluded));
+      for (const field of ["included", "excluded"] as const) {
+        const keys: string[] = segment[field] ?? [];
+        if (keys.length === 0) continue;
+        const take = Math.min(keys.length, targetBudget);
+        sgmtPatches.push(buildPatch(field, "replace", keys.slice(0, take)));
+        targetBudget -= take;
+        for (let i = take; i < keys.length; i += SEGMENT_TARGET_BATCH_LIMIT) {
+          const chunk = keys.slice(i, i + SEGMENT_TARGET_BATCH_LIMIT);
+          followUpBatches.push({
+            label: `${field} ${i + chunk.length}/${keys.length}`,
+            ops: chunk.map((k) => ({ op: "add", path: `/${field}/-`, value: k })),
+          });
+        }
+        if (keys.length > take) {
+          console.log(Colors.gray(
+            `    ${keys.length} ${field} targets exceed the ${SEGMENT_TARGET_BATCH_LIMIT}/request limit; appending the rest in ${Math.ceil((keys.length - take) / SEGMENT_TARGET_BATCH_LIMIT)} follow-up patch(es)`,
+          ));
+        }
       }
 
       // Multi-context targeting — use replace for the whole array for idempotency
-      if (segment.includedContexts?.length > 0) {
-        sgmtPatches.push(buildPatch("includedContexts", "replace", segment.includedContexts));
-        console.log(Colors.gray(`    Replacing ${segment.includedContexts.length} includedContexts entries`));
-      }
-      if (segment.excludedContexts?.length > 0) {
-        sgmtPatches.push(buildPatch("excludedContexts", "replace", segment.excludedContexts));
-        console.log(Colors.gray(`    Replacing ${segment.excludedContexts.length} excludedContexts entries`));
+      for (const field of ["includedContexts", "excludedContexts"] as const) {
+        const entries: { values?: string[] }[] = segment[field] ?? [];
+        if (entries.length === 0) continue;
+        const initialEntries: unknown[] = [];
+        const overflowOps: { op: string; path: string; value: unknown }[] = [];
+        entries.forEach((entry, idx) => {
+          const values = entry.values ?? [];
+          // Every entry keeps at least one value so the replace never
+          // writes an entry with an empty target list.
+          const take = Math.max(Math.min(values.length, 1), Math.min(values.length, targetBudget));
+          initialEntries.push({ ...entry, values: values.slice(0, take) });
+          targetBudget = Math.max(0, targetBudget - take);
+          for (const v of values.slice(take)) {
+            overflowOps.push({ op: "add", path: `/${field}/${idx}/values/-`, value: v });
+          }
+        });
+        sgmtPatches.push(buildPatch(field, "replace", initialEntries));
+        console.log(Colors.gray(`    Replacing ${entries.length} ${field} entries`));
+        for (let i = 0; i < overflowOps.length; i += SEGMENT_TARGET_BATCH_LIMIT) {
+          const chunk = overflowOps.slice(i, i + SEGMENT_TARGET_BATCH_LIMIT);
+          followUpBatches.push({
+            label: `${field} values ${i + chunk.length}/${overflowOps.length} appended`,
+            ops: chunk,
+          });
+        }
       }
 
       if (segment.rules?.length > 0) {
@@ -995,6 +1037,28 @@ if (inputArgs.migrateSegments) {
             Array.isArray(p.value) ? p.value.length + " values" : typeof p.value
           })`).join(", ")}`,
         ));
+      } else {
+        for (const batch of followUpBatches) {
+          const appendResp = await dryRunAwarePatch(
+            inputArgs.dryRun || false,
+            apiKey,
+            domain,
+            `segments/${inputArgs.projKeyDest}/${destEnvKey}/${segmentKey}`,
+            batch.ops,
+            false,
+            'segments',
+            `environment: ${destEnvKey}`,
+          );
+          consoleLogger(
+            appendResp.status,
+            `    Appending ${segmentKey} targets (${batch.label}): ${appendResp.statusText}`,
+          );
+          if (appendResp.status >= 400) {
+            const errBody = await appendResp.text().catch(() => "");
+            console.log(Colors.red(`    ✗ ${segmentKey} target append rejected: ${errBody.slice(0, 500)}`));
+            break;
+          }
+        }
       }
       }
 
