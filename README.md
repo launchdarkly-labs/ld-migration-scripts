@@ -350,14 +350,16 @@ migration:
 ```
 
 ```bash
-SPLIT_API_KEY=... deno task workflow -- -f examples/workflow-split.yaml
+SPLIT_API_KEY=... deno task workflow -f examples/workflow-split.yaml
 ```
 
 The extract step writes `split-fidelity-report.json` alongside the source
 data, listing every mapping decision as FULL/PARTIAL/MANUAL/SKIPPED — review
-it before the real run. Mapping semantics are documented in
-[docs/SPLIT-MAPPING.md](docs/SPLIT-MAPPING.md). Split experiments and metric
-definitions cannot be exported via Split's public API and are not migrated.
+it before the real run. For the full step-by-step runbook, CLI flags, known
+limitations, and API quirks, see
+[src/scripts/third-party-migrations/split-readme.md](src/scripts/third-party-migrations/split-readme.md);
+mapping semantics are documented in
+[docs/SPLIT-MAPPING.md](docs/SPLIT-MAPPING.md).
 
 ### Custom Step Combinations
 
