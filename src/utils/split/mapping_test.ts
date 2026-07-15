@@ -456,6 +456,27 @@ Deno.test("mapFlag assembles tags, flag-set tags, defaults, and environments", (
   assertExists(flag.environments.production);
 });
 
+Deno.test("mapFlag does not emit a spurious 'verify targeting' note when rules map cleanly", () => {
+  // Guards Fix 5's safety net against false positives: a Split env whose rules
+  // map to real LD rules (or that has no rules at all) must NOT get the
+  // "had rules but mapped to none" note.
+  const withRule = ruleDef([{ type: "IN_LIST_STRING", attribute: "plan", strings: ["pro"] }]);
+  const ruleless = def({ rules: [], defaultRule: [{ treatment: "on", size: 100 }] });
+  const hasNote = (d: SplitFlagDefinition) =>
+    mapFlag({
+      meta: null,
+      splitName: d.name,
+      flagKey: d.name,
+      defsByLdEnv: { production: d },
+      envPriority: ["production"],
+      decision: decisionFor(d),
+      ctx: ctx(),
+    }).notes.some((n) => n.message.includes("mapped LD flag has none"));
+
+  assertEquals(hasNote(withRule), false); // rule survived → no note
+  assertEquals(hasNote(ruleless), false); // never had a rule → no note
+});
+
 // ==================== Segments ====================
 
 Deno.test("standard segment maps to included keys (user kind)", () => {

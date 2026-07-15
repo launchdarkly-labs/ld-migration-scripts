@@ -1005,6 +1005,22 @@ export function mapFlag(input: FlagMappingInput): { flag: LDFlagPayload; notes: 
     const mapped = mapEnvironment(def, decision, ctx, ldEnvKey);
     environments[ldEnvKey] = mapped.envConfig;
     notes.push(...mapped.notes);
+    // Leave a trace if the Split env carried targeting rules but the mapped LD
+    // flag has none *and* no note already explained the drop. Otherwise a flag
+    // whose rules all silently vanished would migrate as default-only with no
+    // record. (A genuinely rule-less Split env produces nothing here, as it
+    // should.)
+    const srcRuleCount = def.rules?.length ?? 0;
+    if (srcRuleCount > 0 && mapped.envConfig.rules.length === 0 && mapped.notes.length === 0) {
+      notes.push({
+        level: "PARTIAL",
+        area: "flag",
+        item: `${splitName} (${ldEnvKey})`,
+        message:
+          `Split environment had ${srcRuleCount} targeting rule(s) but the mapped ` +
+          `LD flag has none; verify targeting manually`,
+      });
+    }
   }
 
   const flag: LDFlagPayload = {
