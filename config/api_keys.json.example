@@ -1,4 +1,5 @@
 {
   "source_account_api_key": "your_source_api_key_here",
-  "destination_account_api_key": "your_destination_api_key_here"
+  "destination_account_api_key": "your_destination_api_key_here",
+  "split_api_key": "optional_split_admin_api_key_for_split_migrations"
 } 

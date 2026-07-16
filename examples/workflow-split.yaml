@@ -1,0 +1,66 @@
+# Split (Harness FME) → LaunchDarkly Migration Workflow
+#
+# Extracts a Split workspace via the Split Admin API into the standard
+# source-data directory, then migrates it into a LaunchDarkly project —
+# including targeting rules, segments, individual targets, context kinds,
+# and prerequisites.
+#
+# Requirements:
+#   - SPLIT_API_KEY env var (or split_api_key in config/api_keys.json)
+#     with read permissions on the Split workspace
+#   - destination_account_api_key in config/api_keys.json
+#   - The destination LaunchDarkly project must already exist, with
+#     environments matching the mapped environment keys below
+#
+# Run:  deno task workflow -- -f examples/workflow-split.yaml
+#
+# Review data/launchdarkly-migrations/source/project/<projectKey>/
+# split-fidelity-report.json after the extract step — it lists everything
+# that mapped PARTIALly or needs MANUAL follow-up.
+
+workflow:
+  steps:
+    - split-extract
+    - migrate
+
+source:
+  # Local label for the extracted source data (any key you like);
+  # the migrate step reads data/launchdarkly-migrations/source/project/<this key>/
+  projectKey: split-workspace
+
+destination:
+  projectKey: my-ld-project
+  domain: app.launchdarkly.com  # Optional: Defaults to app.launchdarkly.com
+
+splitExtract:
+  # Split workspace (project) ID or name
+  workspace: Default
+
+  # Optional: only migrate flags/segments with this Split tag
+  # tag: migrate-me
+
+  # Optional: which Split environments to extract (default: all)
+  environments:
+    - Prod-Default
+    - Staging
+
+  # Split environment name → LaunchDarkly environment key.
+  # Unmapped environments use their sanitized, lowercased Split name.
+  environmentMapping:
+    Prod-Default: production
+    Staging: test
+
+  # Optional: tag applied to everything imported (default: imported-from-split)
+  # ldTag: imported-from-split
+
+migration:
+  migrateSegments: true
+
+  # Start with a dry run, review the output, then set to false
+  dryRun: true
+
+  # What to do when a flag/segment key already exists in the destination:
+  # prompt (interactive), skip, overwrite (default), prefix (requires
+  # conflictPrefix), abort
+  onConflict: prompt
+  # conflictPrefix: split-

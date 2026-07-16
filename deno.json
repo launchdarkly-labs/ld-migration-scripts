@@ -1,6 +1,6 @@
 {
   "name": "ld-migration-scripts",
-  "version": "3.0.2",
+  "version": "3.2.0",
   "exports": "./src/scripts/launchdarkly-migrations/workflow.ts",
   "description": "LaunchDarkly Project Migration Scripts - Support for LD-to-LD migrations and third-party flag imports",
   "license": "Apache-2.0",
@@ -16,8 +16,8 @@
   "importMap": "./config/import_map.json",
   "tasks": {
     "workflow": "deno run --allow-net --allow-read --allow-write --allow-run src/scripts/launchdarkly-migrations/workflow.ts",
-    "workflow:full": "deno task workflow -- -f examples/workflow-full.yaml",
-    "workflow:incremental": "deno task workflow -- -f examples/workflow-extract-migrate-incremental.yaml",
+    "workflow:full": "deno task workflow -f examples/workflow-full.yaml",
+    "workflow:incremental": "deno task workflow -f examples/workflow-extract-migrate-incremental.yaml",
     "source-from-ld": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/source_from_ld.ts",
     "map-members": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/map_members_between_ld_instances.ts",
     "update-maintainers": "deno run --allow-read --allow-write src/scripts/update_maintainers.ts",
@@ -25,6 +25,8 @@
     "revert": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/revert_migration.ts",
     "estimate-migration-time": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/estimate_migration_time.ts",
     "import-flags": "deno run --allow-net --allow-read --allow-write src/scripts/third-party-migrations/import_flags_from_external.ts",
+    "source-from-split": "deno run --allow-net --allow-read --allow-write --allow-env src/scripts/third-party-migrations/source_from_split.ts",
+    "test": "deno test src/",
     "version:show": "./scripts/check-version.sh",
     "version:bump:patch": "./scripts/bump-version.sh patch",
     "version:bump:minor": "./scripts/bump-version.sh minor",

@@ -5,6 +5,11 @@ This directory contains scripts for importing data from external sources into La
 ## Scripts
 
 - **`import_flags_from_external.ts`** - Imports feature flags from JSON or CSV files
+- **`source_from_split.ts`** - Extracts a Split (Harness FME) workspace into the LD-to-LD source-data format for full-fidelity migration
+
+## Split (Harness FME) Migration
+
+Split (Harness FME) migration: see [split-readme.md](./split-readme.md).
 
 ## Data Structure
 
