@@ -176,11 +176,12 @@ async function dryRunAwarePatch(
 
 // ==================== Project Helpers ====================
 
-// Add function to check if project exists
-async function checkProjectExists(apiKey: string, domain: string, projectKey: string): Promise<boolean> {
+// Returns the raw HTTP status so callers can distinguish a missing project
+// (404) from an auth failure (401/403) — the two need very different messages.
+async function getProjectStatus(apiKey: string, domain: string, projectKey: string): Promise<number> {
   const req = ldAPIRequest(apiKey, domain, `projects/${projectKey}`);
   const response = await rateLimitRequest(req, 'projects');
-  return response.status === 200;
+  return response.status;
 }
 
 // Add function to get existing project environments
@@ -336,6 +337,12 @@ try {
     const memberData = await memberResp.json();
     currentMemberId = memberData._id;
     console.log(Colors.gray(`Authenticated as member: ${memberData.email || currentMemberId}`));
+  } else if (memberResp.status === 401) {
+    // Fail fast: an invalid key would otherwise surface as a misleading
+    // "project does not exist" once we hit the projects endpoint below.
+    console.log(Colors.red(`\n❌ Destination API key is invalid (HTTP 401).`));
+    console.log(Colors.yellow(`   Update "destination_account_api_key" in config/api_keys.json.`));
+    Deno.exit(1);
   } else {
     console.log(Colors.gray(`Authenticated with service token (approval requests may not notify anyone)`));
   }
@@ -535,10 +542,14 @@ if (inputArgs.envMap) {
 }
 
 // Destination project must already exist; we do not create projects.
-const targetProjectExists = await checkProjectExists(apiKey, domain, inputArgs.projKeyDest);
+const projStatus = await getProjectStatus(apiKey, domain, inputArgs.projKeyDest);
 
-if (!targetProjectExists) {
-  console.log(Colors.red(`\n❌ Destination project "${inputArgs.projKeyDest}" does not exist.`));
+if (projStatus === 401 || projStatus === 403) {
+  console.log(Colors.red(`\n❌ Destination API key is invalid or lacks access (HTTP ${projStatus}).`));
+  console.log(Colors.yellow(`   Check "destination_account_api_key" in config/api_keys.json — it needs write access to "${inputArgs.projKeyDest}".`));
+  Deno.exit(1);
+} else if (projStatus !== 200) {
+  console.log(Colors.red(`\n❌ Destination project "${inputArgs.projKeyDest}" does not exist (HTTP ${projStatus}).`));
   console.log(Colors.yellow(`   Create the project in LaunchDarkly first, then run migration again.`));
   Deno.exit(1);
 }

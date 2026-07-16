@@ -145,21 +145,50 @@ complete mapping specification.
 
 ### Smoke-test coverage caveats
 
-End-to-end testing was performed against a Split **trial-tier org**, whose
-plan limits made two migration paths impossible to exercise live (they are
-covered by unit tests only):
+End-to-end testing was performed against a Split **trial-tier org**. A trial
+org's plan limits and API behavior prevent the seed harness from creating
+many of the higher-value objects, so the corresponding migration paths are
+**exercised by unit tests only, not against live Split data**. Treat the list
+below as untested end-to-end until you re-run against a paid/Enterprise org.
 
-- **Split large segments → LaunchDarkly big segments** — large segments are
-  Enterprise-gated in Split (`Forbidden by Paywalls: largeSegments`), so the
-  big-segment creation and CSV member-import path (`_importKeys`) is untested
-  against real data.
-- **Standard segments above 15,000 members → big-segment upgrade** — the
-  trial org caps segment membership at 10,000 keys (`Forbidden by Paywalls:
-  segmentKeys limit=10000`), so the automatic upgrade of oversized standard
-  segments to unbounded LD segments is untested live.
+The authoritative per-run record of what was and wasn't exercised is the
+seed harness's `check-report` output (its "Relaxed (probe not accepted)"
+section). What a trial org could not seed in practice:
 
-Validate both paths against a paid/Enterprise Split org before relying on
-them for a production migration.
+**Paywall-gated (Split returns `402 Forbidden by Paywalls`):**
+
+- **Large segments → LaunchDarkly big segments** — large segments are
+  Enterprise-gated (`largeSegments`), so big-segment creation and the CSV
+  member-import path (`_importKeys`) is untested against real data.
+- **Standard segments above 15,000 members → big-segment upgrade** — trial
+  caps membership at 10,000 keys (`segmentKeys limit=10000`), so the automatic
+  upgrade of oversized standard segments to unbounded LD segments is untested.
+- **Multivariate flags with >2 treatments** (`splitTreatments limit=2`) — the
+  3+ variation mapping path is not exercised.
+- **`trafficAllocation` < 100** — the PARTIAL "migrated at 100%" path is not
+  exercised.
+- **Flag sets** (`402` on `/internal/api/v3/flag-sets`) — the
+  `flagset.<name>` tagging path is not exercised.
+- **Reserved-word traffic type `kind`** (`trafficTypes limit=2`) — the
+  reserved-word context-kind PARTIAL path is not exercised.
+
+**Rejected by the trial API (`400`), so also untested end-to-end:**
+
+- **`IN_SPLIT` → prerequisite** — the in-split dependency matcher could not be
+  seeded, so the prerequisite translation (and topological ordering at migrate
+  time) is unexercised against real data.
+- **semver and set matchers** — `EQUAL_SET`, `PART_OF_SET`, and
+  semver-between/greater/less matchers could not be seeded.
+- **Rule-based-segment operator dialect** — one RBS operator shape was
+  rejected.
+
+Note that a `400` (as opposed to a `402`) may indicate the seed harness is
+sending a request shape the current Split API no longer accepts, rather than a
+plan limit — see the seed harness's `check-report`, which now flags `400`s
+distinctly from paywalls.
+
+Validate **all** of the above against a paid/Enterprise Split org before
+relying on them for a production migration.
 
 ## API quirks encountered in the field
 
