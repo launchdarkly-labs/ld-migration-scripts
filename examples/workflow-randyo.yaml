@@ -3,11 +3,11 @@
 # This is the DEFAULT behavior if workflow.steps is not specified
 
 # Optional: Explicitly define steps (if omitted, runs all steps by default)
-# workflow:
-#   steps:
-#     - extract-source
-#     - map-members
-#     - migrate
+workflow:
+  steps:
+    - extract-source
+    # - map-members
+    - migrate
 
 source:
   projectKey: randy-o-platform-lab
@@ -34,10 +34,10 @@ migration:
   migrateSegments: true
   
   # Handle conflicts
-  conflictPrefix: "reo-"
+  # conflictPrefix: "reo-"
   
   # Organize in view
-  targetView: "reo-migration-2024"
+  targetView: "reo-migration-test"
   
   # # Only migrate these environments
   # environments:
