@@ -1,0 +1,63 @@
+# Complete LaunchDarkly Migration Workflow
+# Runs all steps: extract source → map members → migrate
+# This is the DEFAULT behavior if workflow.steps is not specified
+
+# Optional: Explicitly define steps (if omitted, runs all steps by default)
+# workflow:
+#   steps:
+#     - extract-source
+#     - map-members
+#     - migrate
+
+source:
+  projectKey: randy-o-platform-lab
+  domain: app.launchdarkly.com  # Optional: Defaults to app.launchdarkly.com
+
+destination:
+  projectKey: migration-test
+  domain: app.launchdarkly.com  # Optional: Use app.eu.launchdarkly.com for EU instance
+
+# Optional: Control what data to extract from source
+# extraction:
+#   includeSegments: true  # Uncomment to extract segments (only needed if migrateSegments: true)
+
+# Optional: Configure member mapping output location
+memberMapping:
+  outputFile: data/launchdarkly-migrations/mappings/maintainer_mapping.json
+
+# Migration configuration
+migration:
+  # Use the member mapping we just created
+  assignMaintainerIds: true
+  
+  # Include segments
+  migrateSegments: true
+  
+  # Handle conflicts
+  conflictPrefix: "reo-"
+  
+  # Organize in view
+  targetView: "reo-migration-2024"
+  
+  # # Only migrate these environments
+  # environments:
+  #   - production
+  #   - staging
+  
+  # # Map environment keys if needed
+  # environmentMapping:
+  #   production: production
+  #   staging: staging
+
+  # Include only these flag keys (optional — omit to migrate all)
+  # includeFlags:
+  #   - feature-one
+  #   - feature-two
+
+  # Exclude these flag keys (optional)
+  # excludeFlags:
+  #   - deprecated-flag
+
+  # Migrate up to N flags in parallel (optional, default: 10)
+  # concurrency: 10
+
