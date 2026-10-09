@@ -6,11 +6,11 @@
 #   model-configs → configs → variations → targeting
 
 source:
-  projectKey: platform-healthcheck
+  projectKey: replace-with-project-key
   domain: app.launchdarkly.com
 
 destination:
-  projectKey: njordan-ai-mig-test
+  projectKey: replace-with-project-key
   domain: app.launchdarkly.com
 
 extraction:
