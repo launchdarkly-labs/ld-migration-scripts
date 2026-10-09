@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **AgentControl (AI Configs)**: Optional extract and migrate for model configs, configs, variations, and targeting
+  - CLI: `--extract-agent-control` (source) and `--migrate-agent-control` (migrate, default off)
+  - Workflow YAML: `extraction.includeAgentControl` / `migration.migrateAgentControl`
+  - Extract auto-enables when migrate is enabled (same pattern as segments)
+  - Migrate order: model-configs → configs → variations → targeting
+  - Graceful skip on `403`/`404` when AgentControl is not available
+  - On-disk tree under `ai-configs/`; example: `examples/workflow-agent-control.yaml`
+
 ## [3.0.2] - 2025-12-09
 
 ### Fixed

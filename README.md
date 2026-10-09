@@ -4,7 +4,7 @@
 [![Deno](https://img.shields.io/badge/deno-v2.x-blue.svg)](https://deno.land/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-Set of scripts intended for migrating LaunchDarkly projects between different accounts, regions, or instances. The supported resources include: environments, flags, segments, and maintainer mappings.
+Set of scripts intended for migrating LaunchDarkly projects between different accounts, regions, or instances. The supported resources include: environments, flags, segments, AgentControl (AI Configs), and maintainer mappings.
 
 ## Overview
 
@@ -22,6 +22,7 @@ Features that are currently supported:
 - Project & environment configuration and settings
 - Feature flags and their configurations
 - Segments and targeting rules
+- **AgentControl (AI Configs)**: Optional extract/migrate of model configs, configs, variations, and targeting (REST paths remain under `/ai-configs`)
 - Maintainer mapping across different account instances
 - **Views support**: Automatic extraction and creation of views with flag linkage
 - **Conflict resolution**: Automatic handling of resource key conflicts with configurable prefixes
@@ -345,6 +346,7 @@ destination:                 # Required for migrate step
 
 extraction:                  # Optional - controls what data to extract
   includeSegments: boolean   # Set to true to extract segments (default: false)
+  includeAgentControl: boolean  # Extract AgentControl / AI Configs (default: false)
 
 memberMapping:               # Optional - for map-members step
   outputFile: string         # Where to save mapping file
@@ -352,6 +354,7 @@ memberMapping:               # Optional - for map-members step
 migration:                   # Optional - for migrate step
   assignMaintainerIds: boolean
   migrateSegments: boolean
+  migrateAgentControl: boolean  # Migrate AgentControl / AI Configs (default: false)
   conflictPrefix: string
   targetView: string
   environments: string[]
@@ -391,10 +394,18 @@ data/launchdarkly-migrations/source/project/{projectKey}/
 │   ├── flag-key-1.json
 │   ├── flag-key-2.json
 │   └── ...
-└── segments/             # Segment data (only if includeSegments: true)
-    ├── environment-1.json
-    ├── environment-2.json
-    └── ...
+├── segments/             # Segment data (only if includeSegments: true)
+│   ├── environment-1.json
+│   ├── environment-2.json
+│   └── ...
+└── ai-configs/           # AgentControl data (only if includeAgentControl / migrateAgentControl)
+    ├── model-configs.json
+    ├── configs.json
+    ├── variations/
+    │   └── {configKey}/
+    │       └── {variationKey}.json
+    └── targeting/
+        └── {configKey}.json
 ```
 
 **Note:** Segments are only extracted if:
@@ -403,6 +414,14 @@ data/launchdarkly-migrations/source/project/{projectKey}/
 
 By default, segments are **not** extracted unless explicitly needed, preventing unnecessary API calls and storage.
 
+**AgentControl (AI Configs):** Extracted when `extraction.includeAgentControl` **or** `migration.migrateAgentControl` is `true` (same pattern as segments). Migrate is opt-in (`migrateAgentControl` defaults to `false`). Order: model-configs → configs → variations → targeting. Targeting uses `GET/PATCH .../ai-configs/{configKey}/targeting` (semantic patch) with variation keys resolved from `value._ldMeta.variationKey` (and `disabled` for off variations). Only model configs referenced by extracted variations are migrated (provider catalogs are skipped). On `403`/`404` (not entitled / missing), the step logs a skip and continues. Incomplete targeting maps are reported as errors, not success. Product name is AgentControl; API paths remain `/api/v2/projects/{projectKey}/ai-configs...`.
+
+```bash
+deno task source-from-ld -- -p PROJECT --extract-agent-control=true
+deno task migrate -- -p SRC -d DEST --migrate-agent-control
+deno task workflow -f examples/workflow-agent-control.yaml
+```
+
 ### Workflow Examples Included
 
 - `examples/workflow-full.yaml` - Complete workflow (default behavior)
@@ -410,6 +429,7 @@ By default, segments are **not** extracted unless explicitly needed, preventing 
 - `examples/workflow-migrate-only.yaml` - Migrate with pre-extracted data
 - `examples/workflow-third-party.yaml` - Third-party flag import
 - `examples/workflow-custom-steps.yaml` - Custom step combinations
+- `examples/workflow-agent-control.yaml` - AgentControl (AI Configs) extract + migrate
 
 ## Configuration File Support (Individual Migrate Task)
 
@@ -937,6 +957,8 @@ don't need to specify them manually.
 
 - `-p, --projKey`: Source project key
 - `--domain`: (Optional) LaunchDarkly domain, defaults to `app.launchdarkly.com`. Use `app.eu.launchdarkly.com` for EU instances.
+- `--extract-segments`: (Optional) Extract segment data, defaults to `false`.
+- `--extract-agent-control`: (Optional) Extract AgentControl (AI Configs) data, defaults to `false`.
 
 ### map_members.ts
 
@@ -954,6 +976,9 @@ don't need to specify them manually.
   first.
 - `-s, --migrateSegments`: (Optional) Whether to migrate segments, defaults to
   true. Set to false to skip segment migration.
+- `--migrate-agent-control`: (Optional) Whether to migrate AgentControl (AI Configs)
+  resources, defaults to `false`. When enabled, upserts in order: model-configs →
+  configs → variations → targeting. Skips on `403`/`404`.
 - `-c, --conflictPrefix`: (Optional) Prefix to use when resolving key conflicts
   (e.g., 'imported-'). When a resource with a conflicting key is detected, it
   will be created with this prefix automatically.

@@ -22,12 +22,14 @@ import {
 import * as Colors from "https://deno.land/std@0.149.0/fmt/colors.ts";
 import { parse as parseYaml } from "https://deno.land/std@0.224.0/yaml/parse.ts";
 import { getDestinationApiKey } from "../../utils/api_keys.ts";
+import { migrateAgentControlFromExtract } from "../../utils/agent_control.ts";
 
 interface Arguments {
   projKeySource: string;
   projKeyDest: string;
   assignMaintainerIds: boolean;
   migrateSegments: boolean;
+  migrateAgentControl: boolean;
   conflictPrefix?: string;
   targetView?: string;
   environments?: string;
@@ -75,6 +77,7 @@ interface MigrationConfig {
   options?: {
     assignMaintainerIds?: boolean;
     migrateSegments?: boolean;
+    migrateAgentControl?: boolean;
     conflictPrefix?: string;
     targetView?: string;
     environments?: string[];
@@ -192,10 +195,12 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .alias("since", "since")
   .boolean("m")
   .boolean("s")
+  .boolean("migrate-agent-control")
   .boolean("dry-run")
   .boolean("incremental")
   .default("m", false)
   .default("s", true)
+  .default("migrate-agent-control", false)
   .describe("c", "Prefix to use when resolving key conflicts (e.g., 'imported-')")
   .describe("v", "View key to link all migrated flags to")
   .describe("e", "Comma-separated list of environment keys to migrate (e.g., 'production,staging')")
@@ -205,6 +210,10 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .describe("dry-run", "Preview migration without making any changes")
   .describe("incremental", "Skip flags unchanged since last sync (version-based)")
   .describe("since", "Only sync flags modified after this date (ISO 8601, e.g. 2026-01-15)")
+  .describe(
+    "migrate-agent-control",
+    "Whether to migrate AgentControl (AI Configs) resources (default: false)",
+  )
   .parse() as unknown) as Arguments;
 
 // Load and merge config file if provided
@@ -225,6 +234,10 @@ if (cliArgs.config) {
       migrateSegments: cliArgs.migrateSegments !== undefined && cliArgs.migrateSegments !== true
         ? cliArgs.migrateSegments
         : config.options?.migrateSegments ?? true,
+      migrateAgentControl: cliArgs.migrateAgentControl !== undefined &&
+          cliArgs.migrateAgentControl !== false
+        ? cliArgs.migrateAgentControl
+        : config.options?.migrateAgentControl ?? false,
       conflictPrefix: cliArgs.conflictPrefix || config.options?.conflictPrefix,
       targetView: cliArgs.targetView || config.options?.targetView,
       environments: cliArgs.environments || config.options?.environments?.join(','),
@@ -261,6 +274,7 @@ console.log(Colors.gray(`  Source: ${inputArgs.projKeySource}`));
 console.log(Colors.gray(`  Destination: ${inputArgs.projKeyDest}`));
 console.log(Colors.gray(`  Assign Maintainers: ${inputArgs.assignMaintainerIds}`));
 console.log(Colors.gray(`  Migrate Segments: ${inputArgs.migrateSegments}`));
+console.log(Colors.gray(`  Migrate AgentControl: ${inputArgs.migrateAgentControl}`));
 console.log(Colors.gray(`  Conflict Prefix: ${inputArgs.conflictPrefix || 'none'}`));
 console.log(Colors.gray(`  Target View: ${inputArgs.targetView || 'none'}`));
 console.log(Colors.gray(`  Environments: ${inputArgs.environments || 'all'}`));
@@ -724,6 +738,27 @@ if (inputArgs.migrateSegments) {
   };
 } else {
   console.log(Colors.gray("  Segment migration disabled, skipping..."));
+}
+
+// Migrate AgentControl (AI Configs) if enabled
+if (inputArgs.migrateAgentControl) {
+  try {
+    await migrateAgentControlFromExtract({
+      apiKey,
+      domain,
+      sourceProjectKey: inputArgs.projKeySource,
+      destProjectKey: inputArgs.projKeyDest,
+      dryRun: inputArgs.dryRun === true,
+      envMapping,
+    });
+  } catch (error) {
+    console.log(Colors.red(
+      `  ✗ AgentControl migration error: ${error instanceof Error ? error.message : String(error)}`,
+    ));
+    console.log(Colors.yellow("  Continuing with flag migration..."));
+  }
+} else {
+  console.log(Colors.gray("\n  AgentControl migration disabled, skipping..."));
 }
 
 // ==================== Semantic Patch Conversion ====================

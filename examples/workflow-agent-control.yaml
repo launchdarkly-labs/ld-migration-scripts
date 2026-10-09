@@ -1,0 +1,24 @@
+# Workflow with AgentControl (AI Configs) extract + migrate
+# REST paths remain under /ai-configs; product name is AgentControl.
+#
+# Extract runs when includeAgentControl OR migrateAgentControl is true.
+# Migrate is opt-in (default false) and runs:
+#   model-configs → configs → variations → targeting
+
+source:
+  projectKey: platform-healthcheck
+  domain: app.launchdarkly.com
+
+destination:
+  projectKey: njordan-ai-mig-test
+  domain: app.launchdarkly.com
+
+extraction:
+  includeSegments: false
+  includeAgentControl: true
+
+migration:
+  migrateSegments: false
+  migrateAgentControl: true
+  assignMaintainerIds: false
+  # dryRun: true  # Uncomment to preview AgentControl writes without applying
