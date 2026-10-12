@@ -18,6 +18,11 @@ migration:
   assignMaintainerIds: false
   
   migrateSegments: true
+  # Import big segment members (optional). Only works if the earlier extract also used
+  # migrateBigSegments: true, so the member CSVs exist under data/.../segments/big/.
+  # migrateBigSegments: true
+  # Preview without writing to the destination (optional)
+  # dryRun: true
   conflictPrefix: "imported-"
   targetView: "migration-2024"
 
