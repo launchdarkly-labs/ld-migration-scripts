@@ -23,6 +23,7 @@ import {
 import * as Colors from "https://deno.land/std@0.149.0/fmt/colors.ts";
 import { parse as parseYaml } from "https://deno.land/std@0.224.0/yaml/parse.ts";
 import { getDestinationApiKey } from "../../utils/api_keys.ts";
+import { mergeTags } from "../../utils/tags.ts";
 
 interface Arguments {
   projKeySource: string;
@@ -30,6 +31,7 @@ interface Arguments {
   assignMaintainerIds: boolean;
   migrateSegments: boolean;
   conflictPrefix?: string;
+  tags?: string;
   onConflict?: string;
   targetView?: string;
   environments?: string;
@@ -80,6 +82,7 @@ interface MigrationConfig {
   options?: {
     assignMaintainerIds?: boolean;
     migrateSegments?: boolean;
+    tags?: string[] | null;
     conflictPrefix?: string;
     onConflict?: string;
     targetView?: string;
@@ -201,6 +204,7 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .alias("m", "assignMaintainerIds")
   .alias("s", "migrateSegments")
   .alias("c", "conflictPrefix")
+  .string("tags")
   .alias("on-conflict", "onConflict")
   .choices("on-conflict", ["prompt", "skip", "overwrite", "prefix", "abort"])
   .alias("v", "targetView")
@@ -223,6 +227,7 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .default("m", false)
   .default("s", true)
   .describe("c", "Prefix to use when resolving key conflicts (e.g., 'imported-')")
+  .describe("tags", "Comma-separated tags to add to migrated flags and segments")
   .describe("on-conflict", "What to do when a flag/segment key already exists: prompt (interactive), skip, overwrite (default), prefix (requires -c), abort")
   .describe("v", "View key to link all migrated flags to")
   .describe("e", "Comma-separated list of environment keys to migrate (e.g., 'production,staging')")
@@ -257,6 +262,7 @@ if (cliArgs.config) {
         ? cliArgs.migrateSegments
         : opts?.migrateSegments ?? true,
       conflictPrefix: cliArgs.conflictPrefix || opts?.conflictPrefix,
+      tags: cliArgs.tags ?? (opts?.tags?.length ? opts.tags.join(",") : undefined),
       onConflict: cliArgs.onConflict || opts?.onConflict,
       targetView: cliArgs.targetView || opts?.targetView,
       environments: cliArgs.environments || opts?.environments?.join(','),
@@ -280,6 +286,11 @@ if (cliArgs.config) {
   }
 }
 
+const migrationTags = inputArgs.tags
+  ?.split(",")
+  .map((tag) => tag.trim())
+  .filter(Boolean) ?? [];
+
 console.log(Colors.blue("\n=== Migration Script Starting ==="));
 console.log(Colors.gray(`Source Project: ${cliArgs.projKeySource || '(from config)'}`));
 console.log(Colors.gray(`Destination Project: ${cliArgs.projKeyDest || '(from config)'}`));
@@ -299,6 +310,7 @@ console.log(Colors.gray(`  Migrate Segments: ${inputArgs.migrateSegments}`));
 console.log(Colors.gray(`  Conflict Prefix: ${inputArgs.conflictPrefix || 'none'}`));
 console.log(Colors.gray(`  On Conflict: ${inputArgs.onConflict || (inputArgs.conflictPrefix ? 'prefix' : 'overwrite')}`));
 console.log(Colors.gray(`  Target View: ${inputArgs.targetView || 'none'}`));
+console.log(Colors.gray(`  Tags: ${migrationTags.length > 0 ? migrationTags.join(', ') : 'none'}`));
 console.log(Colors.gray(`  Environments: ${inputArgs.environments || 'all'}`));
 console.log(Colors.gray(`  Env Mapping: ${inputArgs.envMap || 'none'}`));
 console.log(Colors.gray(`  Domain: ${inputArgs.domain || 'app.launchdarkly.com'}`));
@@ -880,6 +892,7 @@ if (inputArgs.migrateSegments) {
       let segmentName = segment.name;
       let attemptCount = 0;
       let segmentCreated = false;
+      let segmentAlreadyExisted = false;
 
       while (!segmentCreated && attemptCount < 2) {
         attemptCount++;
@@ -889,7 +902,8 @@ if (inputArgs.migrateSegments) {
           key: segmentKey,
       };
 
-      if (segment.tags) newSegment.tags = segment.tags;
+      const segmentTags = mergeTags(segment.tags, migrationTags);
+      if (segmentTags.length > 0) newSegment.tags = segmentTags;
       if (segment.description) newSegment.description = segment.description;
       if (isBigSegment) {
         newSegment.unbounded = true;
@@ -936,6 +950,7 @@ if (inputArgs.migrateSegments) {
           } else {
             // Overwrite (or second attempt) - segment exists, proceed to update it
             segmentCreated = true;
+            segmentAlreadyExisted = true;
             console.log(Colors.yellow(`  ⚠ Segment "${segmentKey}" already exists, will update rules...`));
             break; // Exit retry loop and proceed to patching
           }
@@ -945,6 +960,35 @@ if (inputArgs.migrateSegments) {
             console.log(Colors.gray(`  Payload: ${JSON.stringify(newSegment)}`));
           }
           break; // Exit loop on non-conflict errors
+        }
+      }
+
+      if (segmentCreated && segmentAlreadyExisted && migrationTags.length > 0) {
+        const segmentPath = `segments/${inputArgs.projKeyDest}/${destEnvKey}/${segmentKey}`;
+        const existingSegmentResp = await rateLimitRequest(
+          ldAPIRequest(apiKey, domain, segmentPath),
+          "segments",
+        );
+        if (existingSegmentResp.status === 200) {
+          const existingSegment = await existingSegmentResp.json();
+          const desiredTags = mergeTags(segment.tags, migrationTags, existingSegment.tags);
+          if (JSON.stringify(desiredTags) !== JSON.stringify(existingSegment.tags ?? [])) {
+            const tagResp = await dryRunAwarePatch(
+              inputArgs.dryRun || false,
+              apiKey,
+              domain,
+              segmentPath,
+              [buildPatch("tags", "replace", desiredTags)],
+              false,
+              "segments",
+              `environment: ${destEnvKey}`,
+            );
+            if (tagResp.status >= 400) {
+              console.log(Colors.red(`    ✗ Failed to update tags for segment ${segmentKey} (${tagResp.status})`));
+            }
+          }
+        } else {
+          console.log(Colors.yellow(`    ⚠ Could not read existing tags for segment ${segmentKey} (${existingSegmentResp.status})`));
         }
       }
 
@@ -1803,10 +1847,11 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
       name: flagName,
     variations: newVariations,
     temporary: flag.temporary,
-    tags: flag.tags,
     description: flag.description,
     maintainerId: null  // Set to null by default to prevent API from assigning token owner
   };
+  const flagTags = mergeTags(flag.tags, migrationTags);
+  if (flagTags.length > 0) newFlag.tags = flagTags;
   // Only assign maintainerId if explicitly requested and mapping exists
   if (inputArgs.assignMaintainerIds) {
       if (flag.maintainerId && maintainerMapping[flag.maintainerId]) {
@@ -1898,6 +1943,7 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
         } else {
           // No prefix or second attempt - flag exists, proceed to update it
           flagCreated = true;
+          flagAlreadyExisted = true;
           createdFlagKey = flagKey;
           console.log(Colors.gray(`\t⚠ Flag exists (409), will update environments...`));
           break; // Exit retry loop and proceed to patching
@@ -1950,8 +1996,11 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
         flagLevelPatches.push(buildPatch("name", "replace", flagName));
       if (flag.description !== undefined && changed(flag.description, destinationFlag.description))
         flagLevelPatches.push(buildPatch("description", "replace", flag.description));
-      if (flag.tags && changed(flag.tags, destinationFlag.tags))
-        flagLevelPatches.push(buildPatch("tags", "replace", flag.tags));
+      const desiredTags = migrationTags.length > 0
+        ? mergeTags(flag.tags, migrationTags, destinationFlag.tags)
+        : flag.tags;
+      if (desiredTags && changed(desiredTags, destinationFlag.tags))
+        flagLevelPatches.push(buildPatch("tags", "replace", desiredTags));
       if (flag.temporary !== undefined && changed(flag.temporary, destinationFlag.temporary))
         flagLevelPatches.push(buildPatch("temporary", "replace", flag.temporary));
       if (flag.clientSideAvailability && changed(flag.clientSideAvailability, destinationFlag.clientSideAvailability))

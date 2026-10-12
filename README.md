@@ -410,6 +410,7 @@ memberMapping:               # Optional - for map-members step
 migration:                   # Optional - for migrate step
   assignMaintainerIds: boolean
   migrateSegments: boolean
+  tags: string[] | null      # Optional tags added to migrated flags and segments
   conflictPrefix: string
   targetView: string
   environments: string[]
@@ -504,6 +505,9 @@ destination:
 migration:
   assignMaintainerIds: true
   migrateSegments: true
+  tags:
+    - imported-from-legacy
+    - billing-team
   conflictPrefix: "imported-"
   targetView: "migration-2024"
   environments:
@@ -569,10 +573,13 @@ migration:                   # Migration settings (also accepts "options:" as al
     ...
   includeFlags: string[]                # Optional: only migrate these flag keys
   excludeFlags: string[]                # Optional: skip these flag keys
+  tags: string[]                        # Optional: tags added to flags and segments
   concurrency: number                   # Optional: parallel flags (default: 10)
 ```
 
 **Note:** Config files accept either `migration:` or `options:` as the key for migration settings.
+
+`migration.tags` is optional (or `null`). When provided, its values are added to the source tags for migrated flags and segments. Duplicate tags are removed, and tags already present on an existing destination resource are retained. Direct `migrate` CLI usage also accepts comma-separated tags, for example `--tags imported-from-legacy,billing-team`.
 
 ### Priority Order
 
