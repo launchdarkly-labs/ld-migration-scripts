@@ -223,6 +223,7 @@ For more information about using Deno tasks, see
 The workflow orchestrator allows you to run complete end-to-end migrations from a single YAML config file. It supports:
 
 - ✅ **Full workflow automation** - Extract → Map → Migrate in one command
+- ✅ **Multi-project migrations** - Migrate many projects via `source.projectKeys` (same key on destination, or custom/merged keys via `destination.projectKeyMapping`)
 - ✅ **Selective step execution** - Run only the steps you need
 - ✅ **Third-party imports** - Import flags from external sources
 - ✅ **Default behavior** - Runs full workflow if no steps specified
@@ -299,6 +300,71 @@ migration:
 ```bash
 deno task workflow -f workflow-migrate-only.yaml
 ```
+
+### Multi-Project Workflow
+
+Use `source.projectKeys` to migrate an explicit list of projects. Each source key is migrated to a destination project with the **same key** (typical account/region moves where project keys are preserved).
+
+Account-level steps (`map-members`, `third-party-import`) run **once**, first. Project-level steps (`extract-source`, `migrate`, `revert`) then run **once per project**, in the order the steps are listed, for each key in list order. Duplicate keys are skipped.
+
+With a single `source.projectKey`, steps run exactly in the order listed.
+
+```yaml
+workflow:
+  steps:
+    - map-members
+    - extract-source
+    - migrate
+
+source:
+  projectKeys:
+    - payroll
+    - benefits
+  domain: app.launchdarkly.com
+
+destination:
+  domain: app.launchdarkly.us
+
+migration:
+  assignMaintainerIds: true
+```
+
+When `projectKeys` is set, `destination.projectKey` and `destination.projectName` are ignored (projects created with `migration.createProject` use each source project's name, unless `destination.projectNames` sets one). Use `source.projectKey` and `destination.projectKey` instead when migrating a single project to a different key. Project keys are trimmed, and numeric YAML values (e.g. `projectKey: 123`) are treated as strings.
+
+#### Custom destination keys and merging projects
+
+Add `destination.projectKeyMapping` (source key -> destination key) to send some projects to a different key. Keys not listed keep the same key. Several sources can map to the same destination, which merges them into one project:
+
+```yaml
+source:
+  projectKeys:
+    - ld-mfe-examples                      # -> ld-mfe-examples
+    - njordan-cd-example                   # -> new-project
+    - njordan-ld-migration-scripts-source  # -> new-project
+  domain: ld-stg.launchdarkly.com
+
+destination:
+  domain: app.launchdarkly.com
+  projectKeyMapping:
+    njordan-cd-example: new-project
+    njordan-ld-migration-scripts-source: new-project
+  projectNames:                             # Optional: destination key -> name, used only when createProject creates it
+    new-project: "New Project"
+
+migration:
+  createProject: true
+  createEnvironments: true
+```
+
+- Every mapping key must appear in `source.projectKeys`; a typo stops the workflow before any step runs. The mapping is ignored (with a warning) when only `source.projectKey` is set.
+- The first source migrated into a merged destination creates it; later sources add their flags and segments to the existing project.
+- **Merge check:** before each later source migrates into a merged destination, the workflow compares its extracted flag and segment keys (per environment) with the earlier sources for that destination. If any overlap, the workflow stops and lists them, because without `migration.conflictPrefix` the later source would overwrite the earlier one's targeting. With `conflictPrefix` set, it warns and the overlapping keys are created with the prefix. The check reads extracted data, so `extract-source` must have run for every merged source.
+- `conflictPrefix` applies to *any* key that already exists in the destination, so rerunning a migration with it set creates prefixed duplicates instead of updating the flags from the first run.
+- Environments are matched by key across all sources (`migration.environmentMapping` applies to every project).
+
+#### Same-account guard
+
+When the source and destination domains are the same, the workflow checks both API tokens with `GET /api/v2/caller-identity` before migrating. If they belong to the same account and any project would migrate onto its own key (for example `projectKeys` without a mapping), the workflow stops, since that would write into the source projects. Map those projects to new keys or use a destination token for another account. If the lookup fails (for example the token lacks access), the workflow warns and continues. Different domains skip the check.
 
 ### Third-Party Flag Import
 
@@ -387,18 +453,24 @@ migration:
 
 ```yaml
 workflow:                    # Optional - defaults to full workflow
-  steps:                     # List of steps to execute in order
-    - extract-source         # Download source project data
-    - map-members           # Map member IDs
-    - migrate               # Run migration
-    - third-party-import    # Or import from external sources
+  steps:                     # Run in order; with projectKeys, account steps run once first, then project steps per key
+    - extract-source         # Download source project data (per project)
+    - map-members           # Map member IDs (account-level)
+    - migrate               # Run migration (per project)
+    - third-party-import    # Or import from external sources (account-level)
 
-source:                      # Required
-  projectKey: string         # Source project key
+source:                      # Required: projectKey OR projectKeys
+  projectKey: string         # Single source project
+  projectKeys: string[]      # Multiple projects (same key on destination each, unless mapped)
   domain: string            # Optional: Defaults to app.launchdarkly.com
 
-destination:                 # Required for migrate step
-  projectKey: string         # Destination project key
+destination:                 # Required for migrate step (per-project key set automatically when using projectKeys)
+  projectKey: string         # Destination project key (single-project mode)
+  projectName: string        # Optional: Name used only when migration.createProject creates the project
+  projectKeyMapping:         # Optional, projectKeys only: source key -> destination key (several may share one)
+    sourceKey: destKey
+  projectNames:              # Optional, projectKeys only: destination key -> name used when the project is created
+    destKey: "Display Name"
   domain: string            # Optional: Defaults to app.launchdarkly.com
 
 extraction:                  # Optional - controls what data to extract
@@ -419,6 +491,8 @@ migration:                   # Optional - for migrate step
   includeFlags: string[]    # Only migrate these flag keys
   excludeFlags: string[]    # Skip these flag keys
   concurrency: number       # Parallel flag migrations (default: 10)
+  createProject: boolean    # Create the destination project if missing, with the migrated environments
+  createEnvironments: boolean  # Create destination environments that are missing, from source settings
 
 thirdPartyImport:           # Required for third-party-import step
   inputFile: string          # JSON or CSV file path
@@ -466,6 +540,8 @@ data/launchdarkly-migrations/source/project/{projectKey}/
 - `migration.migrateSegments` is set to `true`
 
 By default, segments are **not** extracted unless explicitly needed, preventing unnecessary API calls and storage.
+
+**Note:** If the project response does not include environments (some LaunchDarkly instances omit them from `?expand=environments`), extraction falls back to the paginated `projects/{projectKey}/environments` endpoint so `project.json` always contains the full environment list.
 
 ### Workflow Examples Included
 
@@ -547,7 +623,7 @@ The `examples/` directory includes several config file templates:
 
 ### Migration Config File Structure
 
-For use with `deno task migrate -f` (not workflow orchestrator):
+For use with `deno task migrate -f` (not workflow orchestrator). Migration settings may be placed under either `migration:` or `options:`; if both are present, `options:` wins.
 
 ```yaml
 source:
@@ -556,6 +632,7 @@ source:
 
 destination:
   projectKey: string         # Required: Destination project key
+  projectName: string        # Optional: Name for a project created by createProject
   domain: string             # Optional: Defaults to app.launchdarkly.com
 
 migration:                   # Migration settings (also accepts "options:" as alias)
@@ -882,7 +959,7 @@ deno task revert -f examples/revert-migration-example.yaml --dry-run
 deno task revert -f examples/revert-migration-example.yaml
 
 # Or use CLI arguments
-deno task revert -p SOURCE_PROJECT -d DEST_PROJECT -v "migration-view" --dry-run
+deno task revert -p DEST_PROJECT -s SOURCE_PROJECT -v "migration-view" --dry-run
 ```
 
 ### What Gets Reverted
@@ -916,13 +993,20 @@ revert:
   #   - migration-view-1
 ```
 
+The `revert:` block applies both in the workflow orchestrator and when running `deno task revert -f <config>` directly. Command-line flags override it: `--dry-run` / `--no-dry-run` override `revert.dryRun` (so `--no-dry-run` performs a real revert even when `revert.dryRun: true`), and `--delete-views` / `--no-delete-views` override `revert.deleteViews`. View keys are taken from `-v` first, then `revert.viewKeys`, then `migration.targetView`.
+
+**Multiple projects:** When `source.projectKeys` is set, `deno task revert -f <config>` reverts every listed project in order, using its destination key (from `destination.projectKeyMapping`, else the same key). Pass `-p` (and optionally `-s`) to revert only one project; `-s` on its own is ignored when several projects are listed. In the workflow orchestrator, the `revert` step already runs once per project.
+
+**Merged destinations:** Revert removes only the flags that came from each source (using that source's extracted flag list), so other sources' flags in the same destination are untouched. `-p new-project` reverts every source mapped to `new-project`; add `-s njordan-cd-example` to revert just one. With `deleteViews`, a view in a merged destination is kept while flags from its other sources still exist there, and is deleted by the revert that removes the last of them. Flags you created by hand in that view are not detected.
+
 ### CLI Options
 
-- `-p, --projKeySource`: Source project key (identifies which flags to revert)
-- `-d, --projKeyDest`: Destination project key (where flags will be deleted)
-- `-v, --targetView`: View key containing migrated flags
-- `--dry-run`: Preview the revert without making changes
-- `--delete-views`: Also delete the view after unlinking all flags
+- `-p, --project`: Destination project key (where flags will be deleted)
+- `-s, --source-project`: Source project key (identifies which flags to revert)
+- `-d, --domain`: LaunchDarkly domain (default: app.launchdarkly.com)
+- `-v, --views`: Comma-separated view keys containing migrated flags
+- `--dry-run` / `--no-dry-run`: Preview the revert without making changes, or force a real revert (overrides `revert.dryRun`)
+- `--delete-views`: Also delete the view after unlinking all flags (overrides `revert.deleteViews`)
 - `--no-use-source-data`: Disable smart mode (scan all destination flags instead)
 - `-f, --config`: Path to YAML configuration file
 
@@ -1078,7 +1162,9 @@ don't need to specify them manually.
   true. Set to false to skip segment migration.
 - `-c, --conflictPrefix`: (Optional) Prefix to use when resolving key conflicts
   (e.g., 'imported-'). When a resource with a conflicting key is detected, it
-  will be created with this prefix automatically.
+  will be created with this prefix automatically. This includes flags from an
+  earlier run of the same migration, so reruns create prefixed copies instead
+  of updating.
 - `-v, --targetView`: (Optional) View key to link all migrated flags to. This
   will link all flags to the specified view in addition to any views they were
   already linked to in the source project.
@@ -1089,6 +1175,20 @@ don't need to specify them manually.
   (e.g., 'prod:production,dev:development'). Maps source environment keys to different
   destination environment keys. Useful when migrating between projects with different
   environment naming conventions.
+- `--create-project`: (Optional) Create the destination project if it doesn't
+  exist, with the environments being migrated (mapped keys when `--env-map` is
+  set). Without it, a missing destination project is an error.
+- `--dest-project-name`: (Optional) Name for a project created by
+  `--create-project` (config: `destination.projectName`). Without it, the
+  destination key is used when it differs from the source key, so two projects
+  in one account don't share a name; otherwise the source project's name is
+  kept. Ignored when the destination project already exists (it is not
+  renamed). Quote names with spaces, e.g.
+  `--dest-project-name "NR Import Staging (test dest)"`; in YAML, quoting is
+  recommended (`projectName: "NR Import Staging (test dest)"`).
+- `--create-environments`: (Optional) Create destination environments that are
+  missing, copying name, color, TTL, and other settings from the source. Without
+  it, missing environments are skipped (or are an error with `--env-map`).
 - `--domain`: (Optional) Destination LaunchDarkly domain, defaults to `app.launchdarkly.com`. Use `app.eu.launchdarkly.com` for EU instances.
 - `-f, --config`: (Optional) Path to YAML configuration file. All migration settings
   can be specified in the config file. CLI arguments override config file values.

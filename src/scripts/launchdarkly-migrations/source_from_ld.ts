@@ -49,52 +49,87 @@ if (projResp == null) {
   console.log("Failed getting project");
   Deno.exit(1);
 }
-const projData = await projResp.json();
+if (projResp.status < 200 || projResp.status >= 300) {
+  console.log(`Failed getting project (${projResp.status}): ${await projResp.text()}`);
+  Deno.exit(1);
+}
+const projData = (await projResp.json()) as Record<string, unknown>;
 
-// Handle pagination for environments if needed
-const allEnvironments = projData.environments.items;
-const totalEnvironments = projData.environments.totalCount || allEnvironments.length;
+// Resolve environments: expand may return undefined on some LD instances (e.g. ld-stg)
+let allEnvironments: Array<{ key: string; [k: string]: unknown }>;
+const expanded = projData.environments as { items?: unknown[]; totalCount?: number } | undefined;
+if (expanded?.items && Array.isArray(expanded.items)) {
+  allEnvironments = expanded.items as Array<{ key: string; [k: string]: unknown }>;
+} else {
+  // Fallback: fetch from environments endpoint (required when expand returns no environments)
+  console.log("Fetching environments from dedicated endpoint...");
+  const envPageSize = 100;
+  let envOffset = 0;
+  allEnvironments = [];
+  let hasMore = true;
+  while (hasMore) {
+    const envResp = await rateLimitRequest(
+      ldAPIRequest(
+        apiKey,
+        domain,
+        `projects/${inputArgs.projKey}/environments?limit=${envPageSize}&offset=${envOffset}`
+      ),
+      "environments"
+    );
+    if (envResp == null || envResp.status >= 300) {
+      console.log(envResp ? `Failed getting environments (${envResp.status})` : "Failed getting environments");
+      Deno.exit(1);
+    }
+    const envData = (await envResp.json()) as { items?: unknown[]; _links?: { next?: string } };
+    const items = envData.items ?? [];
+    allEnvironments.push(...(items as Array<{ key: string; [k: string]: unknown }>));
+    if (envData._links?.next) {
+      envOffset += envPageSize;
+    } else {
+      hasMore = false;
+    }
+  }
+}
 
-if (totalEnvironments > allEnvironments.length) {
+// Paginate if expand returned partial list
+const totalEnvironments = (expanded?.totalCount as number | undefined) ?? allEnvironments.length;
+if (totalEnvironments > allEnvironments.length && expanded?.items) {
   console.log(`Project has ${totalEnvironments} environments, fetching all...`);
-  
-  const envPageSize: number = 100;
-  let envOffset: number = allEnvironments.length;
-  let moreEnvironments: boolean = true;
+  const envPageSize = 100;
+  let envOffset = allEnvironments.length;
+  let moreEnvironments = true;
   let envPath = `projects/${inputArgs.projKey}/environments?limit=${envPageSize}&offset=${envOffset}`;
 
   while (moreEnvironments) {
     console.log(`Getting additional environments: ${envOffset} to ${envOffset + envPageSize}`);
 
-    const envResp = await rateLimitRequest(
-      ldAPIRequest(apiKey, domain, envPath),
-      "environments"
-    );
-
-    if (envResp.status > 201) {
-      consoleLogger(envResp.status, `Error getting environments: ${envResp.status}`);
-      consoleLogger(envResp.status, await envResp.text());
-    }
-    if (envResp == null) {
+    const envResp = await rateLimitRequest(ldAPIRequest(apiKey, domain, envPath), "environments");
+    if (envResp == null || envResp.status >= 300) {
+      if (envResp) {
+        consoleLogger(envResp.status, `Error getting environments: ${envResp.status}`);
+        consoleLogger(envResp.status, await envResp.text());
+      }
       console.log("Failed getting environments");
       Deno.exit(1);
     }
-
-    const envData = await envResp.json();
-
-    allEnvironments.push(...envData.items);
-
-    if (envData._links.next) {
+    const envData = (await envResp.json()) as { items?: unknown[]; _links?: { next?: string } };
+    const items = envData.items ?? [];
+    allEnvironments.push(...(items as Array<{ key: string; [k: string]: unknown }>));
+    moreEnvironments = !!envData._links?.next;
+    if (moreEnvironments) {
       envOffset += envPageSize;
       envPath = `projects/${inputArgs.projKey}/environments?limit=${envPageSize}&offset=${envOffset}`;
-    } else {
-      moreEnvironments = false;
     }
   }
 }
 
-// Update the project data with all environments
-projData.environments.items = allEnvironments;
+// Ensure project data has environments structure for downstream (migrate expects projectJson.environments.items)
+if (!projData.environments || typeof projData.environments !== "object") {
+  projData.environments = { items: allEnvironments, totalCount: allEnvironments.length };
+} else {
+  (projData.environments as Record<string, unknown>).items = allEnvironments;
+  (projData.environments as Record<string, unknown>).totalCount = allEnvironments.length;
+}
 
 await writeSourceData(projPath, "project", projData);
 
