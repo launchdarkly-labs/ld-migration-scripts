@@ -5,9 +5,14 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   coerceProjectKey,
+  computeMergeCollisions,
+  computePrefixedMergeCollisions,
+  effectiveConflictPolicy,
   findMergeCollisions,
   findMergedDestinations,
   hasMergeCollisions,
+  loadMergeKeys,
+  mergeSelectionFromConfig,
   normalizeWorkflowConfig,
   partitionWorkflowSteps,
   resolveDestinationProjectName,
@@ -441,4 +446,108 @@ Deno.test("findMergeCollisions throws when a source was not extracted", async ()
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
+});
+
+Deno.test("projectKeyMapping: a source key named like an Object.prototype member keeps its key", () => {
+  const config: WorkflowConfig = {
+    ...baseConfig(),
+    source: { projectKeys: ["constructor", "other"] },
+    destination: { projectKeyMapping: { other: "renamed" } },
+  };
+  assertEquals(resolveProjectPairs(config), [
+    { source: "constructor", destination: "constructor" },
+    { source: "other", destination: "renamed" },
+  ]);
+});
+
+Deno.test("findMergeCollisions ignores flags outside includeFlags/excludeFlags and segments when disabled", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    await writeSource(dir, "a", ["shared", "excluded", "only-a"], { test: ["seg"] });
+    await writeSource(dir, "b", ["shared", "excluded", "only-b"], { test: ["seg"] });
+    assertEquals(
+      await findMergeCollisions("b", ["a"], dir, { excludeFlags: ["excluded"], migrateSegments: false }),
+      { flags: ["shared"], segments: {} },
+    );
+    assertEquals(
+      await findMergeCollisions("b", ["a"], dir, { includeFlags: ["only-b"] }),
+      { flags: [], segments: { test: ["seg"] } },
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("loadMergeKeys groups segments by destination environment and drops unmapped ones", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    await writeSource(dir, "a", ["f"], { prod: ["p-seg"], stage: ["s-seg"], dev: ["d-seg"] });
+    assertEquals(
+      await loadMergeKeys("a", dir, { environmentMapping: { prod: "production", stage: "production" } }),
+      { flags: ["f"], segments: { production: ["p-seg", "s-seg"] } },
+    );
+    assertEquals(
+      await loadMergeKeys("a", dir, { environments: ["dev"] }),
+      { flags: ["f"], segments: { dev: ["d-seg"] } },
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("mergeSelectionFromConfig drops empty lists and maps", () => {
+  assertEquals(mergeSelectionFromConfig({ ...baseConfig(), migration: { includeFlags: [], environmentMapping: {} } }), {
+    includeFlags: undefined,
+    excludeFlags: undefined,
+    migrateSegments: undefined,
+    environments: undefined,
+    environmentMapping: undefined,
+  });
+  assertEquals(
+    mergeSelectionFromConfig({ ...baseConfig(), migration: { migrateSegments: false, environments: ["prod"] } }),
+    { includeFlags: undefined, excludeFlags: undefined, migrateSegments: false, environments: ["prod"], environmentMapping: undefined },
+  );
+});
+
+Deno.test("effectiveConflictPolicy mirrors the migrate step's default", () => {
+  assertEquals(effectiveConflictPolicy(baseConfig()), { policy: "overwrite", prefix: undefined });
+  assertEquals(
+    effectiveConflictPolicy({ ...baseConfig(), migration: { conflictPrefix: "imported-" } }),
+    { policy: "prefix", prefix: "imported-" },
+  );
+  assertEquals(
+    effectiveConflictPolicy({ ...baseConfig(), migration: { conflictPrefix: "imported-", onConflict: "overwrite" } }),
+    { policy: "overwrite", prefix: "imported-" },
+  );
+});
+
+const keys = (flags: string[], segments: Record<string, string[]> = {}) => ({ flags, segments });
+
+Deno.test("computePrefixedMergeCollisions: a key shared with one earlier source is resolved by the prefix", () => {
+  const result = computePrefixedMergeCollisions(keys(["shared"], { test: ["seg"] }), [keys(["shared"], { test: ["seg"] })], "p-");
+  assertEquals(result, { flags: [], segments: {} });
+  assertEquals(hasMergeCollisions(result), false);
+});
+
+Deno.test("computePrefixedMergeCollisions: a key shared with two earlier sources cannot be prefixed again", () => {
+  const earlier = [keys(["shared", "x"], { test: ["seg"] }), keys(["shared"], { test: ["seg"] })];
+  assertEquals(
+    computePrefixedMergeCollisions(keys(["shared", "x"], { test: ["seg"] }), earlier, "p-"),
+    { flags: ["shared"], segments: { test: ["seg"] } },
+  );
+  // computeMergeCollisions still lists every overlap
+  assertEquals(computeMergeCollisions(keys(["shared", "x"]), earlier), { flags: ["shared", "x"], segments: {} });
+});
+
+Deno.test("computePrefixedMergeCollisions: the prefixed key already existing elsewhere is unresolvable", () => {
+  assertEquals(
+    computePrefixedMergeCollisions(keys(["shared"]), [keys(["shared", "p-shared"])], "p-"),
+    { flags: ["shared"], segments: {} },
+  );
+  assertEquals(
+    computePrefixedMergeCollisions(keys(["shared", "p-shared"]), [keys(["shared"])], "p-"),
+    { flags: ["shared"], segments: {} },
+  );
+  // No collision at all: nothing to resolve
+  assertEquals(computePrefixedMergeCollisions(keys(["p-shared"]), [keys(["shared"])], "p-"), { flags: [], segments: {} });
 });
