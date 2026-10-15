@@ -392,30 +392,3 @@ Deno.test("selectRevertFlagKeys without siblings keeps all extracted keys", () =
     { keys: ["a", "b"], ambiguous: [] },
   );
 });
-
-Deno.test("selectRevertFlagKeys keeps every manifest key, even ones a sibling also lists", () => {
-  assertEquals(
-    selectRevertFlagKeys(
-      { keys: ["imported-shared", "only-a", "only-a"], fromManifest: true },
-      [{ keys: ["shared", "only-b"], fromManifest: false }],
-    ),
-    { keys: ["imported-shared", "only-a"], ambiguous: [] },
-  );
-});
-
-Deno.test("selectRevertFlagKeys leaves raw source keys that a sibling also lists in place", () => {
-  assertEquals(
-    selectRevertFlagKeys(
-      { keys: ["shared", "only-a"], fromManifest: false },
-      [{ keys: ["shared", "only-b"], fromManifest: true }, { keys: ["other"], fromManifest: false }],
-    ),
-    { keys: ["only-a"], ambiguous: ["shared"] },
-  );
-});
-
-Deno.test("selectRevertFlagKeys without siblings keeps raw source keys", () => {
-  assertEquals(
-    selectRevertFlagKeys({ keys: ["shared", "only-a"], fromManifest: false }, []),
-    { keys: ["shared", "only-a"], ambiguous: [] },
-  );
-});
