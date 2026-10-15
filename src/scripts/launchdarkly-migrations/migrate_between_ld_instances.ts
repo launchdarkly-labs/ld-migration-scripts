@@ -25,6 +25,13 @@ import { parse as parseYaml } from "https://deno.land/std@0.224.0/yaml/parse.ts"
 import { getDestinationApiKey } from "../../utils/api_keys.ts";
 import { resolveDestinationProjectName } from "../../utils/workflow_config.ts";
 import { mergeTags } from "../../utils/tags.ts";
+import {
+  type SyncManifest,
+  type SyncManifestEnv,
+  type SyncManifestFlag,
+  type SyncManifestSegment,
+  syncManifestPath as syncManifestPathFor,
+} from "../../utils/sync_manifest.ts";
 import { bigSegmentCsvPath, readExportedKeys } from "../../utils/big_segments.ts";
 import { linkToView, type SourceView } from "../../utils/views.ts";
 
@@ -53,31 +60,7 @@ interface Arguments {
   createEnvironments?: boolean;
 }
 
-interface SyncManifestEnv {
-  version: number;
-  lastModified?: string;
-}
-
-interface SyncManifestFlag {
-  version: number;
-  lastModified?: string;
-  environments: Record<string, SyncManifestEnv>;
-  destKey?: string; // destination key, if it differs (e.g. conflict prefix)
-}
-
-interface SyncManifestSegment {
-  version: number;
-  lastModified?: number;
-  destKey?: string; // destination key in this environment, if it differs (e.g. conflict prefix)
-}
-
-interface SyncManifest {
-  lastSyncTimestamp: string;
-  sourceProject: string;
-  destProject: string;
-  flags: Record<string, SyncManifestFlag>;
-  segments?: Record<string, Record<string, SyncManifestSegment>>; // segments[envKey][segmentKey]
-}
+// Sync manifest types and path live in utils/sync_manifest.ts, shared with the revert tool
 
 interface MigrationConfig {
   source: {
@@ -918,7 +901,7 @@ for (const view of viewsToCreate.values()) {
 
 // ==================== Incremental Sync ====================
 
-const syncManifestPath = `./data/launchdarkly-migrations/sync-manifest-${inputArgs.projKeySource}-${inputArgs.projKeyDest}.json`;
+const syncManifestPath = syncManifestPathFor(inputArgs.projKeySource, inputArgs.projKeyDest);
 let previousManifest: SyncManifest | null = null;
 const updatedManifestFlags: Record<string, SyncManifestFlag> = {};
 const updatedManifestSegments: Record<string, Record<string, SyncManifestSegment>> = {};
