@@ -178,6 +178,7 @@ if (inputArgs.extractSegments && allEnvironments.length > 0) {
           bigSegmentCsvPath(projPath, env.key, segment.key),
         );
         console.log(`    ${result.ok ? "✓" : "✗"} ${result.message}`);
+        if (!result.ok) Deno.exit(1);
       }
     }
   }
