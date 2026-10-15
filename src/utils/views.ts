@@ -37,8 +37,15 @@ async function getAllPages(apiKey: string, domain: string, path: string): Promis
       throw new Error(`GET ${path} failed (HTTP ${resp.status}): ${await resp.text()}`);
     }
     const body = await resp.json();
-    items.push(...(body.items ?? []));
-    if (!body.items?.length || items.length >= (body.totalCount ?? 0)) return items;
+    const page: any[] = body.items ?? [];
+    items.push(...page);
+    if (page.length === 0) return items;
+    // The beta endpoints don't always return totalCount; without it, a short page with no next link ends the list
+    if (typeof body.totalCount === "number") {
+      if (items.length >= body.totalCount) return items;
+    } else if (page.length < PAGE_SIZE && !body._links?.next) {
+      return items;
+    }
   }
 }
 
