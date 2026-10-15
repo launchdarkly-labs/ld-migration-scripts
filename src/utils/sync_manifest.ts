@@ -5,7 +5,11 @@
  * It records the source versions of the migrated flags and segments (used by --incremental) and,
  * for every resource whose destination key differs from its source key (conflict prefix), that
  * destination key. Later runs and the revert tool use those keys to find the migrated copies.
- * A dry run never writes a manifest.
+ *
+ * The manifest is cumulative: a run rewrites the entries of the resources it attempted and keeps
+ * the entries of resources outside its scope (include/exclude filters, --since, unselected
+ * environments, migrateSegments: false). A resource whose write failed gets no entry, so the
+ * next --incremental run retries it. A dry run never writes a manifest.
  */
 
 export const MIGRATION_DATA_DIR = "./data/launchdarkly-migrations";
@@ -49,23 +53,33 @@ export function syncManifestPath(
 
 /**
  * Reads the manifest for a source/destination pair, or returns null when none exists.
- * @throws Error when the file exists but cannot be read or parsed
+ * @throws Error when the file exists but cannot be read or parsed, or records a different project
+ *   pair (keys containing "-" can share a file name: a-b -> c and a -> b-c both map to a-b-c)
  */
 export async function readSyncManifest(
   sourceProject: string,
   destProject: string,
   baseDir: string = MIGRATION_DATA_DIR,
 ): Promise<SyncManifest | null> {
+  const path = syncManifestPath(sourceProject, destProject, baseDir);
+  let manifest: SyncManifest;
   try {
-    return JSON.parse(
-      await Deno.readTextFile(syncManifestPath(sourceProject, destProject, baseDir)),
-    ) as SyncManifest;
+    manifest = JSON.parse(await Deno.readTextFile(path)) as SyncManifest;
   } catch (error) {
     if (error instanceof Deno.errors.NotFound) {
       return null;
     }
-    throw error;
+    throw new Error(
+      `Could not read sync manifest ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
+  if (manifest.sourceProject !== sourceProject || manifest.destProject !== destProject) {
+    throw new Error(
+      `Sync manifest ${path} records ${manifest.sourceProject} -> ${manifest.destProject}, ` +
+        `not ${sourceProject} -> ${destProject}; refusing to use its keys`,
+    );
+  }
+  return manifest;
 }
 
 /** Destination keys of the flags a manifest records: the destKey when the flag was renamed, else the source key. */

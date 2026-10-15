@@ -11,9 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `revert_migration.ts`: the flag list for a source now comes from the sync manifest `migrate` wrote for that source and destination, so flags created with a conflict prefix are reverted under their destination key instead of matching another source's flag. Without a manifest, keys that a sibling source merged into the same destination also lists are left in place with a warning rather than guessed. The keep-the-view check for merged destinations uses the same keys (#21)
 
+- `revert_migration.ts`: an unreadable sync manifest, or one that records another project pair, stops the revert instead of falling back to raw source keys; and without a manifest, a sibling source that has neither a manifest nor extracted data stops raw-key deletion and keeps the shared views (#21)
+
 ### Changed
 
-- Sync manifest types and path moved to `src/utils/sync_manifest.ts`, shared by `migrate` and `revert`
+- The sync manifest is now cumulative: a `migrate` run keeps the entries of flags and segments outside its scope (include/exclude filters, `--since`, unselected environments, `migrateSegments: false`) instead of dropping them, so it stays a complete inventory of migrated resources for revert and view linking (#21)
+- Sync manifest types and path moved to `src/utils/sync_manifest.ts`, shared by `migrate` and `revert`; `readSyncManifest` rejects a manifest whose recorded project pair differs from the requested one
 
 ## [3.3.0] - 2026-10-15
 

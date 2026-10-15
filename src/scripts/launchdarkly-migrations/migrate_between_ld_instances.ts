@@ -2496,6 +2496,21 @@ if (usableViews.size > 0) {
 }
 
 
+// The manifest is the inventory revert and view linking use to find migrated copies, so it stays
+// cumulative: entries for flags and segments outside this run's scope (include/exclude filters,
+// --since, unselected environments, migrateSegments: false) are carried over. Resources attempted
+// this run were rewritten above; a failed one stays absent so the next --incremental run retries it.
+if (previousManifest) {
+  const attempted = new Set(flagList.filter((k: string) => !flagsSkippedByDate.has(k)));
+  for (const [key, entry] of Object.entries(previousManifest.flags ?? {})) {
+    if (!attempted.has(key) && !(key in updatedManifestFlags)) updatedManifestFlags[key] = entry;
+  }
+  for (const [envKey, segments] of Object.entries(previousManifest.segments ?? {})) {
+    if (inputArgs.migrateSegments && envkeys.includes(envKey)) continue; // rewritten this run
+    updatedManifestSegments[envKey] = { ...segments, ...(updatedManifestSegments[envKey] ?? {}) };
+  }
+}
+
 // Always write sync manifest so --incremental works on next run
 const manifest: SyncManifest = {
   lastSyncTimestamp: new Date().toISOString(),

@@ -46,7 +46,21 @@ Deno.test("readSyncManifest throws on an unreadable manifest instead of treating
   const dir = await Deno.makeTempDir();
   try {
     await Deno.writeTextFile(syncManifestPath("a", "b", dir), "{not json");
-    await assertRejects(() => readSyncManifest("a", "b", dir), SyntaxError);
+    await assertRejects(() => readSyncManifest("a", "b", dir), Error, "Could not read sync manifest");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("readSyncManifest rejects a manifest that records another project pair", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    // "a-b" -> "c" and "a" -> "b-c" share the file name sync-manifest-a-b-c.json
+    await Deno.writeTextFile(
+      syncManifestPath("a", "b-c", dir),
+      JSON.stringify({ ...manifest, sourceProject: "a-b", destProject: "c" }),
+    );
+    await assertRejects(() => readSyncManifest("a", "b-c", dir), Error, "records a-b -> c, not a -> b-c");
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

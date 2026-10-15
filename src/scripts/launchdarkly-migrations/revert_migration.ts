@@ -298,7 +298,7 @@ const ldAPIPatchRequest = (
 /**
  * Loads flag list from extracted source data
  */
-const loadFlagListFromSourceData = async (sourceProjectKey: string): Promise<string[]> => {
+const loadFlagListFromSourceData = async (sourceProjectKey: string): Promise<string[] | null> => {
   const flagsPath = `./data/launchdarkly-migrations/source/project/${sourceProjectKey}/flags.json`;
   
   try {
@@ -316,47 +316,51 @@ const loadFlagListFromSourceData = async (sourceProjectKey: string): Promise<str
     }
     
     console.log(Colors.yellow(`Warning: Unexpected format in ${flagsPath}`));
-    return [];
+    return null;
   } catch (error) {
     console.log(Colors.yellow(
       `Warning: Could not load source data from ${flagsPath}: ${error}`
     ));
-    console.log(Colors.gray("Falling back to fetching all flags from destination"));
-    return [];
+    return null;
   }
 };
 
 /** Flag keys a source's migration created in the destination, and whether they are actual destination keys. */
 export interface MigratedFlagKeys {
+  /** Source project the keys belong to */
+  project: string;
   keys: string[];
-  /** true: keys come from the sync manifest and are the real destination keys (prefix renames included) */
-  fromManifest: boolean;
+  /**
+   * manifest: real destination keys from the sync manifest (prefix renames included);
+   * extract: raw keys from the extracted source flag list; none: neither is available
+   */
+  source: "manifest" | "extract" | "none";
 }
 
 /**
  * Loads the destination flag keys of one source's migration. The sync manifest migrate writes is
  * authoritative: it records the destination key of every migrated flag, including conflict-prefixed
- * ones. Without a manifest (for example after a dry run only), the extracted source flag list is used.
+ * ones. Only when there is no manifest at all (for example after a dry run only) is the extracted
+ * source flag list used.
+ * @throws Error when a manifest exists but is unreadable or records another project pair: falling
+ *   back to raw keys could select another source's flag
  */
 const loadMigratedFlagKeys = async (
   sourceProjectKey: string,
   destProjectKey: string
 ): Promise<MigratedFlagKeys> => {
   const manifestPath = syncManifestPath(sourceProjectKey, destProjectKey);
-  try {
-    const manifest = await readSyncManifest(sourceProjectKey, destProjectKey);
-    if (manifest) {
-      const keys = manifestDestinationFlagKeys(manifest);
-      console.log(Colors.gray(`  Using sync manifest ${manifestPath} (${keys.length} flag(s), destination keys)`));
-      return { keys, fromManifest: true };
-    }
-    console.log(Colors.gray(`  No sync manifest at ${manifestPath}; using the extracted source flag list`));
-  } catch (error) {
-    console.log(Colors.yellow(
-      `  Warning: could not read ${manifestPath} (${error instanceof Error ? error.message : String(error)}); using the extracted source flag list`
-    ));
+  const manifest = await readSyncManifest(sourceProjectKey, destProjectKey);
+  if (manifest) {
+    const keys = manifestDestinationFlagKeys(manifest);
+    console.log(Colors.gray(`  Using sync manifest ${manifestPath} (${keys.length} flag(s), destination keys)`));
+    return { project: sourceProjectKey, keys, source: "manifest" };
   }
-  return { keys: await loadFlagListFromSourceData(sourceProjectKey), fromManifest: false };
+  console.log(Colors.gray(`  No sync manifest at ${manifestPath}; using the extracted source flag list`));
+  const extracted = await loadFlagListFromSourceData(sourceProjectKey);
+  return extracted
+    ? { project: sourceProjectKey, keys: extracted, source: "extract" }
+    : { project: sourceProjectKey, keys: [], source: "none" };
 };
 
 /**
@@ -370,8 +374,17 @@ export const selectRevertFlagKeys = (
   siblings: MigratedFlagKeys[]
 ): { keys: string[]; ambiguous: string[] } => {
   const unique = [...new Set(own.keys)];
-  if (own.fromManifest || siblings.length === 0) {
+  if (own.source === "manifest" || siblings.length === 0) {
     return { keys: unique, ambiguous: [] };
+  }
+  // A sibling without any inventory could own any of these keys, so raw-key deletion is not safe
+  const unverifiable = siblings.filter(s => s.source === "none").map(s => s.project);
+  if (unverifiable.length > 0) {
+    throw new Error(
+      `Cannot attribute ${own.project}'s flags: no sync manifest for ${own.project}, and no sync manifest or extracted ` +
+      `flags.json for ${unverifiable.join(", ")}, which migrated into the same destination. Extract them, or revert ` +
+      `with --no-use-source-data after checking the flags by hand.`
+    );
   }
   const siblingKeys = new Set(siblings.flatMap(s => s.keys));
   const keys: string[] = [];
@@ -495,7 +508,7 @@ const discoverMigrationFlags = async (
     const own = await loadMigratedFlagKeys(config.sourceProjectKey, config.projectKey);
     // Siblings only matter for raw source keys; manifest keys already are the destination keys
     const siblings: MigratedFlagKeys[] = [];
-    if (!own.fromManifest) {
+    if (own.source !== "manifest") {
       for (const sibling of config.siblingSourceKeys ?? []) {
         siblings.push(await loadMigratedFlagKeys(sibling, config.projectKey));
       }
@@ -1029,10 +1042,13 @@ const revertViews = async (
   // The view-link endpoints are unreliable, so a merged destination's view is kept while
   // flags from its other sources (per their sync manifest, else extracted source data) still exist in the project.
   let otherSourceFlags: Flag[] = [];
+  const unverifiableSiblings: string[] = [];
   if (config.deleteViews && config.siblingSourceKeys?.length) {
     const siblingKeys: string[] = [];
     for (const sibling of config.siblingSourceKeys) {
-      siblingKeys.push(...(await loadMigratedFlagKeys(sibling, config.projectKey)).keys);
+      const inventory = await loadMigratedFlagKeys(sibling, config.projectKey);
+      if (inventory.source === "none") unverifiableSiblings.push(sibling);
+      siblingKeys.push(...inventory.keys);
     }
     const remaining = findRemainingSiblingFlagKeys(
       siblingKeys,
@@ -1071,7 +1087,13 @@ const revertViews = async (
     }
     
     // Delete view if requested
-    if (config.deleteViews && otherSourceFlags.length > 0) {
+    if (config.deleteViews && unverifiableSiblings.length > 0) {
+      // Without an inventory the sibling's flags cannot be checked, so the view has to stay
+      console.log(Colors.yellow(
+        `    ⚠ Keeping view: no sync manifest or extracted flags.json for ${unverifiableSiblings.join(", ")}, ` +
+        `so their flags in this destination cannot be checked`
+      ));
+    } else if (config.deleteViews && otherSourceFlags.length > 0) {
       console.log(Colors.yellow(
         `    ⚠ Keeping view: ${otherSourceFlags.length} flag(s) migrated from other source project(s) remain ` +
         `(e.g. ${otherSourceFlags.slice(0, 3).map(f => f.key).join(", ")})`
