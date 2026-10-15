@@ -157,6 +157,9 @@ const buildExtractSourceArgs = (config: WorkflowConfig): string[] => {
   if (shouldExtractSegments) {
     args = [...args, "--extract-segments=true"];
   }
+  if (config.extraction?.includeArchived) {
+    args = [...args, "--include-archived=true"];
+  }
   if (config.migration?.migrateBigSegments === true) {
     args = [...args, "--extract-segments=true", "--extract-big-segments=true"];
   }

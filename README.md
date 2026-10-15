@@ -841,8 +841,8 @@ Reading flag 1 of 50 : my-feature
 
 **Notes:**
 - Only mapped source environments will be migrated
-- Destination environments must already exist in the target project
-- If a mapped destination environment doesn't exist, migration will abort with error
+- Destination environments must already exist in the target project, unless `migration.createEnvironments: true` (`--create-environments`) is set, in which case missing mapped environments are created from the source settings
+- If a mapped destination environment doesn't exist (and `createEnvironments` is off), migration will abort with error
 - Environment keys are case-sensitive
 - Can be combined with `-e` flag for additional filtering
 
@@ -1152,7 +1152,7 @@ configured in `deno.json` and include all necessary permissions.
 3. **migrate**: Migrates into an existing destination project
    - Requires network access for API calls
    - Requires file system access to read source data
-   - The destination project and its environments must already exist
+   - The destination project and its environments must already exist, unless `migration.createProject` / `migration.createEnvironments` are set
    - Verifies environment compatibility; source environments missing from the destination are skipped
    - Creates segments (including big segments if enabled), flags and views, then links flags and segments to views
    - Can optionally map source maintainer IDs to destination maintainer IDs if the mapping
@@ -1192,6 +1192,7 @@ don't need to specify them manually.
 - `--domain`: (Optional) LaunchDarkly domain, defaults to `app.launchdarkly.com`. Use `app.eu.launchdarkly.com` for EU instances.
 - `--extract-segments`: (Optional) Extract segment data, defaults to false.
 - `--extract-big-segments`: (Optional) Also export big segment members as CSV, defaults to false.
+- `--include-archived`: (Optional) Also list archived flags (the flags API omits them by default), defaults to false. In workflow YAML: `extraction.includeArchived: true`.
 
 ### map_members.ts
 
@@ -1252,6 +1253,8 @@ don't need to specify them manually.
 - `--migrate-big-segments`: (Optional) Import big segment members from the CSVs exported
   during extraction (`--extract-big-segments`).
 - `--dry-run`: (Optional) Preview without writing to the destination or the sync manifest.
+
+**Exit code.** After the summary, `migrate` reconciles the flag keys (and segment keys per mapped environment) in the source data against the destination and exits with code `1` when any flag or segment failed to create or update, or is missing from the destination. The workflow runner stops at that step. Exit code `0` means every resource in scope is present in the destination; use `scripts/verify-segments.ts` or an external field-level comparison for content parity.
 
 ### estimate_time.ts
 

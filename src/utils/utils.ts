@@ -177,20 +177,44 @@ export function logRateLimitStatus(routeCategory: string): void {
  * - Proactively waits when running low on requests
  * - Handles 429 responses with proper backoff
  */
-export async function rateLimitRequest(req: Request, routeCategory: string): Promise<Response> {
+const TRANSIENT_STATUSES = new Set([500, 502, 503, 504]);
+const MAX_TRANSIENT_RETRIES = 3;
+const REQUEST_TIMEOUT_MS = 60_000;
+
+function transientBackoff(attempt: number): number {
+  return 1000 * 2 ** attempt + Math.floor(Math.random() * 250);
+}
+
+/**
+ * Sends a request with proactive rate-limit spacing, 429 handling and a bounded retry
+ * for transient failures (5xx responses, network errors, hung sockets). 429 retries are
+ * unbounded (they wait for the reset); transient retries stop after MAX_TRANSIENT_RETRIES.
+ */
+export async function rateLimitRequest(req: Request, routeCategory: string, attempt = 0): Promise<Response> {
   // Proactively wait based on current rate limit state
   const proactiveDelay = calculateProactiveDelay(routeCategory);
   if (proactiveDelay > MIN_REQUEST_SPACING) {
     console.log(Colors.gray(`  Proactive rate limit wait: ${proactiveDelay}ms for ${routeCategory}`));
   }
   await delay(proactiveDelay);
-  
+
   const rateLimitReq = req.clone();
-  const res = await fetch(req);
-  
+  let res: Response;
+  try {
+    const timeoutReq = new Request(req, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    res = await fetch(timeoutReq);
+  } catch (err) {
+    // DNS/TLS/connection reset/timeout. Retry a few times, then surface the error.
+    if (attempt >= MAX_TRANSIENT_RETRIES) throw err;
+    const wait = transientBackoff(attempt);
+    console.log(Colors.yellow(`Network error for ${req.url} (${err instanceof Error ? err.message : String(err)}); retry ${attempt + 1}/${MAX_TRANSIENT_RETRIES} in ${wait}ms`));
+    await delay(wait);
+    return rateLimitRequest(rateLimitReq, routeCategory, attempt + 1);
+  }
+
   // Update rate limit state from response headers
   updateRateLimitState(routeCategory, res);
-  
+
   // Handle special cases
   if (res.status === 409 && routeCategory === 'projects') {
     console.warn(Colors.yellow(`It looks like this project has already been created in the destination`));
@@ -198,14 +222,24 @@ export async function rateLimitRequest(req: Request, routeCategory: string): Pro
     console.warn(Colors.yellow(`Update your name to a new one, or delete the existing project in the destination instance`));
     Deno.exit(1);
   }
-  
+
   // Handle rate limiting (429)
   if (res.status === 429) {
     const waitTime = calculateRateLimitDelay(res);
     console.log(Colors.yellow(`Rate Limited for ${req.url} - waiting ${waitTime}ms`));
     await delay(waitTime);
     console.log(`Retrying request for ${req.url}`);
-    return rateLimitRequest(rateLimitReq, routeCategory);
+    return rateLimitRequest(rateLimitReq, routeCategory, attempt);
+  }
+
+  // Transient server errors: bounded retry. A retried POST whose first attempt did land
+  // comes back as 409, which every create path already treats as "exists, proceed".
+  if (TRANSIENT_STATUSES.has(res.status) && attempt < MAX_TRANSIENT_RETRIES) {
+    await res.body?.cancel();
+    const wait = transientBackoff(attempt);
+    console.log(Colors.yellow(`HTTP ${res.status} for ${req.url}; retry ${attempt + 1}/${MAX_TRANSIENT_RETRIES} in ${wait}ms`));
+    await delay(wait);
+    return rateLimitRequest(rateLimitReq, routeCategory, attempt + 1);
   }
 
   return res;
