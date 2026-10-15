@@ -66,8 +66,26 @@ function findDownloadHref(links: Record<string, { href: string; type?: string }>
   return (byType ?? byName)?.[1].href;
 }
 
-/** Exports a big segment's members from the source and writes them to `outPath` as CSV. */
+/**
+ * Exports a big segment's members from the source and writes them to `outPath` as CSV.
+ * Never throws: network and file errors are returned as a failed result.
+ */
 export async function exportBigSegmentCsv(
+  apiKey: string,
+  domain: string,
+  projKey: string,
+  envKey: string,
+  segmentKey: string,
+  outPath: string,
+): Promise<BigSegmentResult> {
+  try {
+    return await runExport(apiKey, domain, projKey, envKey, segmentKey, outPath);
+  } catch (error) {
+    return { ok: false, message: `export failed: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+async function runExport(
   apiKey: string,
   domain: string,
   projKey: string,

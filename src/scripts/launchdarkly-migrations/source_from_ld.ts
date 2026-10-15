@@ -208,15 +208,15 @@ if (inputArgs.extractSegments && allEnvironments.length > 0) {
           continue;
         }
         console.log(`  Exporting big segment ${segment.key} (${env.key})...`);
-        const result = await exportBigSegmentCsv(
-          apiKey,
-          domain,
-          inputArgs.projKey,
-          env.key,
-          segment.key,
-          bigSegmentCsvPath(projPath, env.key, segment.key),
-        );
+        const csvPath = bigSegmentCsvPath(projPath, env.key, segment.key);
+        // Remove any earlier export first, so a failure can't leave a stale snapshot to be imported
+        await Deno.remove(csvPath).catch(() => {});
+        const result = await exportBigSegmentCsv(apiKey, domain, inputArgs.projKey, env.key, segment.key, csvPath);
         console.log(`    ${result.ok ? "✓" : "✗"} ${result.message}`);
+        if (!result.ok) {
+          console.log(`  Stopping: big segment export was requested but failed for ${segment.key} (${env.key})`);
+          Deno.exit(1);
+        }
       }
     }
   }
@@ -323,5 +323,6 @@ try {
     console.log(`  View ${v.key}: ${v.flags.length} flag(s), ${v.segments.length} segment(s)`);
   }
 } catch (error) {
+  await Deno.writeTextFile(`${projPath}/views.json`, "[]");
   console.log(`  Warning: could not extract views: ${error instanceof Error ? error.message : String(error)}`);
 }
