@@ -475,7 +475,7 @@ if (inputArgs.envMap) {
       Deno.exit(1);
     }
     envMapping[source] = dest;
-    reverseEnvMapping[dest] = source;
+    if (!Object.hasOwn(reverseEnvMapping, dest)) reverseEnvMapping[dest] = source; // first-wins for many-to-one maps
   }
   
   console.log(Colors.cyan(`\n=== Environment Mapping ===`));
@@ -736,7 +736,7 @@ if (inputArgs.envMap) {
 
   if (missingDestEnvs.length > 0) {
     if (inputArgs.createEnvironments) {
-      await createMissingEnvironments(missingDestEnvs.map((destKey) => reverseEnvMapping[destKey]));
+      await createMissingEnvironments([...new Set(missingDestEnvs)].map((destKey) => reverseEnvMapping[destKey]));
     } else {
       console.log(Colors.red(`Error: The following mapped destination environments don't exist in target project:`));
       missingDestEnvs.forEach(destKey => {
@@ -819,7 +819,15 @@ async function getFlagDataByIndexOrKey(_index: number, key: string): Promise<any
     ?? await getJson(`${flagsDir}/${key}.json`);
 }
 
-// Prerequisite check: every prerequisite of a selected flag must be selected too, or already exist in destination
+// Error tracking shared by the segment and flag phases. Anything added here makes the
+// run exit non-zero after the summary, so partial migrations are never reported as success.
+const segmentsWithErrors: Set<string> = new Set();
+const flagErrorDetails: Map<string, string> = new Map();
+
+// Prerequisite check: with include/exclude filters, every prerequisite of a selected flag must be
+// selected too, or already exist in destination. Without filters the whole project is migrated in
+// prerequisite order, so the check is skipped (an archived prerequisite would otherwise block the run).
+if (inputArgs.includeFlags || inputArgs.excludeFlags) {
 console.log("Checking flag prerequisites...");
 const selectedFlags = new Set(flagList);
 const missingPrereqs = new Map<string, Set<string>>(); // prereq key -> "flag (env)" entries that need it
@@ -851,6 +859,7 @@ if (missingPrereqs.size > 0) {
   console.log(Colors.yellow(`   Continuing because this is a dry run; a real run would stop here.\n`));
 } else {
   console.log(Colors.green(`✓ All prerequisites are included or already exist in destination`));
+}
 }
 
 // Views come from the views API during extraction; flags don't report which views they belong to
@@ -1022,6 +1031,7 @@ async function importBigSegmentMembers(
       console.log(Colors.red(
         `  ✗ Big segment import failed for ${segmentKey} (${resp.status}): ${await resp.text()}`,
       ));
+      segmentsWithErrors.add(`${envKey}/${segmentKey}`);
       return;
     }
 
@@ -1048,6 +1058,7 @@ async function importBigSegmentMembers(
         }
         if (status === "failed" || status === "cancelled" || status === "stopped") {
           console.log(Colors.red(`    ✗ Import ${status}`));
+          segmentsWithErrors.add(`${envKey}/${segmentKey}`);
           break;
         }
       }
@@ -1189,6 +1200,7 @@ if (inputArgs.migrateSegments) {
           }
         } else {
           console.log(Colors.red(`  ✗ Error creating segment ${newSegment.key} (status: ${segmentStatus})`));
+          segmentsWithErrors.add(`${destEnvKey}/${segmentKey}`);
       if (segmentStatus > 201) {
             console.log(Colors.gray(`  Payload: ${JSON.stringify(newSegment)}`));
           }
@@ -1321,6 +1333,7 @@ if (inputArgs.migrateSegments) {
         // (e.g. which patch operation was rejected and why).
         const errBody = await patchRules.text().catch(() => "");
         console.log(Colors.red(`    ✗ ${segmentKey} patch rejected: ${errBody.slice(0, 500)}`));
+        segmentsWithErrors.add(`${destEnvKey}/${segmentKey}`);
         console.log(Colors.gray(
           `    Patch ops: ${sgmtPatches.map((p) => `${p.op} ${p.path} (${
             Array.isArray(p.value) ? p.value.length + " values" : typeof p.value
@@ -1345,6 +1358,7 @@ if (inputArgs.migrateSegments) {
           if (appendResp.status >= 400) {
             const errBody = await appendResp.text().catch(() => "");
             console.log(Colors.red(`    ✗ ${segmentKey} target append rejected: ${errBody.slice(0, 500)}`));
+            segmentsWithErrors.add(`${destEnvKey}/${segmentKey}`);
             break;
           }
         }
@@ -1891,6 +1905,7 @@ const makePatchCall = async (
 
 console.log(Colors.blue("\n🚩 Starting flag migration..."));
 const flagsWithErrors: Set<string> = new Set();
+const flagsSkippedByDate: Set<string> = new Set(); // --since: never attempted, excluded from reconciliation
 const approvalRequestsCreated: Array<{flag: string, env: string, skippedFields: string[]}> = [];
 const skippedFieldsByFlag: Map<string, Set<string>> = new Map();
 
@@ -2003,6 +2018,7 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
     }, 0);
     if (latestModified > 0 && latestModified < sinceDate.getTime()) {
       console.log(Colors.gray(`\t✓ ${flag.key}: not modified since ${inputArgs.since}, skipping`));
+      flagsSkippedByDate.add(flag.key);
       incrementalSkipCountDelta++;
       return { incrementalSkipCountDelta, incrementalEnvSkipCountDelta };
     }
@@ -2184,10 +2200,12 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
           break; // Exit retry loop and proceed to patching
     }
   } else {
-        // Real error
+        // Real error: record it so the summary and exit code reflect the failure
         console.log(Colors.red(`\t✗ Error ${flagResp.status}`));
     const errorText = await flagResp.text();
         console.log(Colors.red(`\t  ${errorText}`));
+        flagsWithErrors.add(flag.key);
+        flagErrorDetails.set(flag.key, `create failed (HTTP ${flagResp.status}): ${errorText.slice(0, 300)}`);
         break; // Exit loop on non-conflict errors
       }
     }
@@ -2352,13 +2370,16 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
     }
   }
 
-  // Track flag version for sync manifest (flag-level lastModified comes from creationDate or _version)
-  updatedManifestFlags[flag.key] = {
-    version: flag._version ?? 0,
-    lastModified: flag.creationDate,
-    environments: flagManifestEnvs,
-    ...(createdFlagKey !== flag.key && { destKey: createdFlagKey }),
-  };
+  // Track flag version for sync manifest (flag-level lastModified comes from creationDate or _version).
+  // A flag whose create failed gets no entry, so the next --incremental run retries it.
+  if (flagCreated) {
+    updatedManifestFlags[flag.key] = {
+      version: flag._version ?? 0,
+      lastModified: flag.creationDate,
+      environments: flagManifestEnvs,
+      ...(createdFlagKey !== flag.key && { destKey: createdFlagKey }),
+    };
+  }
 
   return { incrementalSkipCountDelta, incrementalEnvSkipCountDelta };
 }
@@ -2428,7 +2449,15 @@ const levels = await computeTopologicalLevels(entries);
 for (const level of levels) {
   for (let offset = 0; offset < level.length; offset += CONCURRENCY) {
     const chunk = level.slice(offset, offset + CONCURRENCY);
-    const results = await Promise.all(chunk.map(([idx, key]) => processOneFlag(idx, key)));
+    const results = await Promise.all(chunk.map(([idx, key]) =>
+      processOneFlag(idx, key).catch((err: unknown): FlagProcessResult => {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.log(Colors.red(`\t✗ ${key}: unexpected error: ${msg}`));
+        flagsWithErrors.add(key);
+        flagErrorDetails.set(key, `unexpected error: ${msg.slice(0, 300)}`);
+        return { incrementalSkipCountDelta: 0, incrementalEnvSkipCountDelta: 0 };
+      })
+    ));
     for (const r of results) {
       incrementalSkipCount += r.incrementalSkipCountDelta;
       incrementalEnvSkipCount += r.incrementalEnvSkipCountDelta;
@@ -2596,10 +2625,22 @@ const printErrorsSection = (flagsWithErrors: Set<string>): void => {
   
   flagsWithErrors.forEach((flag) => {
     console.log(Colors.red(`  ✗ ${flag}`));
+    const detail = flagErrorDetails.get(flag);
+    if (detail) console.log(Colors.gray(`      ${detail}`));
   });
   
   console.log(Colors.red(`\n  Total: ${flagsWithErrors.size} flag(s) with errors`));
   console.log(Colors.gray(`  → Review these flags manually`));
+};
+
+/**
+ * Prints segments with errors section
+ */
+const printSegmentErrorsSection = (segmentsWithErrors: Set<string>): void => {
+  if (segmentsWithErrors.size === 0) return;
+  console.log(Colors.red("\n❌ SEGMENTS WITH ERRORS (env/key)"));
+  segmentsWithErrors.forEach((s) => console.log(Colors.red(`  ✗ ${s}`)));
+  console.log(Colors.red(`\n  Total: ${segmentsWithErrors.size} segment(s) with errors`));
 };
 
 /**
@@ -2609,17 +2650,17 @@ const getMigrationStatusMessage = (
   approvalsCount: number,
   errorsCount: number
 ): { message: string; color: (text: string) => string } => {
+  if (errorsCount > 0) {
+    return {
+      message: `✗ Migration finished with ${errorsCount} error(s)${approvalsCount > 0 ? ` and ${approvalsCount} pending approval(s)` : ""} — see the sections above; the process exits with code 1`,
+      color: Colors.red
+    };
+  }
+
   if (approvalsCount > 0) {
     return {
       message: `✓ Migration complete with ${approvalsCount} pending approval(s)`,
       color: Colors.cyan
-    };
-  }
-  
-  if (errorsCount > 0) {
-    return {
-      message: `⚠ Migration complete with ${errorsCount} error(s)`,
-      color: Colors.yellow
     };
   }
   
@@ -2647,18 +2688,113 @@ const printMigrationSummary = (
   printApprovalRequestsSection(approvals);
   printNonMigratedSettingsSection(skippedFields);
   printErrorsSection(flagsWithErrors);
+  printSegmentErrorsSection(segmentsWithErrors);
+  if (reconciliationErrors.length > 0) {
+    console.log(Colors.red("\n❌ RECONCILIATION NOT COMPLETED"));
+    reconciliationErrors.forEach((e) => console.log(Colors.red(`  ✗ ${e}`)));
+    console.log(Colors.gray("  → Destination state was not verified for these resources"));
+  }
   
   console.log(conflictReport);
   
   const { message, color } = getMigrationStatusMessage(
     approvals.length,
-    flagsWithErrors.size
+    flagsWithErrors.size + segmentsWithErrors.size + reconciliationErrors.length
   );
   
   console.log(Colors.blue(`\n${divider}`));
   console.log(color(message));
   console.log(Colors.blue(`${divider}\n`));
 };
+
+// ==================== Reconciliation ====================
+// Cheap safety net: compare the keys we meant to migrate with what the destination now has.
+// Field-level parity is a separate tool's job; this catches silently dropped resources.
+async function listDestinationKeys(path: string): Promise<Set<string>> {
+  const keys = new Set<string>();
+  let next: string | null = path;
+  let fetched = 0;
+  while (next) {
+    const resp = await rateLimitRequest(ldAPIRequest(apiKey, domain, next), 'flags');
+    if (resp.status !== 200) {
+      throw new Error(`HTTP ${resp.status} listing ${next}: ${(await resp.text()).slice(0, 200)}`);
+    }
+    const body = await resp.json();
+    const items: any[] = body.items ?? [];
+    for (const item of items) keys.add(item.key);
+    fetched += items.length;
+    const href: string | undefined = body._links?.next?.href;
+    if (href) {
+      next = href.replace(/^\/api\/v2\//, "");
+    } else if (typeof body.totalCount === "number" && fetched < body.totalCount && items.length > 0) {
+      // Some list endpoints (segments) omit _links.next; page by offset/totalCount instead.
+      const current: string = next;
+      const q = current.indexOf("?");
+      const base: string = q >= 0 ? current.slice(0, q) : current;
+      const params: URLSearchParams = new URLSearchParams(q >= 0 ? current.slice(q + 1) : "");
+      params.set("offset", String(fetched));
+      next = `${base}?${params.toString()}`;
+    } else {
+      next = null;
+    }
+  }
+  return keys;
+}
+
+const reconciliationErrors: string[] = [];
+
+async function reconcileDestination(): Promise<void> {
+  if (inputArgs.dryRun) return;
+  console.log(Colors.blue("\n🔎 RECONCILIATION (source data vs destination)"));
+  const resolved = new Map(conflictTracker.getResolutions().filter((r) => r.resourceType === 'flag').map((r) => [r.originalKey, r.resolvedKey]));
+  // Scope = every flag in the source data that was attempted (or already present), minus flags
+  // --since skipped without attempting. Failed attempts stay in scope so they are reported.
+  const expectedFlags = new Set(flagList.filter((k: string) => !flagsSkippedByDate.has(k)).map((k: string) => resolved.get(k) ?? k));
+  try {
+    const dest = await listDestinationKeys(`flags/${inputArgs.projKeyDest}?summary=true&limit=50&offset=0`);
+    const destArchived = await listDestinationKeys(`flags/${inputArgs.projKeyDest}?summary=true&limit=50&offset=0&filter=state:archived`);
+    for (const k of destArchived) dest.add(k);
+    const missing = [...expectedFlags].filter((k) => !dest.has(k));
+    const extra = [...dest].filter((k) => !expectedFlags.has(k));
+    console.log(`  flags: source ${expectedFlags.size} → destination ${dest.size} (missing ${missing.length}, extra ${extra.length})`);
+    for (const k of missing) {
+      console.log(Colors.red(`    ✗ missing in destination: ${k}`));
+      flagsWithErrors.add(k);
+      if (!flagErrorDetails.has(k)) flagErrorDetails.set(k, "not found in destination after migration");
+    }
+    if (extra.length) console.log(Colors.gray(`    extra in destination (not in source data): ${extra.slice(0, 20).join(', ')}${extra.length > 20 ? ', …' : ''}`));
+  } catch (err) {
+    const msg = `flags: ${err instanceof Error ? err.message : String(err)}`;
+    console.log(Colors.red(`  ✗ Could not reconcile ${msg}`));
+    reconciliationErrors.push(msg);
+  }
+  if (!inputArgs.migrateSegments) return;
+  for (const env of envkeys) {
+    const destEnvKey = inputArgs.envMap && envMapping[env] ? envMapping[env] : env;
+    let sourceKeys: string[] = [];
+    try {
+      const data = JSON.parse(await Deno.readTextFile(`./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/segments/${env}.json`));
+      sourceKeys = (data.items ?? []).map((s: any) => s.key);
+    } catch (_) {
+      continue; // no segment data extracted for this env
+    }
+    try {
+      const dest = await listDestinationKeys(`segments/${inputArgs.projKeyDest}/${destEnvKey}?limit=50&offset=0`);
+      const missing = sourceKeys.filter((k) => !dest.has(k));
+      console.log(`  segments ${env} → ${destEnvKey}: source ${sourceKeys.length} → destination ${dest.size} (missing ${missing.length})`);
+      for (const k of missing) {
+        console.log(Colors.red(`    ✗ missing in destination: ${destEnvKey}/${k}`));
+        segmentsWithErrors.add(`${destEnvKey}/${k}`);
+      }
+    } catch (err) {
+      const msg = `segments ${destEnvKey}: ${err instanceof Error ? err.message : String(err)}`;
+      console.log(Colors.red(`  ✗ Could not reconcile ${msg}`));
+      reconciliationErrors.push(msg);
+    }
+  }
+}
+
+await reconcileDestination();
 
 // Print the migration summary
 printMigrationSummary(
@@ -2667,3 +2803,7 @@ printMigrationSummary(
   flagsWithErrors,
   conflictTracker.getReport()
 );
+
+if (flagsWithErrors.size > 0 || segmentsWithErrors.size > 0 || reconciliationErrors.length > 0) {
+  Deno.exit(1);
+}

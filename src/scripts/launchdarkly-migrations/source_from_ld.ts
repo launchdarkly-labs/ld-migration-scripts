@@ -20,6 +20,7 @@ interface Arguments {
   domain?: string;
   extractSegments?: boolean;
   extractBigSegments?: boolean;
+  includeArchived?: boolean;
 }
 
 const inputArgs: Arguments = yargs(Deno.args)
@@ -32,6 +33,9 @@ const inputArgs: Arguments = yargs(Deno.args)
   .boolean("extract-big-segments")
   .default("extract-big-segments", false)
   .describe("extract-big-segments", "Also export members of larger list-based (big) segments as CSV (default: false)")
+  .boolean("include-archived")
+  .default("include-archived", false)
+  .describe("include-archived", "Also list archived flags (the API omits them by default) (default: false)")
   .parse() as Arguments;
 
 // ensure output directory exists
@@ -221,39 +225,50 @@ if (inputArgs.extractSegments && allEnvironments.length > 0) {
 }
 
 // Get List of all Flags
-const pageSize: number = 5;
-let offset: number = 0;
-let moreFlags: boolean = true;
-const flags: string[] = [];
-let path = `flags/${inputArgs.projKey}?summary=true&limit=${pageSize}&offset=${offset}`;
+// The list endpoint omits archived flags unless asked; a second pass with
+// filter=state:archived picks them up when --include-archived is set.
+const pageSize: number = 50;
 
-while (moreFlags) {
-  console.log(`Building flag list: ${offset} to ${offset + pageSize}`);
+async function listFlagKeys(extraQuery: string, label: string): Promise<string[]> {
+  const keys: string[] = [];
+  let offset: number = 0;
+  let moreFlags: boolean = true;
+  let path = `flags/${inputArgs.projKey}?summary=true&limit=${pageSize}&offset=${offset}${extraQuery}`;
 
-  const flagsResp = await rateLimitRequest(
-    ldAPIRequest(apiKey, domain, path),
-    "flags"
-  );
+  while (moreFlags) {
+    console.log(`Building ${label} flag list: ${offset} to ${offset + pageSize}`);
 
-  if (flagsResp.status > 201) {
-    consoleLogger(flagsResp.status, `Error getting flags: ${flagsResp.status}`);
-    consoleLogger(flagsResp.status, await flagsResp.text());
+    const flagsResp = await rateLimitRequest(
+      ldAPIRequest(apiKey, domain, path),
+      "flags"
+    );
+
+    if (flagsResp.status > 201) {
+      consoleLogger(flagsResp.status, `Error getting flags: ${flagsResp.status}`);
+      consoleLogger(flagsResp.status, await flagsResp.text());
+      console.log("Failed getting Flags");
+      Deno.exit(1);
+    }
+
+    const flagsData = await flagsResp.json();
+
+    keys.push(...flagsData.items.map((flag: any) => flag.key));
+
+    if (flagsData._links.next) {
+      offset += pageSize;
+      path = `flags/${inputArgs.projKey}?summary=true&limit=${pageSize}&offset=${offset}${extraQuery}`;
+    } else {
+      moreFlags = false;
+    }
   }
-  if (flagsResp == null) {
-    console.log("Failed getting Flags");
-    Deno.exit(1);
-  }
+  return keys;
+}
 
-  const flagsData = await flagsResp.json();
-
-  flags.push(...flagsData.items.map((flag: any) => flag.key));
-
-  if (flagsData._links.next) {
-    offset += pageSize;
-    path = `flags/${inputArgs.projKey}?summary=true&limit=${pageSize}&offset=${offset}`;
-  } else {
-    moreFlags = false;
-  }
+const flags: string[] = await listFlagKeys("", "live");
+if (inputArgs.includeArchived) {
+  const archived = await listFlagKeys("&filter=state:archived", "archived");
+  console.log(`Found ${archived.length} archived flags`);
+  flags.push(...archived.filter((k) => !flags.includes(k)));
 }
 
 console.log(`Found ${flags.length} flags`);

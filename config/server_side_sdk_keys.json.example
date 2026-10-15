@@ -1,4 +1,6 @@
 {
   "sdkKeyA": "sdk-xxx-environment-a",
-  "sdkKeyB": "sdk-xxx-environment-b"
+  "sdkKeyB": "sdk-xxx-environment-b",
+  "baseUrlA": "https://sdk.launchdarkly.com",
+  "baseUrlB": "https://sdk.eu.launchdarkly.com"
 }

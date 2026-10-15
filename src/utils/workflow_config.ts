@@ -23,6 +23,7 @@ export interface WorkflowConfig {
   };
   extraction?: {
     includeSegments?: boolean;
+    includeArchived?: boolean;
   };
   memberMapping?: {
     outputFile?: string;
@@ -216,7 +217,7 @@ export function resolveProjectPairs(
     const mapping = resolveProjectKeyMapping(config);
     return resolveProjectKeys(config).map((key) => ({
       source: key,
-      destination: mapping[key] ?? key,
+      destination: Object.hasOwn(mapping, key) ? mapping[key] : key,
     }));
   }
   const [source] = resolveProjectKeys(config);
