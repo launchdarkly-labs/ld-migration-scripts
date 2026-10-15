@@ -14,12 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Multi-project workflows**, `migration.createProject` / `migration.createEnvironments`, and a same-account guard (#19)
 - `source_from_ld.ts --include-archived` (`extraction.includeArchived`): also list archived flags, which the flags API omits by default
 - `diff_payload.ts --base-url-a / --base-url-b` (or `LD_BASE_URL_A/B`, or `baseUrlA/baseUrlB` in the keys file): compare SDK payloads served by two different instances, e.g. US vs EU
-- `migrate` reconciliation: after the run, flag keys and per-environment segment keys in the source data are checked against the destination; missing resources are reported as errors
+- `migrate` reconciliation: after the run, flag keys and per-environment segment keys in the source data (minus flags `--since` skipped) are checked against the destination; missing resources, and a reconciliation that could not be completed, are reported as errors
 
 ### Changed
 
 - `migrate` now exits with code `1` when any flag or segment failed to create/update or is missing from the destination. Failed creates are recorded (with the API response) and listed in the summary, segment failures get their own summary section, and the status line reports errors before pending approvals. A failed flag gets no sync-manifest entry, so the next `--incremental` run retries it.
-- `rateLimitRequest` retries 5xx responses and network errors up to three times with exponential backoff and applies a 60 s per-request timeout; 429 handling is unchanged. A thrown error in one flag no longer aborts the whole concurrent batch.
+- `rateLimitRequest` retries 5xx responses and network errors up to three times with exponential backoff for idempotent requests (GET/HEAD/OPTIONS/PUT/DELETE) and applies a 60 s per-request timeout; POST/PATCH are never replayed (the server may have committed the first attempt), they surface as errors and are repaired by an incremental re-run. 429 handling is unchanged. A thrown error in one flag no longer aborts the whole concurrent batch.
 - The prerequisite check runs only with `includeFlags` / `excludeFlags`, as documented (an archived prerequisite no longer blocks a full-project run)
 - `deno task test` runs with read/write permissions (the workflow config tests use temp directories)
 - Page size for the flag list during extraction raised from 5 to 50

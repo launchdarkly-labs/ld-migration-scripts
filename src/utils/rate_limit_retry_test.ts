@@ -41,3 +41,14 @@ Deno.test("rateLimitRequest passes non-transient errors through untouched", asyn
   });
   assertEquals(calls, 1);
 });
+
+Deno.test("rateLimitRequest does not replay POST or PATCH on transient failures", async () => {
+  const calls = await withFetch([new Response("down", { status: 503 })], async () => {
+    const res = await rateLimitRequest(
+      new Request("https://example.test/api/v2/flags/p", { method: "POST", body: "{}" }),
+      "flags",
+    );
+    assertEquals(res.status, 503);
+  });
+  assertEquals(calls, 1);
+});

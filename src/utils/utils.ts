@@ -180,15 +180,21 @@ export function logRateLimitStatus(routeCategory: string): void {
 const TRANSIENT_STATUSES = new Set([500, 502, 503, 504]);
 const MAX_TRANSIENT_RETRIES = 3;
 const REQUEST_TIMEOUT_MS = 60_000;
+// Only idempotent requests are replayed on transient failures. POST/PATCH are not: the server
+// may have committed the first attempt (a replayed create can become a prefixed duplicate under
+// --on-conflict prefix, segment target appends would double up, an already-applied removal is
+// rejected). Those surface as errors and are repaired by an incremental re-run.
+const RETRY_SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS", "PUT", "DELETE"]);
 
 function transientBackoff(attempt: number): number {
   return 1000 * 2 ** attempt + Math.floor(Math.random() * 250);
 }
 
 /**
- * Sends a request with proactive rate-limit spacing, 429 handling and a bounded retry
- * for transient failures (5xx responses, network errors, hung sockets). 429 retries are
- * unbounded (they wait for the reset); transient retries stop after MAX_TRANSIENT_RETRIES.
+ * Sends a request with proactive rate-limit spacing, 429 handling and, for idempotent
+ * requests, a bounded retry on transient failures (5xx responses, network errors, hung
+ * sockets). 429 retries are unbounded (they wait for the reset); transient retries stop
+ * after MAX_TRANSIENT_RETRIES and never apply to POST/PATCH.
  */
 export async function rateLimitRequest(req: Request, routeCategory: string, attempt = 0): Promise<Response> {
   // Proactively wait based on current rate limit state
@@ -204,8 +210,8 @@ export async function rateLimitRequest(req: Request, routeCategory: string, atte
     const timeoutReq = new Request(req, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     res = await fetch(timeoutReq);
   } catch (err) {
-    // DNS/TLS/connection reset/timeout. Retry a few times, then surface the error.
-    if (attempt >= MAX_TRANSIENT_RETRIES) throw err;
+    // DNS/TLS/connection reset/timeout. Retry idempotent requests a few times, then surface the error.
+    if (attempt >= MAX_TRANSIENT_RETRIES || !RETRY_SAFE_METHODS.has(req.method.toUpperCase())) throw err;
     const wait = transientBackoff(attempt);
     console.log(Colors.yellow(`Network error for ${req.url} (${err instanceof Error ? err.message : String(err)}); retry ${attempt + 1}/${MAX_TRANSIENT_RETRIES} in ${wait}ms`));
     await delay(wait);
@@ -232,9 +238,8 @@ export async function rateLimitRequest(req: Request, routeCategory: string, atte
     return rateLimitRequest(rateLimitReq, routeCategory, attempt);
   }
 
-  // Transient server errors: bounded retry. A retried POST whose first attempt did land
-  // comes back as 409, which every create path already treats as "exists, proceed".
-  if (TRANSIENT_STATUSES.has(res.status) && attempt < MAX_TRANSIENT_RETRIES) {
+  // Transient server errors: bounded retry for idempotent requests only (see RETRY_SAFE_METHODS).
+  if (TRANSIENT_STATUSES.has(res.status) && attempt < MAX_TRANSIENT_RETRIES && RETRY_SAFE_METHODS.has(req.method.toUpperCase())) {
     await res.body?.cancel();
     const wait = transientBackoff(attempt);
     console.log(Colors.yellow(`HTTP ${res.status} for ${req.url}; retry ${attempt + 1}/${MAX_TRANSIENT_RETRIES} in ${wait}ms`));

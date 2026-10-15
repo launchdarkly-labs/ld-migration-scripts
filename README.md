@@ -1254,7 +1254,7 @@ don't need to specify them manually.
   during extraction (`--extract-big-segments`).
 - `--dry-run`: (Optional) Preview without writing to the destination or the sync manifest.
 
-**Exit code.** After the summary, `migrate` reconciles the flag keys (and segment keys per mapped environment) in the source data against the destination and exits with code `1` when any flag or segment failed to create or update, or is missing from the destination. The workflow runner stops at that step. Exit code `0` means every resource in scope is present in the destination; use `scripts/verify-segments.ts` or an external field-level comparison for content parity.
+**Exit code.** After the summary, `migrate` reconciles the flag keys (and segment keys per mapped environment) in the source data against the destination and exits with code `1` when any flag or segment failed to create or update, is missing from the destination, or when the reconciliation itself could not be completed (flags skipped by `--since` are out of scope). The workflow runner stops at that step. Exit code `0` means every resource in scope is present in the destination; use `scripts/verify-segments.ts` or an external field-level comparison for content parity.
 
 ### estimate_time.ts
 
