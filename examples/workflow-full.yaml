@@ -42,7 +42,12 @@ migration:
   
   # Handle conflicts
   conflictPrefix: "us-"
-  
+
+  # Add these tags to migrated flags and segments (optional)
+  # tags:
+  #   - imported-from-us
+  #   - legacy-project
+
   # Organize in view
   targetView: "us-migration-2024"
   
@@ -69,4 +74,3 @@ migration:
 
   # Migrate up to N flags in parallel (optional, default: 10)
   # concurrency: 10
-

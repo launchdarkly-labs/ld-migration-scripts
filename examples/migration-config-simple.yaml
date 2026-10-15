@@ -14,7 +14,11 @@ destination:
 
 migration:
   migrateSegments: true
+
+  # Optional tags added to source tags on migrated flags and segments
+  # tags:
+  #   - imported-from-legacy
+  #   - billing-team
   
   # Preview migration without making changes (optional)
   # dryRun: true
-
