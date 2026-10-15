@@ -666,7 +666,14 @@ migration:                   # Migration settings (also accepts "options:" as al
 
 **Note:** Config files accept either `migration:` or `options:` as the key for migration settings.
 
-`migration.tags` is optional (or `null`). When provided, its values are added to the source tags for migrated flags and segments. Duplicate tags are removed, and tags already present on an existing destination resource are retained. Direct `migrate` CLI usage also accepts comma-separated tags, for example `--tags imported-from-legacy,billing-team`.
+`migration.tags` is optional (or `null`). When provided, its values are added to the source tags for migrated flags and segments, and duplicates are removed. Direct `migrate` CLI usage also accepts comma-separated tags, for example `--tags imported-from-legacy,billing-team`.
+
+How existing destination resources are handled depends on whether `migration.tags` is set:
+
+- **With `migration.tags`**: the tags of an existing destination flag or segment are merged with the source tags and the migration tags, so no tag already on the destination is lost. This also applies to flags and segments an `incremental` run skips as unchanged, at the cost of one read per skipped resource (the migration tags are not part of the source version, so they would otherwise never be added on a rerun).
+- **Without `migration.tags`**: an existing flag that is overwritten gets the source tags, replacing whatever tags it had in the destination. An existing segment keeps its destination tags (segment patches only touch targeting).
+
+A dry run looks up each segment in the destination and previews the tag patch for the ones that already exist.
 
 ### Priority Order
 
@@ -784,6 +791,7 @@ deno task migrate -p SOURCE_PROJECT -d DEST_PROJECT -c "imported-"
 
 **Notes:**
 - Only applies when a conflict (HTTP 409) is detected
+- Without a prefix, a flag that already exists is updated in place: flag-level properties (name, description, tags, variations, lifecycle state, ...) that differ from the source are patched, then its environments. This is the case both when the pre-check finds the flag and when the create itself returns 409 (the flag appeared in between, or the pre-check failed)
 - The prefix is applied to both the resource key and name
 - All related patches and configurations use the prefixed key
 - Use a descriptive prefix to easily identify migrated resources (e.g., `migrated-`, `v2-`, `imported-`)
