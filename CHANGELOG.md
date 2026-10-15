@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `migration.tags` are now reconciled on flags and segments that an `--incremental` run skips as unchanged (the tags are not part of the source version), with one destination read per skipped resource when tags are set (#22)
 - The incremental fast path patches a flag under its manifest destination key, so a flag renamed by a conflict prefix is updated instead of its unprefixed namesake
 - A dry run looks up each segment in the destination and previews conflict handling and the tag patch for segments that already exist, instead of reporting every segment as created (#22)
-- A failed tag patch on an existing segment is now counted as a segment error (exit code `1`), like a failed flag-level update
+- A failed tag reconciliation on an existing segment (read or patch), and a failed lifecycle/tags reconciliation on a flag the incremental fast path skips, are now counted as errors (exit code `1`), like a failed flag-level update
 
 ### Documentation
 

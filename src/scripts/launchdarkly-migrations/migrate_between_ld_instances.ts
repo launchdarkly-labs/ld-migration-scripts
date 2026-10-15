@@ -993,7 +993,9 @@ async function syncExistingSegmentTags(
   const segmentPath = `segments/${inputArgs.projKeyDest}/${destEnvKey}/${destSegmentKey}`;
   const existingResp = await rateLimitRequest(ldAPIRequest(apiKey, domain, segmentPath), "segments");
   if (existingResp.status !== 200) {
-    console.log(Colors.yellow(`    ⚠ Could not read existing tags for segment ${destSegmentKey} (${existingResp.status})`));
+    // Without the current tags the merge cannot run; count it so the run does not report success with tags missing
+    console.log(Colors.red(`    ✗ Could not read existing tags for segment ${destSegmentKey} (${existingResp.status})`));
+    segmentsWithErrors.add(`${destEnvKey}/${destSegmentKey}`);
     return "";
   }
   const existing = await existingResp.json();
@@ -2001,10 +2003,18 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
         // The destination key comes from the manifest, so a flag renamed by a conflict prefix is patched, not its namesake.
         const destKey = prevEntry.destKey ?? flag.key;
         let lifecycleSynced = false;
+        // A failed read or patch here leaves lifecycle/tags unsynced; record it so the summary and exit code say so
+        const reconcileFailed = (detail: string) => {
+          console.log(Colors.red(`\t  ✗ ${destKey}: ${detail}`));
+          flagsWithErrors.add(flag.key);
+          flagErrorDetails.set(flag.key, `lifecycle/tags reconcile failed: ${detail.slice(0, 300)}`);
+        };
         try {
           const destReq = ldAPIRequest(apiKey, domain, `flags/${inputArgs.projKeyDest}/${destKey}`);
           const destResp = await rateLimitRequest(destReq, 'flags');
-          if (destResp.status === 200) {
+          if (destResp.status !== 200) {
+            reconcileFailed(`could not read destination flag (HTTP ${destResp.status})`);
+          } else {
             const destFlag = await destResp.json();
             const changed = (a: any, b: any) => JSON.stringify(a) !== JSON.stringify(b);
             const lifecyclePatches: any[] = [];
@@ -2026,11 +2036,13 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
               if (patchResp.status >= 200 && patchResp.status < 300) {
                 console.log(Colors.gray(`\t  → synced ${lifecyclePatches.map((p) => p.path.replace(/^\//, "")).join(", ")}`));
                 lifecycleSynced = true;
+              } else {
+                reconcileFailed(`patch of ${lifecyclePatches.map((p) => p.path.replace(/^\//, "")).join(", ")} failed (HTTP ${patchResp.status}): ${(await patchResp.text()).slice(0, 200)}`);
               }
             }
           }
-        } catch (_) {
-          // ignore
+        } catch (error) {
+          reconcileFailed(error instanceof Error ? error.message : String(error));
         }
         const ts = flag.creationDate ? `, updated ${flag.creationDate}` : '';
         console.log(Colors.gray(`\t✓ ${flag.key}: unchanged (v${flag._version}${ts})${lifecycleSynced ? ', lifecycle/tags synced' : ''}, skipping`));
