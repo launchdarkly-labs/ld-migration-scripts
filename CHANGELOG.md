@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- The sync manifest is now cumulative: a `migrate` run keeps the entries of flags and segments outside its scope (include/exclude filters, `--since`, unselected environments, `migrateSegments: false`) instead of dropping them, so it stays a complete inventory of migrated resources for revert and view linking (#21)
+- The sync manifest is now cumulative: a `migrate` run keeps the entries of flags and segments outside its scope (include/exclude filters, `--since`, unselected environments, `migrateSegments: false`) or skipped by `--on-conflict skip` instead of dropping them, so it stays a complete inventory of migrated resources for revert and view linking. `migrate` loads the previous manifest before any write and stops when it is unreadable or records another project pair (#21)
 - Sync manifest types and path moved to `src/utils/sync_manifest.ts`, shared by `migrate` and `revert`; `readSyncManifest` rejects a manifest whose recorded project pair differs from the requested one
 
 ## [3.3.0] - 2026-10-15
