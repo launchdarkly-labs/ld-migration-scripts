@@ -740,6 +740,7 @@ export interface View {
   description?: string;
   tags?: string[];
   maintainerId?: string;
+  maintainerTeamKey?: string;
 }
 
 type ViewOperationResult = { success: boolean; error?: string };

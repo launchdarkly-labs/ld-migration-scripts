@@ -32,6 +32,13 @@ migration:
   
   # Include segments
   migrateSegments: true
+
+  # Copy big (larger list-based) segment members via CSV export/import (optional, default: false).
+  # Needs createSegmentExport on the source token (see docs/launchdarkly-migration-role.md).
+  # migrateBigSegments: true
+
+  # Preview without writing to the destination (optional, recommended for the first run)
+  # dryRun: true
   
   # Handle conflicts
   conflictPrefix: "us-"
@@ -49,7 +56,9 @@ migration:
     production: production
     staging: staging
 
-  # Include only these flag keys (optional — omit to migrate all)
+  # Include only these flag keys (optional — omit to migrate all).
+  # Their prerequisite flags must be included too or already exist in the destination;
+  # a real run stops before writing if one is missing, a dry run warns.
   # includeFlags:
   #   - feature-one
   #   - feature-two
