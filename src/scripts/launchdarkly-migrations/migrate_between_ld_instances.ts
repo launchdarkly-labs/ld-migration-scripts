@@ -51,6 +51,7 @@ interface Arguments {
   concurrency?: number;
   createProject?: boolean;
   createEnvironments?: boolean;
+  migrateViews?: boolean;
 }
 
 interface SyncManifestEnv {
@@ -107,6 +108,7 @@ interface MigrationConfig {
     concurrency?: number;
     createProject?: boolean;
     createEnvironments?: boolean;
+    migrateViews?: boolean;
   };
   /** Alias for options — YAML configs may use migration: instead of options: */
   migration?: MigrationConfig["options"];
@@ -305,6 +307,10 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .default("concurrency", 10)
   .alias("create-project", "createProject")
   .alias("create-environments", "createEnvironments")
+  .alias("migrate-views", "migrateViews")
+  .boolean("migrate-views")
+  .default("migrate-views", undefined)
+  .describe("migrate-views", "Recreate the source project's views and link flags and segments to them (default: true; --migrate-views=false to skip)")
   .alias("dest-project-name", "destProjectName")
   .string("dest-project-name")
   .boolean("m")
@@ -372,6 +378,7 @@ if (cliArgs.config) {
       concurrency: cliArgs.concurrency ?? opts?.concurrency ?? 10,
       createProject: cliArgs.createProject ?? opts?.createProject ?? false,
       createEnvironments: cliArgs.createEnvironments ?? opts?.createEnvironments ?? false,
+      migrateViews: cliArgs.migrateViews ?? opts?.migrateViews ?? true,
       config: cliArgs.config
     };
     
@@ -386,6 +393,8 @@ const migrationTags = inputArgs.tags
   ?.split(",")
   .map((tag) => tag.trim())
   .filter(Boolean) ?? [];
+// Views are migrated unless opted out; --target-view links are created either way
+const migrateViews = inputArgs.migrateViews ?? true;
 
 console.log(Colors.blue("\n=== Migration Script Starting ==="));
 console.log(Colors.gray(`Source Project: ${cliArgs.projKeySource || '(from config)'}`));
@@ -407,6 +416,7 @@ console.log(Colors.gray(`  Migrate Big Segment Members: ${inputArgs.migrateBigSe
 console.log(Colors.gray(`  Conflict Prefix: ${inputArgs.conflictPrefix || 'none'}`));
 console.log(Colors.gray(`  On Conflict: ${inputArgs.onConflict || (inputArgs.conflictPrefix ? 'prefix' : 'overwrite')}`));
 console.log(Colors.gray(`  Target View: ${inputArgs.targetView || 'none'}`));
+console.log(Colors.gray(`  Migrate Views: ${migrateViews}`));
 console.log(Colors.gray(`  Tags: ${migrationTags.length > 0 ? migrationTags.join(', ') : 'none'}`));
 console.log(Colors.gray(`  Environments: ${inputArgs.environments || 'all'}`));
 console.log(Colors.gray(`  Env Mapping: ${inputArgs.envMap || 'none'}`));
@@ -862,9 +872,11 @@ if (missingPrereqs.size > 0) {
 }
 }
 
-// Views come from the views API during extraction; flags don't report which views they belong to
-const sourceViews: SourceView[] =
-  (await getJson(`./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/views.json`)) ?? [];
+// Views come from the views API during extraction; flags don't report which views they belong to.
+// With migrateViews off, no source view is recreated or linked; only --target-view applies.
+const sourceViews: SourceView[] = migrateViews
+  ? (await getJson(`./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/views.json`)) ?? []
+  : [];
 const viewsToCreate = new Map<string, View>();
 for (const v of sourceViews) {
   const view: View = { key: v.key, name: v.name };
@@ -888,7 +900,7 @@ if (inputArgs.targetView && !viewsToCreate.has(inputArgs.targetView)) {
 
 const usableViews = new Set<string>(); // views that exist (or would, in a dry run) in the destination
 if (viewsToCreate.size === 0) {
-  console.log("No views found in extracted source data.");
+  console.log(migrateViews ? "No views found in extracted source data." : "Views are not migrated (migrateViews: false).");
 }
 for (const view of viewsToCreate.values()) {
   if (await checkViewExists(apiKey, domain, inputArgs.projKeyDest, view.key)) {
@@ -1497,6 +1509,9 @@ const convertPatchToSemanticInstruction = (
     case 'on':
       return { instruction: convertOnOffInstruction(patch.value), shouldSkip: false };
     case 'offVariation':
+      // Semantic patches have no instruction that clears the off variation (the source serves the SDK
+      // fallback while off); report it as skipped so it shows up under the approval's skipped fields
+      if (patch.op === 'remove') return { instruction: null, shouldSkip: true };
       return { instruction: convertOffVariationInstruction(patch.value, getVariationId), shouldSkip: false };
     case 'fallthrough':
       return { instruction: convertFallthroughInstruction(patch.value, getVariationId), shouldSkip: false };
@@ -2145,7 +2160,7 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
       }
       
       // Add source flag's view associations (if not already added)
-      if (flag.viewKeys && Array.isArray(flag.viewKeys)) {
+      if (migrateViews && flag.viewKeys && Array.isArray(flag.viewKeys)) {
         flag.viewKeys.forEach((viewKey: string) => {
           if (!viewKeys.includes(viewKey)) {
             viewKeys.push(viewKey);
