@@ -41,8 +41,10 @@ export async function getAccountId(
 }
 
 /**
- * Throws when source and destination tokens belong to the same account and any pair
- * migrates a project onto the same key. Makes no API calls when the domains differ.
+ * Throws when source and destination tokens belong to the same account and any pair's
+ * destination key is also a source key: its own (a -> a) or another listed source's
+ * (a -> b while b -> c), which would write into a project before or after it is extracted.
+ * Makes no API calls when the domains differ or no destination is a source key.
  * A failed account lookup only warns, so tokens without caller-identity access still run.
  */
 export async function assertNotSelfMigration(
@@ -56,8 +58,9 @@ export async function assertNotSelfMigration(
   if (source !== dest) {
     return;
   }
-  const sameKeyPairs = pairs.filter((p) => p.source === p.destination);
-  if (sameKeyPairs.length === 0) {
+  const sourceKeys = new Set(pairs.map((p) => p.source));
+  const overlapping = pairs.filter((p) => sourceKeys.has(p.destination));
+  if (overlapping.length === 0) {
     return;
   }
 
@@ -85,11 +88,13 @@ export async function assertNotSelfMigration(
   }
 
   if (sourceAccount === destAccount) {
-    const list = sameKeyPairs.map((p) => p.source).join(", ");
+    const list = overlapping
+      .map((p) => (p.source === p.destination ? p.source : `${p.source} -> ${p.destination}`))
+      .join(", ");
     throw new Error(
       `Source and destination tokens belong to the same account (${sourceAccount}) on ${source}, ` +
         `so migrating ${list} would write into the source project(s). ` +
-        `Use a destination token for a different account, or map these projects to new keys.`,
+        `Use a destination token for a different account, or map these projects to keys that are not also source keys.`,
     );
   }
 }
