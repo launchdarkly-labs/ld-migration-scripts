@@ -54,3 +54,20 @@ Deno.test("extractViews stops at totalCount when it is present", async () => {
   });
   assertEquals(calls.filter((c) => c.includes("/linked/flags")).length, 1);
 });
+
+Deno.test("extractViews follows a short page that advertises a next link, continuing at the returned count", async () => {
+  const calls = await withViewsApi({
+    "/api/v2/projects/p/views": () => ({ items: [{ key: "v1", name: "View 1" }] }),
+    // 20 + 10 items, no totalCount; the first page is short but has a next link, so paging continues at offset 20
+    "/api/v2/projects/p/views/v1/linked/flags": (offset) =>
+      offset === 0
+        ? { items: flagItems(0, 20), _links: { next: { href: "/api/v2/projects/p/views/v1/linked/flags?limit=50&offset=20" } } }
+        : { items: offset === 20 ? flagItems(20, 10) : [] },
+    "/api/v2/projects/p/views/v1/linked/segments": () => ({ items: [] }),
+  }, async () => {
+    const [view] = await extractViews("token", "app.launchdarkly.com", "p");
+    assertEquals(view.flags.length, 30);
+    assertEquals(view.flags[29], "flag-29");
+  });
+  assertEquals(calls.filter((c) => c.includes("/linked/flags")).map((c) => c.split("offset=")[1]), ["0", "20"]);
+});

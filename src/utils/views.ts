@@ -27,7 +27,9 @@ export interface SourceView {
 
 async function getAllPages(apiKey: string, domain: string, path: string): Promise<any[]> {
   const items: any[] = [];
-  for (let offset = 0; ; offset += PAGE_SIZE) {
+  // The offset advances by the number of items actually returned, so a short page that still has a
+  // next link (e.g. 20 of 30) continues at 20 and not at PAGE_SIZE
+  for (let offset = 0; ; offset = items.length) {
     const sep = path.includes("?") ? "&" : "?";
     const resp = await rateLimitRequest(
       ldAPIRequest(apiKey, domain, `${path}${sep}limit=${PAGE_SIZE}&offset=${offset}`, true),

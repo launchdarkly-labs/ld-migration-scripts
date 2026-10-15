@@ -25,6 +25,8 @@ import { extractViews } from "../src/utils/views.ts";
 const USAGE = "Usage: verify-segments.ts <sourceProj> <destProj> [keyPrefix] [--source-domain d] [--dest-domain d] [--env-map src:dest,...]";
 const argv = yargs(Deno.args)
   .usage(USAGE)
+  // Project keys and prefixes are identifiers: "1e3" must stay "1e3", not become 1000
+  .parserConfiguration({ "parse-positional-numbers": false, "parse-numbers": false })
   .string("source-domain")
   .describe("source-domain", "Source LaunchDarkly domain (default: app.launchdarkly.com)")
   .string("dest-domain")
