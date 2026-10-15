@@ -389,6 +389,10 @@ const loadFlagKeys = async (
   return extractKeys(data);
 };
 
+/**
+ * Source environment keys that have extracted segments, in the order migrate processes them
+ * (project.json order, which decides which duplicate write gets the prefix); sorted when project.json is absent.
+ */
 const listSegmentEnvs = async (
   baseDir: string,
   projectKey: string,
@@ -405,7 +409,26 @@ const listSegmentEnvs = async (
       throw error;
     }
   }
-  return envs.sort();
+  const project = await readJsonFile(`${baseDir}/${projectKey}/project.json`) as
+    | { environments?: { items?: Array<{ key?: unknown }> } }
+    | undefined;
+  const order = new Map(
+    (project?.environments?.items ?? [])
+      .map((e) => e.key)
+      .filter((k): k is string => typeof k === "string")
+      .map((k, i) => [k, i] as const),
+  );
+  const rank = (env: string) => order.get(env) ?? order.size;
+  return envs.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+};
+
+/** Own-property lookup: an environment key such as "constructor" must not resolve to an inherited member. */
+const ownList = (record: Record<string, string[]>, key: string): string[] =>
+  Object.hasOwn(record, key) ? record[key] : [];
+
+/** Own-property write: an environment key such as "__proto__" must become a data property, not set the prototype. */
+const setOwn = (record: Record<string, string[]>, key: string, value: string[]): void => {
+  Object.defineProperty(record, key, { value, enumerable: true, writable: true, configurable: true });
 };
 
 const selectFlagKeys = (keys: string[], selection: MergeSelection): string[] => {
@@ -452,15 +475,11 @@ export async function loadMergeKeys(
       );
       // Keep duplicates: a segment in two source environments mapped to one destination environment is
       // written twice, and the second write collides with the first
-      segments[destEnv] = [...ownList(segments, destEnv), ...keys];
+      setOwn(segments, destEnv, [...ownList(segments, destEnv), ...keys]);
     }
   }
   return { flags, segments };
 }
-
-/** Own-property lookup: an environment key such as "constructor" must not resolve to an inherited member. */
-const ownList = (record: Record<string, string[]>, key: string): string[] =>
-  Object.hasOwn(record, key) ? record[key] : [];
 
 const perEnvironment = (
   current: MergeKeys,
@@ -470,7 +489,7 @@ const perEnvironment = (
   const segments: Record<string, string[]> = {};
   for (const [env, keys] of Object.entries(current.segments)) {
     const found = pick(keys, earlier.map((e) => ownList(e.segments, env)));
-    if (found.length > 0) segments[env] = found;
+    if (found.length > 0) setOwn(segments, env, found);
   }
   return { flags: pick(current.flags, earlier.map((e) => e.flags)), segments };
 };

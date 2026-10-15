@@ -395,9 +395,16 @@ const writeSource = async (
   key: string,
   flags: unknown,
   segments: Record<string, string[]> = {},
+  envOrder?: string[],
 ) => {
   await Deno.mkdir(`${baseDir}/${key}/segments`, { recursive: true });
   await Deno.writeTextFile(`${baseDir}/${key}/flags.json`, JSON.stringify(flags));
+  if (envOrder) {
+    await Deno.writeTextFile(
+      `${baseDir}/${key}/project.json`,
+      JSON.stringify({ key, environments: { items: envOrder.map((k) => ({ key: k })) } }),
+    );
+  }
   for (const [env, keys] of Object.entries(segments)) {
     await Deno.writeTextFile(
       `${baseDir}/${key}/segments/${env}.json`,
@@ -615,6 +622,42 @@ Deno.test("loadMergeKeys keeps duplicate segment writes and tolerates prototype-
       computeMergeCollisions(keys([], { constructor: ["c-seg"] }), [keys([], { production: ["x"] })]),
       { flags: [], segments: {} },
     );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("loadMergeKeys replays segment writes in project.json environment order", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    // migrate processes z before a, so the writes into "production" are s, s (-> p-s), p-s (-> p-p-s)
+    await writeSource(dir, "a", [], { z: ["s"], a: ["s", "p-s"] }, ["z", "a"]);
+    const loaded = await loadMergeKeys("a", dir, { environmentMapping: { z: "production", a: "production" } });
+    assertEquals(loaded.segments.production, ["s", "s", "p-s"]);
+    // A later source's "p-s" collides with the replayed "p-s", and its retry "p-p-s" is taken too
+    assertEquals(
+      simulatePrefixedMerge(keys([], { production: ["p-s"] }), [loaded], "p-").unresolvable,
+      { flags: [], segments: { production: ["p-s"] } },
+    );
+    // Without project.json the environments fall back to sorted order
+    await writeSource(dir, "b", [], { z: ["s"], a: ["s", "p-s"] });
+    assertEquals((await loadMergeKeys("b", dir, { environmentMapping: { z: "production", a: "production" } })).segments.production, ["s", "p-s", "s"]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("a destination environment named __proto__ is kept as an own entry", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    await writeSource(dir, "a", [], { prod: ["seg"] });
+    const loaded = await loadMergeKeys("a", dir, { environmentMapping: { prod: "__proto__" } });
+    assertEquals(Object.hasOwn(loaded.segments, "__proto__"), true);
+    assertEquals(Object.getPrototypeOf(loaded.segments), Object.prototype);
+    assertEquals(loaded.segments["__proto__"], ["seg"]);
+    const collisions = computeMergeCollisions(loaded, [loaded]);
+    assertEquals(hasMergeCollisions(collisions), true);
+    assertEquals(collisions.segments["__proto__"], ["seg"]);
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
