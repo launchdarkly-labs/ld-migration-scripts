@@ -1,0 +1,126 @@
+[
+  {
+    "effect": "allow",
+    "resources": [
+      "proj/SOURCE_PROJECT_KEY"
+    ],
+    "actions": [
+      "viewProject"
+    ]
+  },
+  {
+    "effect": "allow",
+    "resources": [
+      "proj/SOURCE_PROJECT_KEY:env/*:segment/*"
+    ],
+    "actions": [
+      "createSegmentExport"
+    ]
+  },
+  {
+    "effect": "allow",
+    "resources": [
+      "proj/SOURCE_PROJECT_KEY:view/*"
+    ],
+    "actions": [
+      "viewView"
+    ]
+  },
+  {
+    "effect": "allow",
+    "resources": [
+      "proj/DEST_PROJECT_KEY"
+    ],
+    "actions": [
+      "viewProject"
+    ]
+  },
+  {
+    "effect": "allow",
+    "resources": [
+      "proj/DEST_PROJECT_KEY:env/*:flag/*"
+    ],
+    "actions": [
+      "createFlag",
+      "updateName",
+      "updateOn",
+      "updateDescription",
+      "updateIncludeInSnippet",
+      "updateClientSideFlagAvailability",
+      "updateTemporary",
+      "updateTags",
+      "updateDeprecated",
+      "updatePrerequisites",
+      "updateTargets",
+      "updateRules",
+      "updateFlagRuleDescription",
+      "updateFallthrough",
+      "updateFlagVariations",
+      "updateFlagDefaultVariations",
+      "updateOffVariation",
+      "updateMaintainer",
+      "updateAttachedGoals",
+      "updateExperimentActive",
+      "updateExperimentBaseline",
+      "updateFlagCustomProperties",
+      "updateFlagSalt",
+      "updateTrackEvents",
+      "updateFlagFallthroughTrackEvents",
+      "updateGlobalArchived",
+      "updateExpiringTargets",
+      "updateFeatureWorkflows",
+      "updateScheduledChanges",
+      "updateTriggers",
+      "updateApprovalRequest",
+      "updateFlagLink",
+      "updateFlagCodeReferences",
+      "updateReleasePhaseCompleted",
+      "updateReleasePhaseStatus",
+      "updateFlagConfigMigrationSettings",
+      "updateMeasuredRolloutConfiguration",
+      "updateFallthroughWithMeasuredRollout",
+      "updateRulesWithMeasuredRollout",
+      "createExperiment",
+      "createTriggers",
+      "createApprovalRequest",
+      "createFlagLink",
+      "deleteFlag",
+      "deleteFlagLink",
+      "deleteTriggers",
+      "removeReleasePipeline",
+      "deleteFlagAttachedGoalResults"
+    ]
+  },
+  {
+    "effect": "allow",
+    "resources": [
+      "proj/DEST_PROJECT_KEY:env/*:segment/*"
+    ],
+    "actions": [
+      "createSegment",
+      "updateName",
+      "updateDescription",
+      "updateTags",
+      "updateIncluded",
+      "updateExcluded",
+      "updateRules",
+      "createApprovalRequest",
+      "updateExpiringTargets",
+      "updateScheduledChanges",
+      "deleteSegment"
+    ]
+  },
+  {
+    "effect": "allow",
+    "resources": [
+      "proj/DEST_PROJECT_KEY:view/*"
+    ],
+    "actions": [
+      "viewView",
+      "createView",
+      "updateView",
+      "linkFlagToView",
+      "linkSegmentToView"
+    ]
+  }
+]

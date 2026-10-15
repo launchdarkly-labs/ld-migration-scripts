@@ -31,8 +31,15 @@ deno task workflow:full
 
 **Key feature:** If you don't specify `workflow.steps`, it runs the FULL workflow by default!
 
+**Useful options** (commented out in the file):
+- `dryRun: true`: preview everything without writing to the destination. Recommended for the first run.
+- `migrateBigSegments: true`: also copy larger list-based (big) segments by exporting their members as CSV and importing them into the destination.
+- `includeFlags` / `excludeFlags`: migrate a subset of flags. Prerequisite flags must be included too; a real run stops before writing if one is missing.
+
+Views and their linked flags and segments are always migrated when the token can read them (`viewView`).
+
 ### `workflow-extract-migrate-incremental.yaml`
-Re-export source data then sync only changed flags (incremental migration).
+Re-export source data then sync only changed flags (incremental migration). Big segments with exported members are re-imported on every run.
 
 **Usage:**
 ```bash
@@ -52,6 +59,8 @@ deno task workflow -f examples/workflow-extract-only.yaml
 
 ### `workflow-migrate-only.yaml`
 Run migration with pre-extracted data (skips extract and map steps).
+
+`migrateBigSegments` only works here if the earlier extract also ran with it, so the member CSVs exist.
 
 **Usage:**
 ```bash
@@ -166,6 +175,25 @@ deno task revert -f examples/revert-migration-example.yaml
 - Cleaning up after a failed migration
 - Preparing to re-run a migration with corrected settings
 - Testing migrations in a safe, reversible way
+
+## Custom Role Policy
+
+### `roles/migration-role.json`
+Least-privilege custom role policy for a migration token: read-only on the source project (plus big segment export), writes scoped to the destination project. Replace `SOURCE_PROJECT_KEY` and `DEST_PROJECT_KEY`, then paste into the role's Advanced editor:
+
+```bash
+sed -e 's/SOURCE_PROJECT_KEY/my-source-project/g' -e 's/DEST_PROJECT_KEY/my-dest-project/g' examples/roles/migration-role.json
+```
+
+See [docs/launchdarkly-migration-role.md](../docs/launchdarkly-migration-role.md) for what each statement grants.
+
+## Verifying a Migration
+
+After migrating, compare segments, big segment members and views between the two projects:
+
+```bash
+deno run --allow-net --allow-read scripts/verify-segments.ts my-source-project my-dest-project
+```
 
 ## Flag Import Template Files
 

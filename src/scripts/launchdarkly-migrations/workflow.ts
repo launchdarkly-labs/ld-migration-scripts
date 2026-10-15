@@ -48,6 +48,7 @@ interface WorkflowConfig {
     assignMaintainerIds?: boolean;
     migrateSegments?: boolean;
     tags?: string[] | null;
+    migrateBigSegments?: boolean;
     conflictPrefix?: string;
     onConflict?: string;
     targetView?: string;
@@ -205,6 +206,9 @@ const buildExtractSourceArgs = (config: WorkflowConfig): string[] => {
   if (shouldExtractSegments) {
     args = [...args, "--extract-segments=true"];
   }
+  if (config.migration?.migrateBigSegments === true) {
+    args = [...args, "--extract-segments=true", "--extract-big-segments=true"];
+  }
   
   return args;
 };
@@ -320,6 +324,7 @@ const buildMigrationArgs = (config: WorkflowConfig): string[] => {
 
   args = addBooleanFlag(args, "-m", migration.assignMaintainerIds);
   args = addBooleanFlag(args, "-s=false", migration.migrateSegments === false);
+  args = addBooleanFlag(args, "--migrate-big-segments", migration.migrateBigSegments);
   args = addBooleanFlag(args, "--dry-run", migration.dryRun);
   args = addBooleanFlag(args, "--incremental", migration.incremental);
   args = addOptionalArg(args, "--tags", migration.tags?.length ? migration.tags.join(",") : undefined);

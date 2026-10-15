@@ -23,16 +23,17 @@ Features that are currently supported:
 - Feature flags and their configurations
 - Segments and targeting rules
 - Maintainer mapping across different account instances
-- **Views support**: Automatic extraction and creation of views with flag linkage
+- **Views support**: Views are recreated with their name, description, tags and maintainer, and their linked flags and segments are re-linked
 - **Conflict resolution**: Automatic handling of resource key conflicts with configurable prefixes
 - **Include/exclude flags**: Migrate only specific flags or exclude certain flags from migration
 - **Parallel flag migration**: Migrate multiple flags concurrently for faster migrations
 - **Case-sensitive flag storage**: Flags that differ only by case are stored separately (index-prefixed filenames)
 - **Split (Harness FME) migration**: Full-fidelity import of a Split workspace — targeting rules, segments (standard/rule-based/large), individual targets, traffic types as context kinds, flag dependencies as prerequisites — with a fidelity report (see [docs/SPLIT-MAPPING.md](docs/SPLIT-MAPPING.md))
 - **Context kinds**: Created in the destination from `contextKinds.json` when a source adapter provides them
-- **Big segments**: Created (not skipped) and members loaded via CSV import when the source data includes them
-- **Prerequisites**: Flags migrate in dependency order so prerequisite links land correctly
+- **Big segments**: Created (not skipped) and members loaded via CSV import when the source data includes them. For LaunchDarkly sources, `migrateBigSegments: true` exports the members as CSV during extraction
+- **Prerequisites**: Flags migrate in dependency order so prerequisite links land correctly. With `includeFlags`/`excludeFlags`, a real run stops before writing if a selected flag's prerequisite would be missing
 - **Interactive conflict handling**: `--on-conflict prompt|skip|overwrite|prefix|abort`
+- **Verification**: `scripts/verify-segments.ts` compares segments and views between source and destination after a migration
 
 ## Project Structure
 
@@ -411,13 +412,14 @@ migration:                   # Optional - for migrate step
   assignMaintainerIds: boolean
   migrateSegments: boolean
   tags: string[] | null      # Optional tags added to migrated flags and segments
+  migrateBigSegments: boolean  # Copy big segment members via CSV export/import (default: false)
   conflictPrefix: string
   targetView: string
   environments: string[]
   environmentMapping:
     sourceEnv: destEnv
-  dryRun: boolean           # Preview changes without applying
-  includeFlags: string[]    # Only migrate these flag keys
+  dryRun: boolean           # Preview changes without applying (no destination writes, no sync manifest)
+  includeFlags: string[]    # Only migrate these flag keys (prerequisites must be included too)
   excludeFlags: string[]    # Skip these flag keys
   concurrency: number       # Parallel flag migrations (default: 10)
 
@@ -454,10 +456,13 @@ data/launchdarkly-migrations/source/project/{projectKey}/
 │   ├── 0-my-flag.json    # First flag's data
 │   ├── 1-other-flag.json # Second flag's data
 │   └── ...
+├── views.json            # Views with their linked flags and segments
 └── segments/             # Segment data (only if includeSegments: true)
     ├── environment-1.json
     ├── environment-2.json
-    └── ...
+    ├── ...
+    └── big/              # Big segment member CSVs (only if migrateBigSegments: true)
+        └── environment-1/segment-key.csv
 ```
 
 **Note:** Flag data files use index-prefixed filenames (`0-flag-key.json`, `1-flag-key.json`, ...) to avoid case collisions on case-insensitive filesystems (e.g. macOS) while remaining human-browsable. The migrate script also supports older SHA-based and key-based filenames for backward compatibility.
@@ -473,6 +478,7 @@ By default, segments are **not** extracted unless explicitly needed, preventing 
 - `examples/workflow-full.yaml` - Complete workflow (default behavior)
 - `examples/workflow-extract-only.yaml` - Extract source data only
 - `examples/workflow-migrate-only.yaml` - Migrate with pre-extracted data
+- `examples/workflow-extract-migrate-incremental.yaml` - Re-extract and sync only changes after the first migration
 - `examples/workflow-third-party.yaml` - Third-party flag import
 - `examples/workflow-split.yaml` - Split (Harness FME) → LaunchDarkly migration
 - `examples/workflow-custom-steps.yaml` - Custom step combinations
@@ -565,8 +571,12 @@ destination:
 migration:                   # Migration settings (also accepts "options:" as alias)
   assignMaintainerIds: boolean          # Default: false
   migrateSegments: boolean              # Default: true
+  migrateBigSegments: boolean           # Default: false; needs CSVs from extraction
   conflictPrefix: string                # Optional
   targetView: string                    # Optional
+  includeFlags: string[]                # Optional
+  excludeFlags: string[]                # Optional
+  dryRun: boolean                       # Default: false
   environments: string[]                # Optional, list format
   environmentMapping:                   # Optional, key-value mapping
     sourceEnv: destEnv
@@ -600,33 +610,63 @@ deno task migrate -f config.yaml -c "cli-"
 
 ### Views Support
 
-The migration script automatically handles LaunchDarkly Views (Early Access feature):
+Views are read from the source project's views API during extraction (flags don't report which views they belong to) and recreated in the destination:
 
-- **Automatic extraction**: Discovers all view associations from source flags
-- **View creation**: Creates views in the destination project if they don't exist
-- **View linking**: Preserves view associations when creating flags
-- **Target view**: Optionally link all migrated flags to a specific view
-
-**Usage examples:**
+- **View details**: Name, description, tags and maintainer are copied. Member maintainers are mapped with `assignMaintainerIds`; if the maintainer doesn't exist in the destination, the view is created without one.
+- **Linked flags and segments**: After flags and segments are migrated, they are linked to the same views in the destination. This also covers flags and segments that already existed there. Links honor `includeFlags`/`excludeFlags`, environment mapping and conflict-prefix renames.
+- **Target view**: `-v`/`targetView` additionally links every migrated flag to one view, created if needed.
+- **Dry run**: Reports the views it would create and the links it would add, without creating anything.
 
 ```bash
-# Migrate flags and preserve their view associations
+# Migrate flags and recreate their views
 deno task migrate -p SOURCE_PROJECT -d DEST_PROJECT
 
-# Link all migrated flags to a specific view (in addition to source views)
+# Also link all migrated flags to a specific view
 deno task migrate -p SOURCE_PROJECT -d DEST_PROJECT -v my-target-view
-
-# The script will automatically:
-# 1. Extract view keys from source flags
-# 2. Create missing views in destination
-# 3. Link flags to views during creation
 ```
 
 **Notes:**
-- Views are an Early Access feature in LaunchDarkly
-- If a view already exists in the destination, it will be reused
-- View associations are preserved from the source project
-- The `-v` flag adds an additional view linkage (doesn't replace existing ones)
+- Views are an Enterprise feature in LaunchDarkly.
+- The source token needs `viewView`. Without it the views list silently comes back empty and no views are migrated; extraction prints a warning when it finds none.
+- The destination token needs `createView`, `updateView`, `linkFlagToView` and `linkSegmentToView`. See [docs/launchdarkly-migration-role.md](docs/launchdarkly-migration-role.md).
+- If a view already exists in the destination, it is reused and its details are not changed.
+
+### Big Segments (Larger List-Based Segments)
+
+Big segments are always created in the destination with the same key and context kind. Their members aren't returned by the segments API, so for LaunchDarkly sources they are only copied when you opt in with `migrateBigSegments: true`:
+
+1. **Extract** (`--extract-big-segments`): Each big segment's members are exported to `data/.../segments/big/<env>/<segment>.csv`.
+2. **Migrate** (`--migrate-big-segments`): The members are imported with the big segment CSV importer (`replace`, then `merge` for each further 1M-row chunk). This runs before flags, so flag rules that reference the segment work.
+
+Without `migrateBigSegments`, big segments are created empty with a warning.
+
+**Notes:**
+- Needs `createSegmentExport` on the source and `createSegment`/`updateIncluded` on the destination.
+- Synced segments (fed by an external integration) have no exportable members; they are created empty. Reconnect the integration in the destination.
+- Big segments with exported members are re-imported on every run, including `incremental` runs.
+- Server-side SDKs need a persistent store integration in each destination environment to evaluate big segments.
+
+### Prerequisite Check
+
+Flags are migrated in prerequisite order, so prerequisite links land correctly. In addition, when `includeFlags` or `excludeFlags` is used, the migrate step checks every selected flag's prerequisites in the migrated environments. A prerequisite that is neither selected nor already in the destination is reported with the flag that needs it:
+
+- **Dry run**: Prints a warning and continues.
+- **Real run**: Stops before writing anything, and lists the flag keys to add to `includeFlags`.
+
+### Verifying a Migration
+
+`scripts/verify-segments.ts` compares the source and destination after a migration:
+
+```bash
+deno run --allow-net --allow-read scripts/verify-segments.ts SOURCE_PROJECT DEST_PROJECT [keyPrefix]
+```
+
+- **Segments** (per environment): name, description, tags, included/excluded targets and rules, ignoring IDs, versions and dates.
+- **Big segments**: every key from the extracted CSV is checked for membership in the destination.
+- **Views**: name, description, tags, maintainer (by email) and linked flags and segments.
+- **Percentage rollout rules** in segments are listed separately: the segment salt isn't exposed by the API, so bucketing can't be compared.
+
+It exits non-zero if anything differs. The optional `keyPrefix` limits the check to segments and views whose keys start with it.
 
 ### Conflict Resolution
 
@@ -1025,12 +1065,12 @@ configured in `deno.json` and include all necessary permissions.
    - Creates a mapping file in `data/launchdarkly-migrations/mappings/maintainer_mapping.json`
    - Shows a summary of mapped and unmapped members
 
-3. **migrate**: Creates a new project or migrates into an existing project
+3. **migrate**: Migrates into an existing destination project
    - Requires network access for API calls
    - Requires file system access to read source data
-   - Can create a new project or use an existing one
-   - Verifies environment compatibility when using existing projects
-   - Creates flags, segments, and environments (if creating new project)
+   - The destination project and its environments must already exist
+   - Verifies environment compatibility; source environments missing from the destination are skipped
+   - Creates segments (including big segments if enabled), flags and views, then links flags and segments to views
    - Can optionally map source maintainer IDs to destination maintainer IDs if the mapping
      was done (step 2) maintainers if mapping was done
 
@@ -1066,6 +1106,8 @@ don't need to specify them manually.
 
 - `-p, --projKey`: Source project key
 - `--domain`: (Optional) LaunchDarkly domain, defaults to `app.launchdarkly.com`. Use `app.eu.launchdarkly.com` for EU instances.
+- `--extract-segments`: (Optional) Extract segment data, defaults to false.
+- `--extract-big-segments`: (Optional) Also export big segment members as CSV, defaults to false.
 
 ### map_members.ts
 
@@ -1101,11 +1143,15 @@ don't need to specify them manually.
   can be specified in the config file. CLI arguments override config file values.
 - `--include-flags`: (Optional) Comma-separated list of flag keys to migrate. Only
   these flags will be migrated. Cannot be combined with `--exclude-flags` meaningfully
-  (include is applied first, then exclude).
+  (include is applied first, then exclude). Their prerequisites must be included too
+  or already exist in the destination.
 - `--exclude-flags`: (Optional) Comma-separated list of flag keys to exclude from
   migration. These flags will be skipped.
 - `--concurrency`: (Optional) Max number of flags to migrate in parallel. Defaults
   to 10. Speeds up large migrations while rate limiting still applies.
+- `--migrate-big-segments`: (Optional) Import big segment members from the CSVs exported
+  during extraction (`--extract-big-segments`).
+- `--dry-run`: (Optional) Preview without writing to the destination or the sync manifest.
 
 ### estimate_time.ts
 
@@ -1127,11 +1173,14 @@ don't need to specify them manually.
   using the `map-members` script before migration
 - Environment names and keys must match between source and destination projects
   when migrating to an existing project
-- The destination project can either be new or existing:
-  - For new projects: All environments will be created automatically
-  - For existing projects: Only environments that exist in both projects will be migrated
+- The destination project and its environments must exist before migrating; only
+  environments that exist in both projects are migrated
 - Segment migration can be skipped using the `-s=false` flag if needed
-- Unbounded (big) segments are automatically skipped during migration
+- Big (unbounded) segments are created in the destination; their members are only
+  copied from LaunchDarkly sources when `migrateBigSegments` is enabled
+- Context kinds are only created when a source adapter provides `contextKinds.json`
+  (e.g. Split). LaunchDarkly extraction doesn't write it yet, so context kind display
+  names and settings must be recreated manually
 - The tool uses a fixed API version (20240415) which may need to be updated for
   future LaunchDarkly API changes
 - The tool includes rate limiting to comply with LaunchDarkly API limits. This
@@ -1150,8 +1199,11 @@ don't need to specify them manually.
 
 2. **Access and Permissions**
    - Do you have API access to both source and destination account instances?
-   - Have you created the necessary API keys?
-   - Do you have sufficient access to create projects in the destination account?
+   - Have you created the necessary API keys? A least-privilege custom role is described in
+     [docs/launchdarkly-migration-role.md](docs/launchdarkly-migration-role.md)
+   - Have you created the destination project and its environments?
+   - If you use views or big segments, does the token have the view and segment export
+     permissions?
 
 3. **Maintainer Mapping**
    - Have all the members who are set as maintainers in the source account been
@@ -1174,7 +1226,8 @@ don't need to specify them manually.
   account instance after the migration
 - The tool does not support the migration of experiments or percentage-based
   rollouts while maintaining consistent variation assignment pre- &
-  post-migration
+  post-migration. This also applies to percentage rollout rules in segments: the
+  segment salt isn't exposed by the API, so it can't be copied
 
 ## Flag Import From 3rd Party Sources
 
