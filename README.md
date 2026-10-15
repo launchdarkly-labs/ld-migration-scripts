@@ -1012,7 +1012,7 @@ deno task revert -p DEST_PROJECT -s SOURCE_PROJECT -v "migration-view" --dry-run
 ### What Gets Reverted
 
 The revert process:
-1. **Identifies migrated flags** - Uses source data to know exactly which flags were migrated (smart mode)
+1. **Identifies migrated flags** - Uses the sync manifest written by `migrate` (destination keys, including conflict-prefixed ones), or the extracted source data when there is no manifest, to know exactly which flags were migrated (smart mode)
 2. **Deletes approval requests** - Removes any pending approval requests for migrated flags
 3. **Unlinks from views** - Removes flags from the target view
 4. **Archives flags** - Archives migrated flags before deletion
@@ -1044,7 +1044,7 @@ The `revert:` block applies both in the workflow orchestrator and when running `
 
 **Multiple projects:** When `source.projectKeys` is set, `deno task revert -f <config>` reverts every listed project in order, using its destination key (from `destination.projectKeyMapping`, else the same key). Pass `-p` (and optionally `-s`) to revert only one project; `-s` on its own is ignored when several projects are listed. In the workflow orchestrator, the `revert` step already runs once per project.
 
-**Merged destinations:** Revert removes only the flags that came from each source (using that source's extracted flag list), so other sources' flags in the same destination are untouched. `-p new-project` reverts every source mapped to `new-project`; add `-s njordan-cd-example` to revert just one. With `deleteViews`, a view in a merged destination is kept while flags from its other sources still exist there, and is deleted by the revert that removes the last of them. Flags you created by hand in that view are not detected.
+**Merged destinations:** Revert removes only the flags that came from each source, so other sources' flags in the same destination are untouched. The flag list comes from the sync manifest `migrate` wrote for that source and destination (`data/launchdarkly-migrations/sync-manifest-<source>-<dest>.json`), which records the destination key of every migrated flag, including ones created with a conflict prefix. Without a manifest (for example after a dry run only), the extracted source flag list is used instead; a key that another source merged into the same destination also lists is then left in place with a warning, since it cannot be attributed to one source. `-p new-project` reverts every source mapped to `new-project`; add `-s njordan-cd-example` to revert just one. With `deleteViews`, a view in a merged destination is kept while flags from its other sources (per their manifest, else their extracted list) still exist there, and is deleted by the revert that removes the last of them. Flags you created by hand in that view are not detected.
 
 ### CLI Options
 

@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `revert_migration.ts`: the flag list for a source now comes from the sync manifest `migrate` wrote for that source and destination, so flags created with a conflict prefix are reverted under their destination key instead of matching another source's flag. Without a manifest, keys that a sibling source merged into the same destination also lists are left in place with a warning rather than guessed. The keep-the-view check for merged destinations uses the same keys (#21)
+
+### Changed
+
+- Sync manifest types and path moved to `src/utils/sync_manifest.ts`, shared by `migrate` and `revert`
+
+## [Unreleased]
+
+### Fixed
+
+- `revert_migration.ts`: smart mode takes the flag keys from the sync manifest `migrate` writes (`sync-manifest-<source>-<dest>.json`), so conflict-prefixed flags are reverted under their destination keys instead of matching another source's unprefixed flag. Without a manifest, keys that another source merged into the same destination also lists are left in place with a warning. The keep-the-view check for merged destinations uses the same keys (#21)
+
+### Changed
+
+- Sync manifest types and path moved to `src/utils/sync_manifest.ts`, shared by `migrate` and `revert`
+
 ## [3.3.0] - 2026-10-15
 
 ### Added

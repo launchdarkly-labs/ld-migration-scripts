@@ -16,6 +16,11 @@ import { parse as parseYaml } from "https://deno.land/std@0.224.0/yaml/parse.ts"
 import { ldAPIRequest, ldAPIPostRequest, rateLimitRequest } from "../../utils/utils.ts";
 import { getDestinationApiKey, getSourceApiKey } from "../../utils/api_keys.ts";
 import {
+  manifestDestinationFlagKeys,
+  readSyncManifest,
+  syncManifestPath,
+} from "../../utils/sync_manifest.ts";
+import {
   coerceProjectKey,
   resolveProjectPairs,
   usesProjectKeysList,
@@ -321,6 +326,62 @@ const loadFlagListFromSourceData = async (sourceProjectKey: string): Promise<str
   }
 };
 
+/** Flag keys a source's migration created in the destination, and whether they are actual destination keys. */
+export interface MigratedFlagKeys {
+  keys: string[];
+  /** true: keys come from the sync manifest and are the real destination keys (prefix renames included) */
+  fromManifest: boolean;
+}
+
+/**
+ * Loads the destination flag keys of one source's migration. The sync manifest migrate writes is
+ * authoritative: it records the destination key of every migrated flag, including conflict-prefixed
+ * ones. Without a manifest (for example after a dry run only), the extracted source flag list is used.
+ */
+const loadMigratedFlagKeys = async (
+  sourceProjectKey: string,
+  destProjectKey: string
+): Promise<MigratedFlagKeys> => {
+  const manifestPath = syncManifestPath(sourceProjectKey, destProjectKey);
+  try {
+    const manifest = await readSyncManifest(sourceProjectKey, destProjectKey);
+    if (manifest) {
+      const keys = manifestDestinationFlagKeys(manifest);
+      console.log(Colors.gray(`  Using sync manifest ${manifestPath} (${keys.length} flag(s), destination keys)`));
+      return { keys, fromManifest: true };
+    }
+    console.log(Colors.gray(`  No sync manifest at ${manifestPath}; using the extracted source flag list`));
+  } catch (error) {
+    console.log(Colors.yellow(
+      `  Warning: could not read ${manifestPath} (${error instanceof Error ? error.message : String(error)}); using the extracted source flag list`
+    ));
+  }
+  return { keys: await loadFlagListFromSourceData(sourceProjectKey), fromManifest: false };
+};
+
+/**
+ * Splits a source's flag keys into the ones this revert may remove and the ambiguous ones.
+ * Manifest keys are real destination keys and are all kept. Extracted source keys are not: a key
+ * that another source merged into the same destination also lists may belong to that sibling's
+ * flag (ours may have been created with a conflict prefix), so it is left in place.
+ */
+export const selectRevertFlagKeys = (
+  own: MigratedFlagKeys,
+  siblings: MigratedFlagKeys[]
+): { keys: string[]; ambiguous: string[] } => {
+  const unique = [...new Set(own.keys)];
+  if (own.fromManifest || siblings.length === 0) {
+    return { keys: unique, ambiguous: [] };
+  }
+  const siblingKeys = new Set(siblings.flatMap(s => s.keys));
+  const keys: string[] = [];
+  const ambiguous: string[] = [];
+  for (const key of unique) {
+    (siblingKeys.has(key) ? ambiguous : keys).push(key);
+  }
+  return { keys, ambiguous };
+};
+
 /**
  * Fetches a single flag by key
  * Uses beta API to ensure viewKeys are included
@@ -428,10 +489,25 @@ const discoverMigrationFlags = async (
   domain: string,
   config: RevertConfig
 ): Promise<{ flags: Flag[], stats: { checked: number, identified: number } }> => {
-  // Strategy 1: Use source data for precise flag list (much faster!)
+  // Strategy 1: Use the sync manifest or source data for a precise flag list (much faster!)
   if (config.useSourceData && config.sourceProjectKey) {
-    console.log(Colors.cyan("  Using extracted source data for flag list (smart mode)"));
-    const sourceFlags = await loadFlagListFromSourceData(config.sourceProjectKey);
+    console.log(Colors.cyan("  Using the sync manifest / extracted source data for the flag list (smart mode)"));
+    const own = await loadMigratedFlagKeys(config.sourceProjectKey, config.projectKey);
+    // Siblings only matter for raw source keys; manifest keys already are the destination keys
+    const siblings: MigratedFlagKeys[] = [];
+    if (!own.fromManifest) {
+      for (const sibling of config.siblingSourceKeys ?? []) {
+        siblings.push(await loadMigratedFlagKeys(sibling, config.projectKey));
+      }
+    }
+    const { keys: sourceFlags, ambiguous } = selectRevertFlagKeys(own, siblings);
+    if (ambiguous.length > 0) {
+      console.log(Colors.yellow(
+        `  ⚠ Leaving ${ambiguous.length} flag(s) in place: ${config.siblingSourceKeys!.join(", ")} list the same key(s) and ` +
+        `without a sync manifest for ${config.sourceProjectKey} they cannot be attributed to one source: ${ambiguous.join(", ")}`
+      ));
+      console.log(Colors.gray(`    Revert them by hand, or re-run after a migration has written ${syncManifestPath(config.sourceProjectKey, config.projectKey)}`));
+    }
     
     if (sourceFlags.length > 0) {
       console.log(Colors.gray(`  Found ${sourceFlags.length} flag(s) in source data`));
@@ -469,6 +545,11 @@ const discoverMigrationFlags = async (
       };
     }
     
+    if (ambiguous.length > 0) {
+      // Every key was ambiguous: a full scan would only find marker-less flags, which could be the siblings'
+      console.log(Colors.yellow("  No unambiguous flags to revert"));
+      return { flags: [], stats: { checked: own.keys.length, identified: 0 } };
+    }
     console.log(Colors.yellow("  No source data found, falling back to full scan"));
   }
   
@@ -946,12 +1027,12 @@ const revertViews = async (
   console.log(Colors.gray(`  Found ${targetViews.length} view(s) to process`));
 
   // The view-link endpoints are unreliable, so a merged destination's view is kept while
-  // flags from its other sources (per their extracted source data) still exist in the project.
+  // flags from its other sources (per their sync manifest, else extracted source data) still exist in the project.
   let otherSourceFlags: Flag[] = [];
   if (config.deleteViews && config.siblingSourceKeys?.length) {
     const siblingKeys: string[] = [];
     for (const sibling of config.siblingSourceKeys) {
-      siblingKeys.push(...await loadFlagListFromSourceData(sibling));
+      siblingKeys.push(...(await loadMigratedFlagKeys(sibling, config.projectKey)).keys);
     }
     const remaining = findRemainingSiblingFlagKeys(
       siblingKeys,

@@ -5,6 +5,7 @@ import {
 import {
   buildRevertConfigs,
   findRemainingSiblingFlagKeys,
+  selectRevertFlagKeys,
 } from "./revert_migration.ts";
 import type { WorkflowConfig } from "../../utils/workflow_config.ts";
 
@@ -344,4 +345,77 @@ Deno.test("findRemainingSiblingFlagKeys ignores keys this revert removes", () =>
     [],
   );
   assertEquals(findRemainingSiblingFlagKeys([], new Set(["a1"])), []);
+});
+
+Deno.test("selectRevertFlagKeys keeps every manifest key, even ones a sibling also lists", () => {
+  assertEquals(
+    selectRevertFlagKeys(
+      { keys: ["imported-shared", "only-b", "only-b"], fromManifest: true },
+      [{ keys: ["shared", "only-a"], fromManifest: false }],
+    ),
+    { keys: ["imported-shared", "only-b"], ambiguous: [] },
+  );
+});
+
+Deno.test("selectRevertFlagKeys leaves extracted keys that a sibling also lists in place", () => {
+  assertEquals(
+    selectRevertFlagKeys(
+      { keys: ["shared", "only-b"], fromManifest: false },
+      [{ keys: ["shared", "only-a"], fromManifest: false }, { keys: ["only-c"], fromManifest: true }],
+    ),
+    { keys: ["only-b"], ambiguous: ["shared"] },
+  );
+});
+
+Deno.test("selectRevertFlagKeys treats a sibling's manifest destination key as taken", () => {
+  // Sibling A's manifest says its flag landed as "shared" (no prefix); B's raw "shared" might be A's flag
+  assertEquals(
+    selectRevertFlagKeys(
+      { keys: ["shared"], fromManifest: false },
+      [{ keys: ["shared"], fromManifest: true }],
+    ),
+    { keys: [], ambiguous: ["shared"] },
+  );
+  // A's manifest says its copy is "imported-shared", so B's raw "shared" is B's own
+  assertEquals(
+    selectRevertFlagKeys(
+      { keys: ["shared"], fromManifest: false },
+      [{ keys: ["imported-shared"], fromManifest: true }],
+    ),
+    { keys: ["shared"], ambiguous: [] },
+  );
+});
+
+Deno.test("selectRevertFlagKeys without siblings keeps all extracted keys", () => {
+  assertEquals(
+    selectRevertFlagKeys({ keys: ["a", "b", "a"], fromManifest: false }, []),
+    { keys: ["a", "b"], ambiguous: [] },
+  );
+});
+
+Deno.test("selectRevertFlagKeys keeps every manifest key, even ones a sibling also lists", () => {
+  assertEquals(
+    selectRevertFlagKeys(
+      { keys: ["imported-shared", "only-a", "only-a"], fromManifest: true },
+      [{ keys: ["shared", "only-b"], fromManifest: false }],
+    ),
+    { keys: ["imported-shared", "only-a"], ambiguous: [] },
+  );
+});
+
+Deno.test("selectRevertFlagKeys leaves raw source keys that a sibling also lists in place", () => {
+  assertEquals(
+    selectRevertFlagKeys(
+      { keys: ["shared", "only-a"], fromManifest: false },
+      [{ keys: ["shared", "only-b"], fromManifest: true }, { keys: ["other"], fromManifest: false }],
+    ),
+    { keys: ["only-a"], ambiguous: ["shared"] },
+  );
+});
+
+Deno.test("selectRevertFlagKeys without siblings keeps raw source keys", () => {
+  assertEquals(
+    selectRevertFlagKeys({ keys: ["shared", "only-a"], fromManifest: false }, []),
+    { keys: ["shared", "only-a"], ambiguous: [] },
+  );
 });
