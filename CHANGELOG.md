@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `migration.migrateViews` (`--migrate-views=false`, extraction `--extract-views=false`): opt out of recreating views and linking flags and segments to them; `targetView` still applies (#20)
+- `scripts/verify-segments.ts --source-domain / --dest-domain / --env-map`: verify a cross-instance (US → EU) or environment-mapped migration; only mapped source environments are checked (#20)
+
+### Fixed
+
+- In approval-required environments, the `remove offVariation` patch (source serves the SDK fallback while off) is now listed under the approval's skipped fields instead of being dropped silently; semantic patches have no instruction for it (#20)
+- `views.ts`: paging no longer stops after the first page when the beta views endpoints omit `totalCount` (#20)
+
 ## [3.3.0] - 2026-10-15
 
 ### Added
