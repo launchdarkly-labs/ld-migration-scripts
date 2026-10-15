@@ -605,6 +605,8 @@ projectJson.environments.items.forEach((env: any) => {
   if (env.confirmChanges) newEnv.confirmChanges = env.confirmChanges;
   if (env.secureMode) newEnv.secureMode = env.secureMode;
   if (env.defaultTrackEvents) newEnv.defaultTrackEvents = env.defaultTrackEvents;
+  if (env.requireComments) newEnv.requireComments = env.requireComments;
+  if (env.critical) newEnv.critical = env.critical;
   if (env.tags) newEnv.tags = env.tags;
 
   buildEnv.push(newEnv);
