@@ -29,14 +29,18 @@ async function get(apiKey: string, path: string): Promise<{ status: number; body
   return { status: resp.status, body: resp.status === 200 ? await resp.json() : await resp.text() };
 }
 
-async function listSegments(apiKey: string, proj: string, env: string): Promise<any[]> {
+/** Reads every page of a list endpoint; throws if a page can't be read, so nothing is silently skipped. */
+async function listAll(apiKey: string, path: string): Promise<any[]> {
   const items: any[] = [];
   for (let offset = 0; ; offset += 50) {
-    const { body } = await get(apiKey, `segments/${proj}/${env}?limit=50&offset=${offset}`);
+    const { status, body } = await get(apiKey, `${path}${path.includes("?") ? "&" : "?"}limit=50&offset=${offset}`);
+    if (status !== 200) throw new Error(`GET ${path} (offset ${offset}) failed: HTTP ${status}`);
     items.push(...body.items);
     if (items.length >= body.totalCount || body.items.length === 0) return items;
   }
 }
+
+const listSegments = (apiKey: string, proj: string, env: string) => listAll(apiKey, `segments/${proj}/${env}`);
 
 const sortBy = (arr: any[] = [], f: (x: any) => string) => [...arr].sort((a, b) => f(a).localeCompare(f(b)));
 
@@ -72,11 +76,12 @@ function diff(a: any, b: any, path = ""): string[] {
   return [...keys].flatMap((k) => diff(a[k], b[k], path ? `${path}.${k}` : k));
 }
 
-const { body: project } = await get(sourceKey, `projects/${sourceProj}?expand=environments`);
+// The expanded project response can hold only the first page of environments, so list them directly
+const sourceEnvs = (await listAll(sourceKey, `projects/${sourceProj}/environments`)).map((e: any) => e.key);
 let pass = 0, fail = 0;
 const saltDiffs: string[] = [];
 
-for (const env of project.environments.items.map((e: any) => e.key)) {
+for (const env of sourceEnvs) {
   const segments = (await listSegments(sourceKey, sourceProj, env)).filter((s) => s.key.startsWith(keyPrefix));
   for (const listed of segments) {
     const label = `${env}/${listed.key}`;
@@ -102,7 +107,17 @@ for (const env of project.environments.items.map((e: any) => e.key)) {
           if (m.status !== 200 || m.body.included !== true) missing.push(k);
         }
         if (missing.length) problems.push(`${missing.length}/${keys.length} members missing in destination: ${JSON.stringify(missing)}`);
-        else console.log(`  ${label}: ${keys.length}/${keys.length} big segment members present`);
+        // Per-key checks can't see extra destination members, so also compare member counts
+        const srcCount = src._unboundedMetadata?.includedCount;
+        const dstCount = dst.body._unboundedMetadata?.includedCount;
+        if (srcCount !== undefined && srcCount !== keys.length) {
+          problems.push(`extracted CSV has ${keys.length} members but the source now has ${srcCount}; re-extract`);
+        }
+        if (dstCount === undefined) problems.push("destination member count unavailable");
+        else if (dstCount !== (srcCount ?? keys.length)) {
+          problems.push(`destination has ${dstCount} members, source has ${srcCount ?? keys.length}`);
+        }
+        if (!problems.length) console.log(`  ${label}: ${keys.length}/${keys.length} big segment members present, counts match`);
       }
     }
 
