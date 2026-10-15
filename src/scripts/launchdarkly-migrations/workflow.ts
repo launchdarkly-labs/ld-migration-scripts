@@ -12,7 +12,6 @@ import * as Colors from "https://deno.land/std@0.149.0/fmt/colors.ts";
 import {
   coerceProjectKey,
   computeMergeCollisions,
-  computePrefixedMergeCollisions,
   effectiveConflictPolicy,
   findMergedDestinations,
   hasMergeCollisions,
@@ -24,6 +23,7 @@ import {
   partitionWorkflowSteps,
   type ProjectPair,
   resolveProjectPairs,
+  simulatePrefixedMerge,
   SOURCE_DATA_DIR,
   usesProjectKeyMapping,
   usesProjectKeysList,
@@ -561,13 +561,10 @@ const runMergePreflight = async (
     Deno.exit(1);
   }
   const others = earlierSources.join(", ");
-  const collisions = computeMergeCollisions(current, earlier);
-  if (!hasMergeCollisions(collisions)) {
+  const noCollisions = () =>
     console.log(Colors.gray(
       `Merge check: no migrated flag or segment keys shared with ${others} in ${pair.destination}`,
     ));
-    return;
-  }
 
   const { policy, prefix } = effectiveConflictPolicy(config);
   if (policy === "prefix") {
@@ -575,7 +572,8 @@ const runMergePreflight = async (
       console.log(Colors.red(`Error: migration.onConflict is "prefix" but migration.conflictPrefix is not set`));
       Deno.exit(1);
     }
-    const unresolvable = computePrefixedMergeCollisions(current, earlier, prefix);
+    // Earlier sources hold prefixed copies of their own collisions, so compare against those, not raw keys
+    const { collisions, unresolvable } = simulatePrefixedMerge(current, earlier, prefix);
     if (hasMergeCollisions(unresolvable)) {
       console.log(Colors.red(
         `Error: ${pair.source} shares keys with ${others} in ${pair.destination} that prefix "${prefix}" cannot resolve: ` +
@@ -588,10 +586,20 @@ const runMergePreflight = async (
       ));
       Deno.exit(1);
     }
+    if (!hasMergeCollisions(collisions)) {
+      noCollisions();
+      return;
+    }
     console.log(Colors.yellow(
       `Warning: ${pair.source} shares keys with ${others} in ${pair.destination}; these will be created with prefix "${prefix}":`,
     ));
     printCollisions(collisions, Colors.yellow);
+    return;
+  }
+
+  const collisions = computeMergeCollisions(current, earlier);
+  if (!hasMergeCollisions(collisions)) {
+    noCollisions();
     return;
   }
   if (policy === "skip") {

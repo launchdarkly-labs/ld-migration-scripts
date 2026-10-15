@@ -19,6 +19,7 @@ import {
   resolveProjectKeyMapping,
   resolveProjectKeys,
   resolveProjectPairs,
+  simulatePrefixedMerge,
   usesProjectKeyMapping,
   usesProjectKeysList,
   withProjectKey,
@@ -550,4 +551,71 @@ Deno.test("computePrefixedMergeCollisions: the prefixed key already existing els
   );
   // No collision at all: nothing to resolve
   assertEquals(computePrefixedMergeCollisions(keys(["p-shared"]), [keys(["shared"])], "p-"), { flags: [], segments: {} });
+});
+
+Deno.test("mergeSelectionFromConfig trims entries and mapping keys like the migrate step does", () => {
+  assertEquals(
+    mergeSelectionFromConfig({
+      ...baseConfig(),
+      migration: { includeFlags: [" shared ", ""], environments: [" prod"], environmentMapping: { " prod ": " production " } },
+    }),
+    {
+      includeFlags: ["shared"],
+      excludeFlags: undefined,
+      migrateSegments: undefined,
+      environments: ["prod"],
+      environmentMapping: { prod: "production" },
+    },
+  );
+});
+
+Deno.test("simulatePrefixedMerge counts the prefixed copies earlier sources hold", () => {
+  // B's "x" collided with A's and was written as "p-x"; C's "p-x" collides with that copy and its retry
+  // "p-p-x" collides with A's own "p-p-x"
+  const earlier = [keys(["x", "p-p-x"]), keys(["x"])];
+  assertEquals(computeMergeCollisions(keys(["p-x"]), earlier), { flags: [], segments: {} });
+  assertEquals(simulatePrefixedMerge(keys(["p-x"]), earlier, "p-"), {
+    collisions: { flags: ["p-x"], segments: {} },
+    unresolvable: { flags: ["p-x"], segments: {} },
+  });
+  // Without A's "p-p-x" the retry is free: a collision, but resolvable
+  assertEquals(simulatePrefixedMerge(keys(["p-x"]), [keys(["x"]), keys(["x"])], "p-"), {
+    collisions: { flags: ["p-x"], segments: {} },
+    unresolvable: { flags: [], segments: {} },
+  });
+});
+
+Deno.test("simulatePrefixedMerge counts a segment written twice into one destination environment", () => {
+  // A has "seg" in two source environments mapped to "production": written as "seg" then "p-seg"
+  const earlier = [keys([], { production: ["seg", "seg"] })];
+  assertEquals(
+    simulatePrefixedMerge(keys([], { production: ["seg"] }), earlier, "p-").unresolvable,
+    { flags: [], segments: { production: ["seg"] } },
+  );
+  // The current source's own duplicate collides with itself and is resolved by the prefix
+  assertEquals(simulatePrefixedMerge(keys([], { production: ["seg", "seg"] }), [], "p-"), {
+    collisions: { flags: [], segments: { production: ["seg"] } },
+    unresolvable: { flags: [], segments: {} },
+  });
+});
+
+Deno.test("loadMergeKeys keeps duplicate segment writes and tolerates prototype-named environments", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    await writeSource(dir, "a", ["f"], { prod: ["seg"], stage: ["seg"], constructor: ["c-seg"] });
+    const loaded = await loadMergeKeys("a", dir, {
+      environmentMapping: { prod: "production", stage: "production", constructor: "constructor" },
+    });
+    // Compared piecewise: assertEquals treats an own "constructor" property specially
+    assertEquals(loaded.flags, ["f"]);
+    assertEquals(loaded.segments.production, ["seg", "seg"]);
+    assertEquals(Object.hasOwn(loaded.segments, "constructor"), true);
+    assertEquals(loaded.segments["constructor"], ["c-seg"]);
+    assertEquals(
+      computeMergeCollisions(keys([], { constructor: ["c-seg"] }), [keys([], { production: ["x"] })]),
+      { flags: [], segments: {} },
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });

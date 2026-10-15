@@ -312,13 +312,22 @@ export interface MergeSelection {
 /** The migrate step's resource selection; the workflow passes the same one to every project. */
 export function mergeSelectionFromConfig(config: WorkflowConfig): MergeSelection {
   const m = config.migration ?? {};
-  const mapping = m.environmentMapping;
+  // Same normalization as the migrate step applies to the comma-joined CLI values: trimmed, blanks dropped
+  const list = (values?: unknown[]): string[] | undefined => {
+    const out = (values ?? []).map((v) => String(v).trim()).filter(Boolean);
+    return out.length > 0 ? out : undefined;
+  };
+  const mapping = Object.fromEntries(
+    Object.entries(m.environmentMapping ?? {})
+      .map(([k, v]) => [k.trim(), String(v).trim()])
+      .filter(([k, v]) => k && v),
+  );
   return {
-    includeFlags: m.includeFlags?.length ? m.includeFlags : undefined,
-    excludeFlags: m.excludeFlags?.length ? m.excludeFlags : undefined,
+    includeFlags: list(m.includeFlags),
+    excludeFlags: list(m.excludeFlags),
     migrateSegments: m.migrateSegments,
-    environments: m.environments?.length ? m.environments : undefined,
-    environmentMapping: mapping && Object.keys(mapping).length > 0 ? mapping : undefined,
+    environments: list(m.environments),
+    environmentMapping: Object.keys(mapping).length > 0 ? mapping : undefined,
   };
 }
 
@@ -441,11 +450,17 @@ export async function loadMergeKeys(
       const keys = extractKeys(
         await readJsonFile(`${baseDir}/${source}/segments/${env}.json`),
       );
-      segments[destEnv] = [...new Set([...(segments[destEnv] ?? []), ...keys])];
+      // Keep duplicates: a segment in two source environments mapped to one destination environment is
+      // written twice, and the second write collides with the first
+      segments[destEnv] = [...ownList(segments, destEnv), ...keys];
     }
   }
   return { flags, segments };
 }
+
+/** Own-property lookup: an environment key such as "constructor" must not resolve to an inherited member. */
+const ownList = (record: Record<string, string[]>, key: string): string[] =>
+  Object.hasOwn(record, key) ? record[key] : [];
 
 const perEnvironment = (
   current: MergeKeys,
@@ -454,13 +469,16 @@ const perEnvironment = (
 ): MergeCollisions => {
   const segments: Record<string, string[]> = {};
   for (const [env, keys] of Object.entries(current.segments)) {
-    const found = pick(keys, earlier.map((e) => e.segments[env] ?? []));
+    const found = pick(keys, earlier.map((e) => ownList(e.segments, env)));
     if (found.length > 0) segments[env] = found;
   }
   return { flags: pick(current.flags, earlier.map((e) => e.flags)), segments };
 };
 
-/** Keys of `current` that at least one of `earlier` also has. */
+/**
+ * Keys of `current` that at least one of `earlier` also has: what the migrate step 409s on under
+ * overwrite, skip, prompt and abort, where earlier sources hold their raw keys.
+ */
 export function computeMergeCollisions(
   current: MergeKeys,
   earlier: MergeKeys[],
@@ -471,31 +489,61 @@ export function computeMergeCollisions(
   });
 }
 
+export interface PrefixedMerge {
+  /** Keys of `current` whose first create would 409 and be retried with the prefix */
+  collisions: MergeCollisions;
+  /** Collisions whose prefixed retry would 409 as well, so the migrate step would overwrite that resource */
+  unresolvable: MergeCollisions;
+}
+
 /**
- * Colliding keys of `current` that one conflict prefix cannot resolve, because the prefixed
- * key is taken as well: two or more earlier sources share the key (the second already took
- * the prefix), an earlier source has the prefixed key itself, or `current` does. The migrate
- * step's second create attempt gets another 409 and overwrites that resource.
+ * Replays the earlier sources' writes under `onConflict: prefix` to find the keys they actually hold
+ * in the destination (a key already taken is written as prefix + key, so prefixed copies count), then
+ * checks every write of `current`, in order, against them. Duplicate writes matter: a segment present
+ * in two source environments that map to one destination environment is written twice, the second
+ * time with the prefix. A `current` key whose prefixed form is also one of its own keys is reported as
+ * unresolvable, since which of the two is written first depends on migration order.
  */
+export function simulatePrefixedMerge(
+  current: MergeKeys,
+  earlier: MergeKeys[],
+  prefix: string,
+): PrefixedMerge {
+  const replay = (keys: string[], others: string[][]) => {
+    const taken = new Set<string>();
+    for (const list of others) {
+      for (const k of list) taken.add(taken.has(k) ? prefix + k : k);
+    }
+    const own = new Set(keys);
+    const collisions = new Set<string>();
+    const unresolvable = new Set<string>();
+    for (const k of keys) {
+      if (!taken.has(k)) {
+        taken.add(k);
+        continue;
+      }
+      collisions.add(k);
+      if (taken.has(prefix + k) || own.has(prefix + k)) {
+        unresolvable.add(k);
+      } else {
+        taken.add(prefix + k);
+      }
+    }
+    return { collisions: [...collisions].sort(), unresolvable: [...unresolvable].sort() };
+  };
+  return {
+    collisions: perEnvironment(current, earlier, (k, o) => replay(k, o).collisions),
+    unresolvable: perEnvironment(current, earlier, (k, o) => replay(k, o).unresolvable),
+  };
+}
+
+/** The unresolvable part of simulatePrefixedMerge. */
 export function computePrefixedMergeCollisions(
   current: MergeKeys,
   earlier: MergeKeys[],
   prefix: string,
 ): MergeCollisions {
-  return perEnvironment(current, earlier, (keys, others) => {
-    const own = new Set(keys);
-    const sourcesWithKey = new Map<string, number>();
-    for (const list of others) {
-      for (const k of new Set(list)) {
-        sourcesWithKey.set(k, (sourcesWithKey.get(k) ?? 0) + 1);
-      }
-    }
-    return [...own].filter((k) => {
-      const n = sourcesWithKey.get(k) ?? 0;
-      return n > 0 &&
-        (n >= 2 || sourcesWithKey.has(prefix + k) || own.has(prefix + k));
-    }).sort();
-  });
+  return simulatePrefixedMerge(current, earlier, prefix).unresolvable;
 }
 
 /**
