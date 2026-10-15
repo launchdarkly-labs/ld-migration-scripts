@@ -26,7 +26,7 @@
     "estimate-migration-time": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/estimate_migration_time.ts",
     "import-flags": "deno run --allow-net --allow-read --allow-write src/scripts/third-party-migrations/import_flags_from_external.ts",
     "source-from-split": "deno run --allow-net --allow-read --allow-write --allow-env src/scripts/third-party-migrations/source_from_split.ts",
-    "test": "deno test src/",
+    "test": "deno test --allow-read --allow-write src/",
     "version:show": "./scripts/check-version.sh",
     "version:bump:patch": "./scripts/bump-version.sh patch",
     "version:bump:minor": "./scripts/bump-version.sh minor",

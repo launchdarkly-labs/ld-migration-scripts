@@ -12,11 +12,14 @@ import {
 } from "../../utils/utils.ts";
 import { Semaphore } from "../../utils/semaphore.ts";
 import { getSourceApiKey } from "../../utils/api_keys.ts";
+import { bigSegmentCsvPath, exportBigSegmentCsv, isSyncedSegment } from "../../utils/big_segments.ts";
+import { extractViews } from "../../utils/views.ts";
 
 interface Arguments {
   projKey: string;
   domain?: string;
   extractSegments?: boolean;
+  extractBigSegments?: boolean;
 }
 
 const inputArgs: Arguments = yargs(Deno.args)
@@ -26,6 +29,9 @@ const inputArgs: Arguments = yargs(Deno.args)
   .boolean("extract-segments")
   .default("extract-segments", false)
   .describe("extract-segments", "Whether to extract segment data (default: false)")
+  .boolean("extract-big-segments")
+  .default("extract-big-segments", false)
+  .describe("extract-big-segments", "Also export members of larger list-based (big) segments as CSV (default: false)")
   .parse() as Arguments;
 
 // ensure output directory exists
@@ -190,6 +196,25 @@ if (inputArgs.extractSegments && allEnvironments.length > 0) {
     
     await writeSourceData(`${projPath}/segments`, env.key, finalSegmentData);
     console.log(`  Found ${allSegments.length} segments for environment: ${env.key}`);
+
+    if (inputArgs.extractBigSegments) {
+      for (const segment of allSegments.filter((s) => s.unbounded)) {
+        if (isSyncedSegment(segment)) {
+          console.log(`  Skipping synced segment ${segment.key}: its members come from an external integration, reconnect it in the destination`);
+          continue;
+        }
+        console.log(`  Exporting big segment ${segment.key} (${env.key})...`);
+        const result = await exportBigSegmentCsv(
+          apiKey,
+          domain,
+          inputArgs.projKey,
+          env.key,
+          segment.key,
+          bigSegmentCsvPath(projPath, env.key, segment.key),
+        );
+        console.log(`    ${result.ok ? "✓" : "✗"} ${result.message}`);
+      }
+    }
   }
 } else if (!inputArgs.extractSegments) {
   console.log("\nSkipping segment extraction (disabled in config)");
@@ -269,3 +294,19 @@ await Promise.all(
     await writeSourceData(`${projPath}/flags`, `${index}-${flagKey}`, flagData);
   })
 );
+
+// View Data //
+// Flags don't report their views, so view membership is read from the views API.
+console.log("\nExtracting views...");
+try {
+  const views = await extractViews(apiKey, domain, inputArgs.projKey);
+  await writeSourceData(projPath, "views", views);
+  if (views.length === 0) {
+    console.log("  No views found (if the project uses views, the token needs the viewView action to see them)");
+  }
+  for (const v of views) {
+    console.log(`  View ${v.key}: ${v.flags.length} flag(s), ${v.segments.length} segment(s)`);
+  }
+} catch (error) {
+  console.log(`  Warning: could not extract views: ${error instanceof Error ? error.message : String(error)}`);
+}

@@ -24,6 +24,9 @@ import * as Colors from "https://deno.land/std@0.149.0/fmt/colors.ts";
 import { parse as parseYaml } from "https://deno.land/std@0.224.0/yaml/parse.ts";
 import { getDestinationApiKey } from "../../utils/api_keys.ts";
 import { resolveDestinationProjectName } from "../../utils/workflow_config.ts";
+import { mergeTags } from "../../utils/tags.ts";
+import { bigSegmentCsvPath, readExportedKeys } from "../../utils/big_segments.ts";
+import { linkToView, type SourceView } from "../../utils/views.ts";
 
 interface Arguments {
   projKeySource: string;
@@ -31,7 +34,9 @@ interface Arguments {
   destProjectName?: string;
   assignMaintainerIds: boolean;
   migrateSegments: boolean;
+  migrateBigSegments?: boolean;
   conflictPrefix?: string;
+  tags?: string;
   onConflict?: string;
   targetView?: string;
   environments?: string;
@@ -85,6 +90,8 @@ interface MigrationConfig {
   options?: {
     assignMaintainerIds?: boolean;
     migrateSegments?: boolean;
+    tags?: string[] | null;
+    migrateBigSegments?: boolean;
     conflictPrefix?: string;
     onConflict?: string;
     targetView?: string;
@@ -274,6 +281,7 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .alias("m", "assignMaintainerIds")
   .alias("s", "migrateSegments")
   .alias("c", "conflictPrefix")
+  .string("tags")
   .alias("on-conflict", "onConflict")
   .choices("on-conflict", ["prompt", "skip", "overwrite", "prefix", "abort"])
   .alias("v", "targetView")
@@ -287,6 +295,9 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .alias("include-flags", "includeFlags")
   .alias("exclude-flags", "excludeFlags")
   .alias("concurrency", "concurrency")
+  .alias("migrate-big-segments", "migrateBigSegments")
+  .boolean("migrate-big-segments")
+  .describe("migrate-big-segments", "Import big segment members from CSVs exported during extraction (extract with --extract-big-segments)")
   .number("concurrency")
   .default("concurrency", 10)
   .alias("create-project", "createProject")
@@ -302,6 +313,7 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .default("m", false)
   .default("s", true)
   .describe("c", "Prefix to use when resolving key conflicts (e.g., 'imported-')")
+  .describe("tags", "Comma-separated tags to add to migrated flags and segments")
   .describe("on-conflict", "What to do when a flag/segment key already exists: prompt (interactive), skip, overwrite (default), prefix (requires -c), abort")
   .describe("v", "View key to link all migrated flags to")
   .describe("e", "Comma-separated list of environment keys to migrate (e.g., 'production,staging')")
@@ -339,7 +351,9 @@ if (cliArgs.config) {
       migrateSegments: cliArgs.migrateSegments !== undefined && cliArgs.migrateSegments !== true
         ? cliArgs.migrateSegments
         : opts?.migrateSegments ?? true,
+      migrateBigSegments: cliArgs.migrateBigSegments ?? opts?.migrateBigSegments ?? false,
       conflictPrefix: cliArgs.conflictPrefix || opts?.conflictPrefix,
+      tags: cliArgs.tags ?? (opts?.tags?.length ? opts.tags.join(",") : undefined),
       onConflict: cliArgs.onConflict || opts?.onConflict,
       targetView: cliArgs.targetView || opts?.targetView,
       environments: cliArgs.environments || opts?.environments?.join(','),
@@ -365,6 +379,11 @@ if (cliArgs.config) {
   }
 }
 
+const migrationTags = inputArgs.tags
+  ?.split(",")
+  .map((tag) => tag.trim())
+  .filter(Boolean) ?? [];
+
 console.log(Colors.blue("\n=== Migration Script Starting ==="));
 console.log(Colors.gray(`Source Project: ${cliArgs.projKeySource || '(from config)'}`));
 console.log(Colors.gray(`Destination Project: ${cliArgs.projKeyDest || '(from config)'}`));
@@ -381,9 +400,11 @@ console.log(Colors.gray(`  Source: ${inputArgs.projKeySource}`));
 console.log(Colors.gray(`  Destination: ${inputArgs.projKeyDest}`));
 console.log(Colors.gray(`  Assign Maintainers: ${inputArgs.assignMaintainerIds}`));
 console.log(Colors.gray(`  Migrate Segments: ${inputArgs.migrateSegments}`));
+console.log(Colors.gray(`  Migrate Big Segment Members: ${inputArgs.migrateBigSegments || false}`));
 console.log(Colors.gray(`  Conflict Prefix: ${inputArgs.conflictPrefix || 'none'}`));
 console.log(Colors.gray(`  On Conflict: ${inputArgs.onConflict || (inputArgs.conflictPrefix ? 'prefix' : 'overwrite')}`));
 console.log(Colors.gray(`  Target View: ${inputArgs.targetView || 'none'}`));
+console.log(Colors.gray(`  Tags: ${migrationTags.length > 0 ? migrationTags.join(', ') : 'none'}`));
 console.log(Colors.gray(`  Environments: ${inputArgs.environments || 'all'}`));
 console.log(Colors.gray(`  Env Mapping: ${inputArgs.envMap || 'none'}`));
 console.log(Colors.gray(`  Domain: ${inputArgs.domain || 'app.launchdarkly.com'}`));
@@ -744,9 +765,7 @@ if (inputArgs.envMap) {
 
 // View Management //
 console.log(Colors.cyan("\n=== View Management ==="));
-const allViewKeys = new Set<string>();
 
-// Extract views from flags
 console.log(Colors.blue("\n📋 Loading flag list..."));
 let flagList: Array<string> = await getJson(
   `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/flags.json`,
@@ -757,6 +776,9 @@ if (!flagList) {
   Deno.exit(1);
 }
 console.log(Colors.green(`✓ Loaded ${flagList.length} flags`));
+
+// Flag files are named by their index in the extracted flags.json; capture it before filtering
+const sourceIndexByKey = new Map(flagList.map((k, i) => [k, i]));
 
 // Apply include/exclude flag filters
 if (inputArgs.includeFlags) {
@@ -782,58 +804,104 @@ if (inputArgs.excludeFlags) {
 
 const flagsDir = `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/flags`;
 
-// Try index-prefixed filename first (new format), then pure index, then SHA-based, then plain key (legacy)
-async function getFlagDataByIndexOrKey(index: number, key: string): Promise<any> {
+// Try index-prefixed filename first (new format), then pure index, then SHA-based, then plain key (legacy).
+// The index is the flag's position in the extracted (unfiltered) flags.json, not in the filtered flagList,
+// so include/exclude filters don't make lookups miss or load another flag's file.
+async function getFlagDataByIndexOrKey(_index: number, key: string): Promise<any> {
+  const index = sourceIndexByKey.get(key);
+  if (index === undefined) return await getJson(`${flagsDir}/${key}.json`);
   return await getJson(`${flagsDir}/${index}-${key}.json`)
     ?? await getJson(`${flagsDir}/${index}.json`)
     ?? await getJson(`${flagsDir}/${key}-${await sha256HexUtf8(key)}.json`)
     ?? await getJson(`${flagsDir}/${key}.json`);
 }
 
-console.log("Extracting view associations from source flags...");
-for (const [viewIndex, flagkey] of flagList.entries()) {
-  const flag = await getFlagDataByIndexOrKey(viewIndex, flagkey);
-  if (flag && flag.viewKeys && Array.isArray(flag.viewKeys)) {
-    flag.viewKeys.forEach((viewKey: string) => allViewKeys.add(viewKey));
-  }
-}
-
-// Add target view if specified
-if (inputArgs.targetView) {
-  allViewKeys.add(inputArgs.targetView);
-  console.log(Colors.cyan(`Target view specified: "${inputArgs.targetView}"`));
-}
-
-if (allViewKeys.size > 0) {
-  console.log(`Found ${allViewKeys.size} unique view(s) to create/verify: ${Array.from(allViewKeys).join(', ')}`);
-  
-  // Create views in destination project
-  for (const viewKey of allViewKeys) {
-    console.log(`Checking/creating view: ${viewKey}`);
-    
-    const viewExists = await checkViewExists(apiKey, domain, inputArgs.projKeyDest, viewKey);
-    
-    if (viewExists) {
-      console.log(Colors.green(`  ✓ View "${viewKey}" already exists`));
-    } else {
-      console.log(`  Creating view "${viewKey}"...`);
-      const viewData: View = {
-        key: viewKey,
-        name: viewKey,
-        description: `Migrated from project ${inputArgs.projKeySource}`,
-      };
-      
-      const result = await createView(apiKey, domain, inputArgs.projKeyDest, viewData);
-      
-      if (result.success) {
-        console.log(Colors.green(`  ✓ View "${viewKey}" created successfully`));
-      } else {
-        console.log(Colors.yellow(`  ⚠ Failed to create view "${viewKey}": ${result.error}`));
-      }
+// Prerequisite check: every prerequisite of a selected flag must be selected too, or already exist in destination
+console.log("Checking flag prerequisites...");
+const selectedFlags = new Set(flagList);
+const missingPrereqs = new Map<string, Set<string>>(); // prereq key -> "flag (env)" entries that need it
+for (const flagkey of flagList) {
+  const flag = await getFlagDataByIndexOrKey(0, flagkey) as Record<string, any> | null;
+  for (const env of envkeys) {
+    for (const prereq of flag?.environments?.[env]?.prerequisites ?? []) {
+      if (selectedFlags.has(prereq.key)) continue;
+      if (!missingPrereqs.has(prereq.key)) missingPrereqs.set(prereq.key, new Set());
+      missingPrereqs.get(prereq.key)!.add(`${flagkey} (${env})`);
     }
   }
+}
+for (const prereqKey of [...missingPrereqs.keys()]) {
+  const resp = await rateLimitRequest(
+    ldAPIRequest(apiKey, domain, `flags/${inputArgs.projKeyDest}/${prereqKey}`),
+    "flags",
+  );
+  if (resp.status === 200) missingPrereqs.delete(prereqKey);
+}
+if (missingPrereqs.size > 0) {
+  const color = inputArgs.dryRun ? Colors.yellow : Colors.red;
+  console.log(color(`\n${inputArgs.dryRun ? "⚠️  Warning" : "❌ Error"}: ${missingPrereqs.size} prerequisite flag(s) are not selected for migration and do not exist in "${inputArgs.projKeyDest}":`));
+  for (const [prereqKey, neededBy] of missingPrereqs) {
+    console.log(color(`   • ${prereqKey} — prerequisite of ${[...neededBy].join(", ")}`));
+  }
+  console.log(Colors.yellow(`   Add them to includeFlags (or remove them from excludeFlags): ${[...missingPrereqs.keys()].join(",")}`));
+  if (!inputArgs.dryRun) Deno.exit(1);
+  console.log(Colors.yellow(`   Continuing because this is a dry run; a real run would stop here.\n`));
 } else {
-  console.log("No views found in source flags.");
+  console.log(Colors.green(`✓ All prerequisites are included or already exist in destination`));
+}
+
+// Views come from the views API during extraction; flags don't report which views they belong to
+const sourceViews: SourceView[] =
+  (await getJson(`./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/views.json`)) ?? [];
+const viewsToCreate = new Map<string, View>();
+for (const v of sourceViews) {
+  const view: View = { key: v.key, name: v.name };
+  if (v.description) view.description = v.description;
+  if (v.tags) view.tags = v.tags;
+  if (v.maintainerTeamKey) {
+    view.maintainerTeamKey = v.maintainerTeamKey;
+  } else if (inputArgs.assignMaintainerIds && v.maintainerId && maintainerMapping[v.maintainerId]) {
+    view.maintainerId = maintainerMapping[v.maintainerId]!;
+  }
+  viewsToCreate.set(v.key, view);
+}
+if (inputArgs.targetView && !viewsToCreate.has(inputArgs.targetView)) {
+  console.log(Colors.cyan(`Target view specified: "${inputArgs.targetView}"`));
+  viewsToCreate.set(inputArgs.targetView, {
+    key: inputArgs.targetView,
+    name: inputArgs.targetView,
+    description: `Migrated from project ${inputArgs.projKeySource}`,
+  });
+}
+
+const usableViews = new Set<string>(); // views that exist (or would, in a dry run) in the destination
+if (viewsToCreate.size === 0) {
+  console.log("No views found in extracted source data.");
+}
+for (const view of viewsToCreate.values()) {
+  if (await checkViewExists(apiKey, domain, inputArgs.projKeyDest, view.key)) {
+    console.log(Colors.green(`  ✓ View "${view.key}" already exists`));
+    usableViews.add(view.key);
+    continue;
+  }
+  if (inputArgs.dryRun) {
+    console.log(Colors.gray(`    [DRY RUN] Would create view "${view.key}" (${JSON.stringify(view)})`));
+    usableViews.add(view.key);
+    continue;
+  }
+  let result = await createView(apiKey, domain, inputArgs.projKeyDest, view);
+  if (!result.success && (view.maintainerId || view.maintainerTeamKey)) {
+    // The maintainer may not exist in the destination account; keep the view without one
+    console.log(Colors.yellow(`  ⚠ Creating view "${view.key}" with its maintainer failed (${result.error}); retrying without maintainer`));
+    const { maintainerId: _m, maintainerTeamKey: _t, ...withoutMaintainer } = view;
+    result = await createView(apiKey, domain, inputArgs.projKeyDest, withoutMaintainer);
+  }
+  if (result.success) {
+    console.log(Colors.green(`  ✓ View "${view.key}" created`));
+    usableViews.add(view.key);
+  } else {
+    console.log(Colors.yellow(`  ⚠ Failed to create view "${view.key}": ${result.error}`));
+  }
 }
 
 // ==================== Incremental Sync ====================
@@ -968,11 +1036,12 @@ async function importBigSegmentMembers(
         );
         if (statusResp.status !== 200) break;
         const status = (await statusResp.json()).status;
-        if (status === "completed") {
+        // The API reports "complete" (not "completed") when an import finishes
+        if (status === "complete") {
           console.log(Colors.green(`    ✓ Import completed`));
           break;
         }
-        if (status === "failed" || status === "cancelled") {
+        if (status === "failed" || status === "cancelled" || status === "stopped") {
           console.log(Colors.red(`    ✗ Import ${status}`));
           break;
         }
@@ -1009,6 +1078,21 @@ if (inputArgs.migrateSegments) {
       // external store in the SOURCE LD project have no exportable members —
       // those are created empty with a warning.
       const isBigSegment = segment.unbounded == true;
+      // LD sources: members exported as CSV during extraction (--extract-big-segments)
+      if (isBigSegment && !segment._importKeys && inputArgs.migrateBigSegments) {
+        const csvPath = bigSegmentCsvPath(
+          `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}`,
+          env.key,
+          segment.key,
+        );
+        const csv = await Deno.readTextFile(csvPath).catch(() => null);
+        if (csv === null) {
+          console.log(Colors.yellow(`  ⚠ No exported members for big segment ${segment.key} (${env.key}) at ${csvPath}; extract with migrateBigSegments: true`));
+        } else {
+          segment._importKeys = readExportedKeys(csv);
+          console.log(Colors.gray(`  Big segment ${segment.key} (${env.key}): ${segment._importKeys.length} exported member(s) to import`));
+        }
+      }
       if (isBigSegment && !segment._importKeys?.length) {
         console.log(Colors.yellow(
           `Segment: ${segment.key} in Environment ${env.key} is a big segment (unbounded) with no exported members`,
@@ -1018,8 +1102,9 @@ if (inputArgs.migrateSegments) {
         ));
       }
 
-      // Incremental sync: skip segments that haven't changed since last sync
-      if (inputArgs.incremental && previousManifest) {
+      // Incremental sync: skip segments that haven't changed since last sync.
+      // Big segments with exported members are always re-imported: member changes may not bump the version.
+      if (inputArgs.incremental && previousManifest && !(isBigSegment && segment._importKeys)) {
         const prevSegment = previousManifest.segments?.[env.key]?.[segment.key];
         if (prevSegment && segment.version !== undefined && prevSegment.version === segment.version) {
           console.log(Colors.gray(`    ✓ ${segment.key}: unchanged (v${segment.version}), skipping`));
@@ -1035,6 +1120,7 @@ if (inputArgs.migrateSegments) {
       let segmentName = segment.name;
       let attemptCount = 0;
       let segmentCreated = false;
+      let segmentAlreadyExisted = false;
 
       while (!segmentCreated && attemptCount < 2) {
         attemptCount++;
@@ -1044,7 +1130,8 @@ if (inputArgs.migrateSegments) {
           key: segmentKey,
       };
 
-      if (segment.tags) newSegment.tags = segment.tags;
+      const segmentTags = mergeTags(segment.tags, migrationTags);
+      if (segmentTags.length > 0) newSegment.tags = segmentTags;
       if (segment.description) newSegment.description = segment.description;
       if (isBigSegment) {
         newSegment.unbounded = true;
@@ -1091,6 +1178,7 @@ if (inputArgs.migrateSegments) {
           } else {
             // Overwrite (or second attempt) - segment exists, proceed to update it
             segmentCreated = true;
+            segmentAlreadyExisted = true;
             console.log(Colors.yellow(`  ⚠ Segment "${segmentKey}" already exists, will update rules...`));
             break; // Exit retry loop and proceed to patching
           }
@@ -1100,6 +1188,35 @@ if (inputArgs.migrateSegments) {
             console.log(Colors.gray(`  Payload: ${JSON.stringify(newSegment)}`));
           }
           break; // Exit loop on non-conflict errors
+        }
+      }
+
+      if (segmentCreated && segmentAlreadyExisted && migrationTags.length > 0) {
+        const segmentPath = `segments/${inputArgs.projKeyDest}/${destEnvKey}/${segmentKey}`;
+        const existingSegmentResp = await rateLimitRequest(
+          ldAPIRequest(apiKey, domain, segmentPath),
+          "segments",
+        );
+        if (existingSegmentResp.status === 200) {
+          const existingSegment = await existingSegmentResp.json();
+          const desiredTags = mergeTags(segment.tags, migrationTags, existingSegment.tags);
+          if (JSON.stringify(desiredTags) !== JSON.stringify(existingSegment.tags ?? [])) {
+            const tagResp = await dryRunAwarePatch(
+              inputArgs.dryRun || false,
+              apiKey,
+              domain,
+              segmentPath,
+              [buildPatch("tags", "replace", desiredTags)],
+              false,
+              "segments",
+              `environment: ${destEnvKey}`,
+            );
+            if (tagResp.status >= 400) {
+              console.log(Colors.red(`    ✗ Failed to update tags for segment ${segmentKey} (${tagResp.status})`));
+            }
+          }
+        } else {
+          console.log(Colors.yellow(`    ⚠ Could not read existing tags for segment ${segmentKey} (${existingSegmentResp.status})`));
         }
       }
 
@@ -1958,10 +2075,11 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
       name: flagName,
     variations: newVariations,
     temporary: flag.temporary,
-    tags: flag.tags,
     description: flag.description,
     maintainerId: null  // Set to null by default to prevent API from assigning token owner
   };
+  const flagTags = mergeTags(flag.tags, migrationTags);
+  if (flagTags.length > 0) newFlag.tags = flagTags;
   // Only assign maintainerId if explicitly requested and mapping exists
   if (inputArgs.assignMaintainerIds) {
       if (flag.maintainerId && maintainerMapping[flag.maintainerId]) {
@@ -2053,6 +2171,7 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
         } else {
           // No prefix or second attempt - flag exists, proceed to update it
           flagCreated = true;
+          flagAlreadyExisted = true;
           createdFlagKey = flagKey;
           console.log(Colors.gray(`\t⚠ Flag exists (409), will update environments...`));
           break; // Exit retry loop and proceed to patching
@@ -2105,8 +2224,11 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
         flagLevelPatches.push(buildPatch("name", "replace", flagName));
       if (flag.description !== undefined && changed(flag.description, destinationFlag.description))
         flagLevelPatches.push(buildPatch("description", "replace", flag.description));
-      if (flag.tags && changed(flag.tags, destinationFlag.tags))
-        flagLevelPatches.push(buildPatch("tags", "replace", flag.tags));
+      const desiredTags = migrationTags.length > 0
+        ? mergeTags(flag.tags, migrationTags, destinationFlag.tags)
+        : flag.tags;
+      if (desiredTags && changed(desiredTags, destinationFlag.tags))
+        flagLevelPatches.push(buildPatch("tags", "replace", desiredTags));
       if (flag.temporary !== undefined && changed(flag.temporary, destinationFlag.temporary))
         flagLevelPatches.push(buildPatch("temporary", "replace", flag.temporary));
       if (flag.clientSideAvailability && changed(flag.clientSideAvailability, destinationFlag.clientSideAvailability))
@@ -2189,6 +2311,16 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
       .reduce((cur, key) => {
         return Object.assign(cur, { [key]: flagEnvData[key] });
       }, {});
+
+    // A source environment with no off variation serves the SDK fallback value while off, but the
+    // destination flag is created with the default off variation, so remove it explicitly. Only when
+    // the destination has one: a JSON Patch remove on a missing path fails the whole patch.
+    if (parsedData.offVariation === undefined || parsedData.offVariation === null) {
+      delete parsedData.offVariation;
+      if (destinationFlag?.environments?.[destEnvKey]?.offVariation != null) {
+        patchReq.push(buildPatch(`environments/${destEnvKey}/offVariation`, "remove", undefined));
+      }
+    }
 
     Object.keys(parsedData)
       .map((key) => {
@@ -2296,6 +2428,49 @@ for (const level of levels) {
   }
 }
 
+// Link migrated flags and segments to their views. Done after migration so it also covers
+// flags and segments that already existed in the destination.
+if (usableViews.size > 0) {
+  console.log(Colors.cyan("\n=== View Links ==="));
+  const resolvedKey = new Map(
+    conflictTracker.getResolutions().map((r) => [`${r.resourceType}:${r.originalKey}`, r.resolvedKey]),
+  );
+  const destEnvIds = new Map<string, string>();
+  const envResp = await rateLimitRequest(ldAPIRequest(apiKey, domain, `projects/${inputArgs.projKeyDest}/environments`), "environments");
+  if (envResp.status === 200) {
+    for (const e of (await envResp.json()).items) destEnvIds.set(e.key, e._id);
+  }
+  const selectedFlags = new Set(flagList);
+
+  for (const viewKey of usableViews) {
+    const source = sourceViews.find((v) => v.key === viewKey);
+    const flagKeys = [...new Set([
+      ...(source?.flags ?? []).filter((k) => selectedFlags.has(k)),
+      ...(viewKey === inputArgs.targetView ? flagList : []),
+    ])].map((k) => resolvedKey.get(`flag:${k}`) ?? k);
+    const segmentIds = !inputArgs.migrateSegments ? [] : (source?.segments ?? [])
+      .filter((s) => envkeys.includes(s.environmentKey))
+      .map((s) => {
+        const destEnvKey = inputArgs.envMap && envMapping[s.environmentKey] ? envMapping[s.environmentKey] : s.environmentKey;
+        return { environmentId: destEnvIds.get(destEnvKey) ?? "", segmentKey: resolvedKey.get(`segment:${s.segmentKey}`) ?? s.segmentKey };
+      })
+      .filter((s) => s.environmentId);
+
+    if (inputArgs.dryRun) {
+      console.log(Colors.gray(`    [DRY RUN] Would link ${flagKeys.length} flag(s) and ${segmentIds.length} segment(s) to view "${viewKey}"`));
+      continue;
+    }
+    for (const [type, items] of [["flags", flagKeys], ["segments", segmentIds]] as const) {
+      if (items.length === 0) continue;
+      const result = await linkToView(apiKey, domain, inputArgs.projKeyDest, viewKey, type, items as any);
+      console.log(result.failed.length === 0
+        ? Colors.green(`  ✓ View "${viewKey}": linked ${result.linked} ${type}`)
+        : Colors.yellow(`  ⚠ View "${viewKey}": linked ${result.linked} ${type}, failed: ${result.failed.join("; ")}`));
+    }
+  }
+}
+
+
 // Always write sync manifest so --incremental works on next run
 const manifest: SyncManifest = {
   lastSyncTimestamp: new Date().toISOString(),
@@ -2304,7 +2479,10 @@ const manifest: SyncManifest = {
   flags: updatedManifestFlags,
   segments: Object.keys(updatedManifestSegments).length > 0 ? updatedManifestSegments : undefined,
 };
-try {
+// A dry run changes nothing, so recording it would make a later --incremental run skip unsynced resources
+if (inputArgs.dryRun) {
+  console.log(Colors.gray(`\n[DRY RUN] Sync manifest not written (${syncManifestPath} left unchanged)`));
+} else try {
   await Deno.mkdir("./data/launchdarkly-migrations", { recursive: true });
   await Deno.writeTextFile(syncManifestPath, JSON.stringify(manifest, null, 2));
   const envCount = Object.values(manifest.flags).reduce((sum, f) => sum + Object.keys(f.environments).length, 0);

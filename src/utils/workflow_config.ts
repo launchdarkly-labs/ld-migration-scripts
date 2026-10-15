@@ -44,6 +44,8 @@ export interface WorkflowConfig {
   migration?: {
     assignMaintainerIds?: boolean;
     migrateSegments?: boolean;
+    tags?: string[] | null;
+    migrateBigSegments?: boolean;
     conflictPrefix?: string;
     onConflict?: string;
     targetView?: string;

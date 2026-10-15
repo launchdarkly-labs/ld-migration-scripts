@@ -23,6 +23,13 @@ migration:
   assignMaintainerIds: false
   incremental: true  # Only sync flags/segments changed since last run
 
+  # Re-export and re-import big segment members (optional). Big segments with exported
+  # members are re-imported on every run, since member changes may not bump the version.
+  # migrateBigSegments: true
+
+  # Preview without writing (optional); a dry run does not update the sync manifest
+  # dryRun: true
+
   # Include only these flag keys (optional — omit to migrate all)
   # includeFlags:
   #   - feature-one
