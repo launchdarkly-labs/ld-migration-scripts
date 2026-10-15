@@ -114,6 +114,11 @@ if (envMap) {
   const unknown = Object.keys(envMap).filter((e) => !sourceEnvs.includes(e));
   if (unknown.length) console.log(`⚠ --env-map names source environments that do not exist in ${sourceProj}: ${unknown.join(", ")}`);
   sourceEnvs = sourceEnvs.filter((e: string) => Object.hasOwn(envMap, e));
+  if (sourceEnvs.length === 0) {
+    // Otherwise a project without views would report "0 passed, 0 failed" and exit 0 having checked nothing
+    console.error(`✗ None of the --env-map source environments exist in ${sourceProj}; nothing to verify`);
+    Deno.exit(2);
+  }
   console.log(`Checking ${sourceEnvs.length} mapped environment(s): ${sourceEnvs.map((e: string) => `${e}→${envMap[e]}`).join(", ")}`);
 }
 let pass = 0, fail = 0;
@@ -220,9 +225,10 @@ for (const [key, { view: src }] of sourceViews) {
     tags: [...(v.tags ?? [])].sort(),
     maintainer: await maintainerOf(apiKey, domain, proj, v.key),
     flags: [...v.flags].sort(),
-    segments: v.segments
+    // Deduplicated: two source environments mapped to one destination environment yield one link there
+    segments: [...new Set<string>(v.segments
       .filter((s: any) => !mapEnvs || !envMap || Object.hasOwn(envMap, s.environmentKey))
-      .map((s: any) => `${mapEnvs ? destEnvOf(s.environmentKey) : s.environmentKey}/${s.segmentKey}`)
+      .map((s: any) => `${mapEnvs ? destEnvOf(s.environmentKey) : s.environmentKey}/${s.segmentKey}`))]
       .sort(),
   });
   const problems = diff(
