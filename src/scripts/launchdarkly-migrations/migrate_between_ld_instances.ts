@@ -1215,7 +1215,9 @@ if (inputArgs.migrateSegments) {
           ldAPIRequest(apiKey, domain, `segments/${inputArgs.projKeyDest}/${destEnvKey}/${segmentKey}`),
           'segments',
         );
+        // Only 404 means absent; any other failure goes through the error path below instead of a "created" preview
         if (probe.status === 200) segmentStatus = 409;
+        else if (probe.status !== 404) segmentStatus = probe.status;
       }
         
         if (segmentStatus === 201 || segmentStatus === 200) {
