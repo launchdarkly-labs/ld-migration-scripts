@@ -62,11 +62,13 @@ interface SyncManifestFlag {
   version: number;
   lastModified?: string;
   environments: Record<string, SyncManifestEnv>;
+  destKey?: string; // destination key, if it differs (e.g. conflict prefix)
 }
 
 interface SyncManifestSegment {
   version: number;
   lastModified?: number;
+  destKey?: string; // destination key in this environment, if it differs (e.g. conflict prefix)
 }
 
 interface SyncManifest {
@@ -297,6 +299,7 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .alias("concurrency", "concurrency")
   .alias("migrate-big-segments", "migrateBigSegments")
   .boolean("migrate-big-segments")
+  .default("migrate-big-segments", undefined)
   .describe("migrate-big-segments", "Import big segment members from CSVs exported during extraction (extract with --extract-big-segments)")
   .number("concurrency")
   .default("concurrency", 10)
@@ -988,6 +991,8 @@ async function importBigSegmentMembers(
   for (let i = 0; i < keys.length; i += BIG_SEGMENT_IMPORT_ROW_LIMIT) {
     chunks.push(keys.slice(i, i + BIG_SEGMENT_IMPORT_ROW_LIMIT));
   }
+  // An empty source still needs one replace import: it clears the destination's existing members
+  if (chunks.length === 0) chunks.push([]);
 
   for (const [chunkIndex, chunk] of chunks.entries()) {
     const mode = chunkIndex === 0 ? "replace" : "merge";
@@ -1093,7 +1098,7 @@ if (inputArgs.migrateSegments) {
           console.log(Colors.gray(`  Big segment ${segment.key} (${env.key}): ${segment._importKeys.length} exported member(s) to import`));
         }
       }
-      if (isBigSegment && !segment._importKeys?.length) {
+      if (isBigSegment && segment._importKeys === undefined) {
         console.log(Colors.yellow(
           `Segment: ${segment.key} in Environment ${env.key} is a big segment (unbounded) with no exported members`,
         ));
@@ -1222,7 +1227,8 @@ if (inputArgs.migrateSegments) {
 
       // Big segments: load members via the CSV import endpoint instead of patches
       if (segmentCreated && isBigSegment) {
-        if (segment._importKeys?.length) {
+        // An empty array is a successful empty export: import it so destination members are cleared
+        if (segment._importKeys !== undefined) {
           await importBigSegmentMembers(
             inputArgs.projKeyDest,
             destEnvKey,
@@ -1351,6 +1357,7 @@ if (inputArgs.migrateSegments) {
         updatedManifestSegments[env.key][segment.key] = {
           version: segment.version ?? 0,
           lastModified: segment.lastModifiedDate,
+          ...(segmentKey !== segment.key && { destKey: segmentKey }),
         };
       }
     };
@@ -2350,6 +2357,7 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
     version: flag._version ?? 0,
     lastModified: flag.creationDate,
     environments: flagManifestEnvs,
+    ...(createdFlagKey !== flag.key && { destKey: createdFlagKey }),
   };
 
   return { incrementalSkipCountDelta, incrementalEnvSkipCountDelta };
@@ -2432,9 +2440,14 @@ for (const level of levels) {
 // flags and segments that already existed in the destination.
 if (usableViews.size > 0) {
   console.log(Colors.cyan("\n=== View Links ==="));
-  const resolvedKey = new Map(
-    conflictTracker.getResolutions().map((r) => [`${r.resourceType}:${r.originalKey}`, r.resolvedKey]),
+  // Destination keys come from the manifest entries written (or carried forward by incremental
+  // skips) this run, so prefix renames from earlier runs survive. Segment keys are per environment.
+  const flagRenamesThisRun = new Map(
+    conflictTracker.getResolutions().filter((r) => r.resourceType === "flag").map((r) => [r.originalKey, r.resolvedKey]),
   );
+  const destFlagKey = (key: string) => updatedManifestFlags[key]?.destKey ?? flagRenamesThisRun.get(key) ?? key;
+  const destSegmentKey = (sourceEnvKey: string, key: string) =>
+    updatedManifestSegments[sourceEnvKey]?.[key]?.destKey ?? key;
   const destEnvIds = new Map<string, string>();
   const envResp = await rateLimitRequest(ldAPIRequest(apiKey, domain, `projects/${inputArgs.projKeyDest}/environments`), "environments");
   if (envResp.status === 200) {
@@ -2447,12 +2460,12 @@ if (usableViews.size > 0) {
     const flagKeys = [...new Set([
       ...(source?.flags ?? []).filter((k) => selectedFlags.has(k)),
       ...(viewKey === inputArgs.targetView ? flagList : []),
-    ])].map((k) => resolvedKey.get(`flag:${k}`) ?? k);
+    ])].map(destFlagKey);
     const segmentIds = !inputArgs.migrateSegments ? [] : (source?.segments ?? [])
       .filter((s) => envkeys.includes(s.environmentKey))
       .map((s) => {
         const destEnvKey = inputArgs.envMap && envMapping[s.environmentKey] ? envMapping[s.environmentKey] : s.environmentKey;
-        return { environmentId: destEnvIds.get(destEnvKey) ?? "", segmentKey: resolvedKey.get(`segment:${s.segmentKey}`) ?? s.segmentKey };
+        return { environmentId: destEnvIds.get(destEnvKey) ?? "", segmentKey: destSegmentKey(s.environmentKey, s.segmentKey) };
       })
       .filter((s) => s.environmentId);
 
