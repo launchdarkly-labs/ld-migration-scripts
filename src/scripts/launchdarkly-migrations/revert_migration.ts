@@ -15,26 +15,20 @@ import * as Colors from "https://deno.land/std@0.149.0/fmt/colors.ts";
 import { parse as parseYaml } from "https://deno.land/std@0.224.0/yaml/parse.ts";
 import { ldAPIRequest, ldAPIPostRequest, rateLimitRequest } from "../../utils/utils.ts";
 import { getDestinationApiKey, getSourceApiKey } from "../../utils/api_keys.ts";
+import {
+  coerceProjectKey,
+  resolveProjectPairs,
+  usesProjectKeysList,
+  type WorkflowConfig,
+} from "../../utils/workflow_config.ts";
 
 // ==================== Type Definitions ====================
 
-interface MigrationWorkflowConfig {
-  source: {
-    projectKey: string;
-    domain?: string;
-  };
-  destination: {
-    projectKey: string;
-    domain?: string;
-  };
-  migration?: {
-    targetView?: string;
-  };
-}
-
-interface RevertConfig {
+export interface RevertConfig {
   projectKey: string;
   sourceProjectKey?: string;
+  /** Other source projects migrated into the same destination (projectKeyMapping merges) */
+  siblingSourceKeys?: string[];
   domain?: string;
   dryRun?: boolean;
   deleteViews?: boolean;
@@ -43,7 +37,7 @@ interface RevertConfig {
   useSourceData?: boolean;
 }
 
-interface Arguments {
+export interface Arguments {
   project?: string;
   sourceProject?: string;
   domain?: string;
@@ -95,10 +89,10 @@ const MIGRATION_DESCRIPTION_MARKER = "Migration of flag";
 /**
  * Loads migration config YAML file
  */
-const loadMigrationConfig = async (configPath: string): Promise<MigrationWorkflowConfig> => {
+const loadMigrationConfig = async (configPath: string): Promise<WorkflowConfig> => {
   try {
     const configContent = await Deno.readTextFile(configPath);
-    return parseYaml(configContent) as MigrationWorkflowConfig;
+    return parseYaml(configContent) as WorkflowConfig;
   } catch (error) {
     console.log(Colors.red(
       `Error loading config file: ${error instanceof Error ? error.message : String(error)}`
@@ -108,31 +102,97 @@ const loadMigrationConfig = async (configPath: string): Promise<MigrationWorkflo
 };
 
 /**
- * Extracts revert config from migration workflow config
+ * Builds revert configs from a migration workflow config (one per project).
+ * With -p, reverts only that project; otherwise reverts every project in
+ * source.projectKeys, or the single source/destination pair.
+ * @throws Error if no project key can be resolved
+ */
+export const buildRevertConfigs = (
+  workflowConfig: WorkflowConfig,
+  cliArgs: Arguments,
+  configPath: string
+): RevertConfig[] => {
+  const cliProject = coerceProjectKey(cliArgs.project);
+  const cliSourceProject = coerceProjectKey(cliArgs.sourceProject);
+
+  const revert = workflowConfig.revert ?? {};
+
+  // CLI flags win; unset flags (undefined) fall back to the revert: block
+  const shared = {
+    domain: cliArgs.domain || workflowConfig.destination?.domain || "app.launchdarkly.com",
+    dryRun: cliArgs.dryRun ?? revert.dryRun ?? false,
+    deleteViews: cliArgs.deleteViews ?? revert.deleteViews ?? false,
+    viewKeys: cliArgs.views
+      ? cliArgs.views.split(",")
+      : revert.viewKeys?.length
+        ? revert.viewKeys
+        : workflowConfig.migration?.targetView
+          ? [workflowConfig.migration.targetView]
+          : undefined,
+    configFile: configPath,
+    useSourceData: cliArgs.useSourceData !== false // Default to true when config is provided
+  };
+
+  const multi = usesProjectKeysList(workflowConfig);
+  // Resolved eagerly only with projectKeys: `-p` alone must keep working when no source key is set
+  const multiPairs = multi ? resolveProjectPairs(workflowConfig) : [];
+  const withSiblings = (config: RevertConfig): RevertConfig => {
+    const siblingSourceKeys = multiPairs
+      .filter(p => p.destination === config.projectKey && p.source !== config.sourceProjectKey)
+      .map(p => p.source);
+    return siblingSourceKeys.length > 0 ? { ...config, siblingSourceKeys } : config;
+  };
+
+  if (cliProject) {
+    if (cliSourceProject) {
+      return [withSiblings({ ...shared, projectKey: cliProject, sourceProjectKey: cliSourceProject })];
+    }
+    if (!multi) {
+      return [{
+        ...shared,
+        projectKey: cliProject,
+        sourceProjectKey: coerceProjectKey(workflowConfig.source?.projectKey),
+      }];
+    }
+    // Every source mapped into this destination (several when projects were merged)
+    const mapped = multiPairs.filter(({ destination }) => destination === cliProject);
+    if (mapped.length > 0) {
+      return mapped.map(({ source }) =>
+        withSiblings({ ...shared, projectKey: cliProject, sourceProjectKey: source })
+      );
+    }
+    return [{ ...shared, projectKey: cliProject, sourceProjectKey: cliProject }];
+  }
+
+  const pairs = multi ? multiPairs : resolveProjectPairs(workflowConfig);
+
+  return pairs.map(({ source, destination }) => withSiblings({
+    ...shared,
+    projectKey: destination,
+    // -s without -p only makes sense for a single project
+    sourceProjectKey: (pairs.length === 1 && cliSourceProject) || source,
+  }));
+};
+
+/**
+ * Extracts revert configs from a migration workflow config file
  */
 const extractRevertConfigFromWorkflow = async (
   configPath: string,
   cliArgs: Arguments
-): Promise<RevertConfig> => {
+): Promise<RevertConfig[]> => {
   const workflowConfig = await loadMigrationConfig(configPath);
-  
-  return {
-    projectKey: cliArgs.project || workflowConfig.destination.projectKey,
-    sourceProjectKey: cliArgs.sourceProject || workflowConfig.source.projectKey,
-    domain: cliArgs.domain || workflowConfig.destination.domain || "app.launchdarkly.com",
-    dryRun: cliArgs.dryRun || false,
-    deleteViews: cliArgs.deleteViews || false,
-    viewKeys: cliArgs.views 
-      ? cliArgs.views.split(",")
-      : (workflowConfig.migration?.targetView ? [workflowConfig.migration.targetView] : undefined),
-    configFile: configPath,
-    useSourceData: cliArgs.useSourceData !== false // Default to true when config is provided
-  };
+  try {
+    return buildRevertConfigs(workflowConfig, cliArgs, configPath);
+  } catch (error) {
+    console.log(Colors.red(`Error: ${error instanceof Error ? error.message : String(error)}`));
+    Deno.exit(1);
+  }
 };
 
 // ==================== Argument Parsing ====================
 
-const parseArguments = async (): Promise<RevertConfig> => {
+const parseArguments = async (): Promise<RevertConfig[]> => {
   const args: Arguments = yargs(Deno.args)
     .alias("p", "project")
     .alias("s", "source-project")
@@ -149,9 +209,9 @@ const parseArguments = async (): Promise<RevertConfig> => {
     .describe("s", "Source project key (used to identify migrated flags)")
     .describe("f", "Path to migration workflow YAML config (auto-detects settings)")
     .describe("d", "LaunchDarkly domain (default: app.launchdarkly.com)")
-    .describe("dry-run", "Preview actions without making changes")
-    .describe("delete-views", "Delete views after unlinking flags")
-    .describe("v", "Comma-separated list of view keys to process")
+    .describe("dry-run", "Preview actions without making changes (overrides revert.dryRun; --no-dry-run forces a real run)")
+    .describe("delete-views", "Delete views after unlinking flags (overrides revert.deleteViews)")
+    .describe("v", "Comma-separated list of view keys to process (overrides revert.viewKeys and migration.targetView)")
     .describe("use-source-data", "Use extracted source data for faster flag list (default: true with --config)")
     .parse() as Arguments;
 
@@ -161,20 +221,21 @@ const parseArguments = async (): Promise<RevertConfig> => {
   }
 
   // Otherwise, require project key
-  if (!args.project) {
+  const projectKey = coerceProjectKey(args.project);
+  if (!projectKey) {
     console.log(Colors.red("Error: Either --project or --config is required"));
     Deno.exit(1);
   }
 
-  return {
-    projectKey: args.project,
-    sourceProjectKey: args.sourceProject,
+  return [{
+    projectKey,
+    sourceProjectKey: coerceProjectKey(args.sourceProject),
     domain: args.domain || "app.launchdarkly.com",
     dryRun: args.dryRun || false,
     deleteViews: args.deleteViews || false,
     viewKeys: args.views ? args.views.split(",") : undefined,
     useSourceData: false
-  };
+  }];
 };
 
 // ==================== API Request Helpers ====================
@@ -323,6 +384,16 @@ const isMigrationFlag = (flag: Flag, sourceProjectKey?: string): boolean => {
   
   return hasMarker;
 };
+
+/**
+ * Flag keys from other sources merged into the same destination that this revert leaves in place.
+ * Used to keep views those sources' flags may still rely on.
+ */
+export const findRemainingSiblingFlagKeys = (
+  siblingFlagKeys: string[],
+  revertingFlagKeys: Set<string>
+): string[] =>
+  [...new Set(siblingFlagKeys)].filter(key => !revertingFlagKeys.has(key));
 
 /**
  * Fetches all flags from a project
@@ -741,7 +812,8 @@ const archiveFlag = async (
     return true;
   }
   
-  const patch = [{ op: "replace", path: "/archived", value: true }];
+  // ldAPIPatchRequest sends the semantic patch content type, so the body must use instructions
+  const patch = { instructions: [{ kind: "archiveFlag" }] };
   const req = ldAPIPatchRequest(apiKey, domain, `flags/${projectKey}/${flagKey}`, patch);
   
   const response = await rateLimitRequest(req, 'flags');
@@ -872,6 +944,21 @@ const revertViews = async (
   }
   
   console.log(Colors.gray(`  Found ${targetViews.length} view(s) to process`));
+
+  // The view-link endpoints are unreliable, so a merged destination's view is kept while
+  // flags from its other sources (per their extracted source data) still exist in the project.
+  let otherSourceFlags: Flag[] = [];
+  if (config.deleteViews && config.siblingSourceKeys?.length) {
+    const siblingKeys: string[] = [];
+    for (const sibling of config.siblingSourceKeys) {
+      siblingKeys.push(...await loadFlagListFromSourceData(sibling));
+    }
+    const remaining = findRemainingSiblingFlagKeys(
+      siblingKeys,
+      new Set(migrationFlags.map(f => f.key))
+    );
+    otherSourceFlags = await fetchFlagsByKeys(apiKey, domain, config.projectKey, remaining);
+  }
   
   for (const view of targetViews) {
     console.log(Colors.cyan(`\n  Processing view: ${view.key}`));
@@ -903,7 +990,12 @@ const revertViews = async (
     }
     
     // Delete view if requested
-    if (config.deleteViews) {
+    if (config.deleteViews && otherSourceFlags.length > 0) {
+      console.log(Colors.yellow(
+        `    ⚠ Keeping view: ${otherSourceFlags.length} flag(s) migrated from other source project(s) remain ` +
+        `(e.g. ${otherSourceFlags.slice(0, 3).map(f => f.key).join(", ")})`
+      ));
+    } else if (config.deleteViews) {
       const deleted = await deleteView(
         apiKey,
         domain,
@@ -967,16 +1059,17 @@ const printRevertSummary = (config: RevertConfig, stats: RevertStats): void => {
 
 // ==================== Main Entry Point ====================
 
+const printProjectBanner = (index: number, total: number, projectKey: string): void => {
+  const divider = "=".repeat(60);
+  console.log(Colors.magenta(`\n${divider}`));
+  console.log(Colors.magenta(`Project ${index + 1}/${total}: ${projectKey}`));
+  console.log(Colors.magenta(`${divider}\n`));
+};
+
 /**
- * Main revert orchestration
+ * Reverts a single destination project
  */
-const main = async (): Promise<void> => {
-  const config = await parseArguments();
-  const apiKey = await getDestinationApiKey();
-  
-  console.log(Colors.blue("\n🔄 LaunchDarkly Migration Revert Tool"));
-  console.log(Colors.blue("=".repeat(70) + "\n"));
-  
+const revertProject = async (apiKey: string, config: RevertConfig): Promise<void> => {
   console.log(Colors.cyan("Configuration:"));
   console.log(Colors.gray(`  Project: ${config.projectKey}`));
   if (config.sourceProjectKey) {
@@ -1054,6 +1147,24 @@ const main = async (): Promise<void> => {
   } catch (error) {
     console.log(Colors.red(`\n❌ Fatal error: ${error instanceof Error ? error.message : String(error)}`));
     Deno.exit(1);
+  }
+};
+
+/**
+ * Main revert orchestration
+ */
+const main = async (): Promise<void> => {
+  const configs = await parseArguments();
+  const apiKey = await getDestinationApiKey();
+
+  console.log(Colors.blue("\n🔄 LaunchDarkly Migration Revert Tool"));
+  console.log(Colors.blue("=".repeat(70) + "\n"));
+
+  for (let i = 0; i < configs.length; i++) {
+    if (configs.length > 1) {
+      printProjectBanner(i, configs.length, configs[i].projectKey);
+    }
+    await revertProject(apiKey, configs[i]);
   }
 };
 

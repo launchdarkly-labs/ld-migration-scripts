@@ -23,6 +23,7 @@ import {
 import * as Colors from "https://deno.land/std@0.149.0/fmt/colors.ts";
 import { parse as parseYaml } from "https://deno.land/std@0.224.0/yaml/parse.ts";
 import { getDestinationApiKey } from "../../utils/api_keys.ts";
+import { resolveDestinationProjectName } from "../../utils/workflow_config.ts";
 import { mergeTags } from "../../utils/tags.ts";
 import { bigSegmentCsvPath, readExportedKeys } from "../../utils/big_segments.ts";
 import { linkToView, type SourceView } from "../../utils/views.ts";
@@ -30,6 +31,7 @@ import { linkToView, type SourceView } from "../../utils/views.ts";
 interface Arguments {
   projKeySource: string;
   projKeyDest: string;
+  destProjectName?: string;
   assignMaintainerIds: boolean;
   migrateSegments: boolean;
   migrateBigSegments?: boolean;
@@ -47,6 +49,8 @@ interface Arguments {
   includeFlags?: string;
   excludeFlags?: string;
   concurrency?: number;
+  createProject?: boolean;
+  createEnvironments?: boolean;
 }
 
 interface SyncManifestEnv {
@@ -80,6 +84,7 @@ interface MigrationConfig {
   };
   destination: {
     projectKey: string;
+    projectName?: string;
     domain?: string;
   };
   options?: {
@@ -98,6 +103,8 @@ interface MigrationConfig {
     includeFlags?: string[];
     excludeFlags?: string[];
     concurrency?: number;
+    createProject?: boolean;
+    createEnvironments?: boolean;
   };
   /** Alias for options — YAML configs may use migration: instead of options: */
   migration?: MigrationConfig["options"];
@@ -202,6 +209,72 @@ async function getExistingEnvironments(apiKey: string, domain: string, projectKe
   return [];
 }
 
+/**
+ * Creates the destination project, including the given environments.
+ * Returns true if the project was created (or simulated in dry-run) or already exists.
+ */
+async function createProjectOnDestination(
+  dryRun: boolean,
+  apiKey: string,
+  domain: string,
+  projectKey: string,
+  projectName: string,
+  environments: Record<string, unknown>[],
+): Promise<boolean> {
+  const envList = environments.map((e) => e.key).join(", ") || "none";
+  if (dryRun) {
+    console.log(Colors.yellow(`  [DRY RUN] Would create project "${projectKey}" ("${projectName}") with environments: ${envList}`));
+    return true;
+  }
+  console.log(Colors.blue(`  Creating project "${projectKey}" ("${projectName}") with environments: ${envList}...`));
+  const body: Record<string, unknown> = { name: projectName, key: projectKey };
+  if (environments.length > 0) body.environments = environments;
+  // Not "projects": rateLimitRequest exits on a 409 for that category, and 409 here means it already exists
+  const resp = await rateLimitRequest(ldAPIPostRequest(apiKey, domain, "projects", body), "projects-create");
+  if (resp.status >= 200 && resp.status < 300) {
+    console.log(Colors.green(`  ✓ Created project "${projectKey}"`));
+    return true;
+  }
+  if (resp.status === 409) {
+    console.log(Colors.gray(`  Project "${projectKey}" already exists`));
+    return true;
+  }
+  console.log(Colors.red(`  ✗ Failed to create project (${resp.status}): ${await resp.text()}`));
+  return false;
+}
+
+/**
+ * Creates one environment in the destination project.
+ * Returns true if created (or simulated in dry-run) or it already exists.
+ */
+async function createEnvironmentOnDestination(
+  dryRun: boolean,
+  apiKey: string,
+  domain: string,
+  projectKey: string,
+  env: Record<string, unknown>,
+): Promise<boolean> {
+  if (dryRun) {
+    console.log(Colors.yellow(`  [DRY RUN] Would create environment "${env.key}" in project "${projectKey}"`));
+    return true;
+  }
+  console.log(Colors.blue(`  Creating environment "${env.key}"...`));
+  const resp = await rateLimitRequest(
+    ldAPIPostRequest(apiKey, domain, `projects/${projectKey}/environments`, env),
+    "environments",
+  );
+  if (resp.status >= 200 && resp.status < 300) {
+    console.log(Colors.green(`  ✓ Created environment "${env.key}"`));
+    return true;
+  }
+  if (resp.status === 409) {
+    console.log(Colors.gray(`  Environment "${env.key}" already exists`));
+    return true;
+  }
+  console.log(Colors.red(`  ✗ Failed to create environment "${env.key}" (${resp.status}): ${await resp.text()}`));
+  return false;
+}
+
 const cliArgs: Arguments = (yargs(Deno.args)
   .alias("p", "projKeySource")
   .alias("d", "projKeyDest")
@@ -227,10 +300,16 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .describe("migrate-big-segments", "Import big segment members from CSVs exported during extraction (extract with --extract-big-segments)")
   .number("concurrency")
   .default("concurrency", 10)
+  .alias("create-project", "createProject")
+  .alias("create-environments", "createEnvironments")
+  .alias("dest-project-name", "destProjectName")
+  .string("dest-project-name")
   .boolean("m")
   .boolean("s")
   .boolean("dry-run")
   .boolean("incremental")
+  .boolean("create-project")
+  .boolean("create-environments")
   .default("m", false)
   .default("s", true)
   .describe("c", "Prefix to use when resolving key conflicts (e.g., 'imported-')")
@@ -247,6 +326,9 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .describe("include-flags", "Comma-separated list of flag keys to migrate (only these flags)")
   .describe("exclude-flags", "Comma-separated list of flag keys to exclude from migration")
   .describe("concurrency", "Max number of flags to migrate in parallel (default: 10)")
+  .describe("create-project", "Create the destination project if it doesn't exist, with the migrated environments")
+  .describe("dest-project-name", "Name for a project created by --create-project (default: destination key if it differs from the source key, else the source project name)")
+  .describe("create-environments", "Create environments missing from the destination project using source environment settings")
   .parse() as unknown) as Arguments;
 
 // Load and merge config file if provided
@@ -262,6 +344,7 @@ if (cliArgs.config) {
     inputArgs = {
       projKeySource: cliArgs.projKeySource || config.source.projectKey,
       projKeyDest: cliArgs.projKeyDest || config.destination.projectKey,
+      destProjectName: cliArgs.destProjectName || config.destination?.projectName,
       assignMaintainerIds: cliArgs.assignMaintainerIds !== undefined && cliArgs.assignMaintainerIds !== false
         ? cliArgs.assignMaintainerIds
         : opts?.assignMaintainerIds ?? false,
@@ -284,6 +367,8 @@ if (cliArgs.config) {
       includeFlags: cliArgs.includeFlags ?? (opts?.includeFlags?.length ? opts.includeFlags.join(",") : undefined),
       excludeFlags: cliArgs.excludeFlags ?? (opts?.excludeFlags?.length ? opts.excludeFlags.join(",") : undefined),
       concurrency: cliArgs.concurrency ?? opts?.concurrency ?? 10,
+      createProject: cliArgs.createProject ?? opts?.createProject ?? false,
+      createEnvironments: cliArgs.createEnvironments ?? opts?.createEnvironments ?? false,
       config: cliArgs.config
     };
     
@@ -329,6 +414,9 @@ console.log(Colors.gray(`  Since: ${inputArgs.since || 'none'}`));
 console.log(Colors.gray(`  Include Flags: ${inputArgs.includeFlags || 'all'}`));
 console.log(Colors.gray(`  Exclude Flags: ${inputArgs.excludeFlags || 'none'}`));
 console.log(Colors.gray(`  Concurrency: ${inputArgs.concurrency ?? 10}`));
+console.log(Colors.gray(`  Create Project: ${inputArgs.createProject || false}`));
+console.log(Colors.gray(`  Dest Project Name: ${inputArgs.destProjectName || 'default'}`));
+console.log(Colors.gray(`  Create Environments: ${inputArgs.createEnvironments || false}`));
 
 // Validate --incremental and --since are mutually exclusive
 if (inputArgs.incremental && inputArgs.since) {
@@ -562,23 +650,81 @@ if (inputArgs.envMap) {
   console.log(Colors.cyan(`Migrating ${envkeys.length} mapped environment(s)\n`));
 }
 
-// Destination project must already exist; we do not create projects.
+// Destination environment body built from source env settings (key is remapped when --env-map is used)
+const destEnvBody = (srcKey: string): Record<string, unknown> => {
+  const meta = buildEnv.find((e: any) => e.key === srcKey) ?? { key: srcKey, name: srcKey, color: "417505" };
+  const destKey = inputArgs.envMap ? envMapping[srcKey] : srcKey;
+  return { ...meta, key: destKey, name: meta.name || destKey };
+};
+
+// Destination project must exist unless --create-project is set.
+// 401/403 means the token cannot see the project; do not treat that as "missing".
 const projStatus = await getProjectStatus(apiKey, domain, inputArgs.projKeyDest);
+let existingEnvs: string[];
 
 if (projStatus === 401 || projStatus === 403) {
   console.log(Colors.red(`\n❌ Destination API key is invalid or lacks access (HTTP ${projStatus}).`));
   console.log(Colors.yellow(`   Check "destination_account_api_key" in config/api_keys.json — it needs write access to "${inputArgs.projKeyDest}".`));
   Deno.exit(1);
 } else if (projStatus !== 200) {
-  console.log(Colors.red(`\n❌ Destination project "${inputArgs.projKeyDest}" does not exist (HTTP ${projStatus}).`));
-  console.log(Colors.yellow(`   Create the project in LaunchDarkly first, then run migration again.`));
-  Deno.exit(1);
+  if (!inputArgs.createProject) {
+    console.log(Colors.red(`\n❌ Destination project "${inputArgs.projKeyDest}" does not exist (HTTP ${projStatus}).`));
+    console.log(Colors.yellow(`   Use --create-project (migration.createProject: true) to create it, or create it in LaunchDarkly first.`));
+    Deno.exit(1);
+  }
+  const envBodies = envkeys.map(destEnvBody);
+  const created = await createProjectOnDestination(
+    inputArgs.dryRun || false,
+    apiKey,
+    domain,
+    inputArgs.projKeyDest,
+    resolveDestinationProjectName({
+      explicit: inputArgs.destProjectName,
+      sourceName: projectJson.name,
+      sourceKey: inputArgs.projKeySource,
+      destKey: inputArgs.projKeyDest,
+    }),
+    envBodies,
+  );
+  if (!created) {
+    console.log(Colors.red(`\n❌ Failed to create destination project "${inputArgs.projKeyDest}".`));
+    Deno.exit(1);
+  }
+  // In dry-run the project doesn't exist, so use the environments it would have been created with
+  existingEnvs = inputArgs.dryRun
+    ? envBodies.map((e) => e.key as string)
+    : await getExistingEnvironments(apiKey, domain, inputArgs.projKeyDest);
+  console.log(Colors.gray(`  Destination environments: ${existingEnvs.join(', ')}`));
+} else {
+  if (inputArgs.destProjectName) {
+    console.log(Colors.gray(`  Destination project exists; projectName "${inputArgs.destProjectName}" ignored (not renamed)`));
+  }
+  console.log(Colors.blue(`  Fetching existing environments for ${inputArgs.projKeyDest}...`));
+  existingEnvs = await getExistingEnvironments(apiKey, domain, inputArgs.projKeyDest);
+  console.log(Colors.gray(`  Found existing environments: ${existingEnvs.join(', ')}`));
 }
 
-// Get existing environments
-console.log(Colors.blue(`  Fetching existing environments for ${inputArgs.projKeyDest}...`));
-const existingEnvs = await getExistingEnvironments(apiKey, domain, inputArgs.projKeyDest);
-console.log(Colors.gray(`  Found existing environments: ${existingEnvs.join(', ')}`));
+/**
+ * Creates destination environments for the given source env keys, exiting on failure
+ */
+const createMissingEnvironments = async (srcKeys: string[]): Promise<void> => {
+  console.log(Colors.cyan(`Creating ${srcKeys.length} missing environment(s) in ${inputArgs.projKeyDest}...`));
+  for (const srcKey of srcKeys) {
+    const body = destEnvBody(srcKey);
+    const ok = await createEnvironmentOnDestination(
+      inputArgs.dryRun || false,
+      apiKey,
+      domain,
+      inputArgs.projKeyDest,
+      body,
+    );
+    if (!ok) {
+      console.log(Colors.red(`Failed to create environment "${body.key}". Exiting.`));
+      Deno.exit(1);
+    }
+    existingEnvs.push(body.key as string);
+  }
+};
 
 // If environment mapping is enabled, check destination environments exist
 if (inputArgs.envMap) {
@@ -586,21 +732,30 @@ if (inputArgs.envMap) {
   const missingDestEnvs = mappedDestEnvs.filter(destKey => !existingEnvs.includes(destKey));
 
   if (missingDestEnvs.length > 0) {
-    console.log(Colors.red(`Error: The following mapped destination environments don't exist in target project:`));
-    missingDestEnvs.forEach(destKey => {
-      const srcKey = reverseEnvMapping[destKey];
-      console.log(Colors.red(`  ${srcKey} → ${destKey} (destination "${destKey}" not found)`));
-    });
-    console.log(Colors.red(`Available destination environments: ${existingEnvs.join(', ')}`));
-    Deno.exit(1);
+    if (inputArgs.createEnvironments) {
+      await createMissingEnvironments(missingDestEnvs.map((destKey) => reverseEnvMapping[destKey]));
+    } else {
+      console.log(Colors.red(`Error: The following mapped destination environments don't exist in target project:`));
+      missingDestEnvs.forEach(destKey => {
+        const srcKey = reverseEnvMapping[destKey];
+        console.log(Colors.red(`  ${srcKey} → ${destKey} (destination "${destKey}" not found)`));
+      });
+      console.log(Colors.red(`Available destination environments: ${existingEnvs.join(', ')}`));
+      console.log(Colors.yellow(`Use --create-environments (migration.createEnvironments: true) to create them.`));
+      Deno.exit(1);
+    }
   }
 } else {
   // Keep SOURCE env keys; only include those that exist in the target project.
   // (We must use source keys so that flag.environments[env] matches extracted flag data.)
   const missingEnvs = envkeys.filter(key => !existingEnvs.includes(key));
   if (missingEnvs.length > 0) {
-    console.log(Colors.yellow(`Warning: The following environments from source project don't exist in target project: ${missingEnvs.join(', ')}`));
-    console.log(Colors.yellow('Skipping these environments...'));
+    if (inputArgs.createEnvironments) {
+      await createMissingEnvironments(missingEnvs);
+    } else {
+      console.log(Colors.yellow(`Warning: The following environments from source project don't exist in target project: ${missingEnvs.join(', ')}`));
+      console.log(Colors.yellow('Skipping these environments. Use --create-environments to create them.'));
+    }
   }
   envkeys = envkeys.filter(key => existingEnvs.includes(key));
   if (envkeys.length > 0) {
