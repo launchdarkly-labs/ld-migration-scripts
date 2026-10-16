@@ -4,7 +4,9 @@ import {
   assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  abortMarker,
   assertManifestComplete,
+  recordedDestination,
   manifestDestinationFlagKeys,
   readSyncManifest,
   retainIncompleteMarker,
@@ -134,4 +136,35 @@ Deno.test("retainIncompleteMarker: untracked keys persist across recovery runs u
   assertEquals(retainIncompleteMarker(run1, clean, afterOverwrite), undefined, "an entry mapping to b clears the marker");
   // A filtered run that records "b" keeps the marker (other writes may still be unattempted) but drops the resolved key
   assertEquals(retainIncompleteMarker(run1, { ...clean, flagScopeFiltered: true }, afterOverwrite), incomplete);
+});
+
+Deno.test("abortMarker keeps gaps found during a recovery run that aborts again", () => {
+  const incomplete = { reason: "aborted", at: "2026-10-16T09:00:00.000Z" };
+  const first: SyncManifest = { ...manifest, flags: { a: { version: 1, environments: {} } }, incomplete };
+  const run = { flagScopeFiltered: false, failedWrites: false, conflictedFlags: ["b"], conflictedSegments: [] };
+  // Prompt-mode retry prefixes the unrecorded "b", then aborts on another flag
+  const next = { flags: { a: first.flags.a, b: { version: 1, environments: {}, destKey: "imported-b" } } };
+  const second = abortMarker(first, { reason: "aborted again", at: "2026-10-16T09:30:00.000Z" }, run, next);
+  assertEquals(second, { reason: "aborted again", at: "2026-10-16T09:30:00.000Z", unresolved: { flags: ["b"], segments: [] } });
+  // A clean incremental retry after the second abort still keeps the marker
+  const afterSecond: SyncManifest = { ...manifest, ...next, incomplete: second };
+  const clean = { ...run, conflictedFlags: [] };
+  assertEquals(retainIncompleteMarker(afterSecond, clean, next), second);
+  // The first abort of all has no previous marker and no conflicts: just the reason
+  assertEquals(abortMarker(manifest, incomplete, clean, { flags: manifest.flags }), incomplete);
+});
+
+Deno.test("recordedDestination reuses this migration's earlier prefixed copy on a rerun", () => {
+  const source = { key: "foo", name: "Foo" };
+  assertEquals(recordedDestination(undefined, source, "imported-"), { key: "foo", name: "Foo", recorded: false });
+  assertEquals(recordedDestination({}, source, "imported-"), { key: "foo", name: "Foo", recorded: false });
+  assertEquals(
+    recordedDestination({ destKey: "imported-foo" }, source, "imported-"),
+    { key: "imported-foo", name: "imported-Foo", recorded: true },
+  );
+  // A different prefix than the one used before keeps the recorded key and the source name
+  assertEquals(
+    recordedDestination({ destKey: "imported-foo" }, source, "legacy-"),
+    { key: "imported-foo", name: "Foo", recorded: true },
+  );
 });

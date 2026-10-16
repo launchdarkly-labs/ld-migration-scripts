@@ -144,6 +144,133 @@ const splitSegmentId = (id: string): [string, string] => {
 };
 
 /**
+ * Destination resources that no entry maps to after this run: the previous marker's list plus the
+ * copies this run found as conflicts on keys without an entry (skipped or prefix-renamed, so left
+ * untracked), minus those an entry in `next` now maps to. Undefined when nothing is untracked.
+ */
+export function unresolvedAfterRun(
+  previous: SyncManifest | null,
+  run: RunOutcome,
+  next: ManifestEntries,
+): IncompleteMarker["unresolved"] {
+  const prevFlags = previous?.flags ?? {};
+  const prevSegments = previous?.segments ?? {};
+  const flags = new Set(previous?.incomplete?.unresolved?.flags ?? []);
+  for (const key of run.conflictedFlags) {
+    if (!Object.hasOwn(prevFlags, key)) flags.add(key);
+  }
+  const segments = new Set(previous?.incomplete?.unresolved?.segments ?? []);
+  for (const id of run.conflictedSegments) {
+    const [env, key] = splitSegmentId(id);
+    if (!Object.hasOwn(prevSegments, env) || !Object.hasOwn(prevSegments[env], key)) segments.add(id);
+  }
+  const unresolvedFlags = [...flags].filter((key) => !mapsTo(next.flags, key)).sort();
+  const unresolvedSegments = [...segments].filter((id) => {
+    const [env, key] = splitSegmentId(id);
+    return !mapsTo(next.segments?.[env], key);
+  }).sort();
+  return unresolvedFlags.length > 0 || unresolvedSegments.length > 0
+    ? { flags: unresolvedFlags, segments: unresolvedSegments }
+    : undefined;
+}
+
+/**
+ * The `incomplete` marker a run must keep from the previous manifest, or undefined when the run may
+ * clear it. The aborted run's writes that finished without an entry surface later as conflicts on
+ * keys the manifest does not map to; skipping or prefix-renaming them leaves the existing copy
+ * untracked, so its destination key is recorded in the marker and persists across runs. The marker
+ * is cleared only by a run without flag-scope filters or failed writes, once an entry in `next` maps
+ * to every recorded destination key (an overwrite records it; an unchanged incremental retry does not).
+ */
+export function retainIncompleteMarker(
+  previous: SyncManifest | null,
+  run: RunOutcome,
+  next: ManifestEntries,
+): IncompleteMarker | undefined {
+  const marker = previous?.incomplete;
+  if (!marker) return undefined;
+  const unresolved = unresolvedAfterRun(previous, run, next);
+  if (!run.flagScopeFiltered && !run.failedWrites && !unresolved) return undefined;
+  const { unresolved: _previous, ...rest } = marker;
+  return unresolved ? { ...rest, unresolved } : rest;
+}
+
+/**
+ * The marker for a run that stops early: the given reason, plus every destination resource still
+ * untracked after this run (the previous marker's list and this run's skipped or prefix-renamed
+ * conflicts on keys without an entry), so a later abort does not lose gaps found during recovery.
+ */
+export function abortMarker(
+  previous: SyncManifest | null,
+  incomplete: Pick<IncompleteMarker, "reason" | "at">,
+  run: RunOutcome,
+  next: ManifestEntries,
+): IncompleteMarker {
+  const unresolved = unresolvedAfterRun(previous, run, next);
+  return unresolved ? { ...incomplete, unresolved } : { ...incomplete };
+}
+
+/**
+ * The destination key and name a rerun should write a source resource under. A previous manifest
+ * entry whose destination key differs from the source key names this migration's own earlier copy
+ * (a conflict-prefix rename), so the rerun updates that copy instead of creating another prefixed
+ * duplicate that the manifest would then track in place of the first one.
+ */
+export function recordedDestination(
+  entry: { destKey?: string } | undefined,
+  source: { key: string; name: string },
+  conflictPrefix: string | undefined,
+): { key: string; name: string; recorded: boolean } {
+  const destKey = entry?.destKey;
+  if (!destKey || destKey === source.key) return { key: source.key, name: source.name, recorded: false };
+  const name = conflictPrefix && destKey === `${conflictPrefix}${source.key}`
+    ? `${conflictPrefix}${source.name}`
+    : source.name;
+  return { key: destKey, name, recorded: true };
+}
+
+/**
+ * Throws when the manifest is marked incomplete: revert must not treat it as the full inventory of what
+ * the migration wrote, since a flag created just before the abort may have no entry.
+ */
+export function assertManifestComplete(manifest: SyncManifest, path: string): void {
+  const marker = manifest.incomplete;
+  if (!marker) return;
+  const untracked = [...(marker.unresolved?.flags ?? []), ...(marker.unresolved?.segments ?? [])];
+  throw new Error(
+    `Sync manifest ${path} is marked incomplete (${marker.reason}, at ${marker.at}): ` +
+      `a migrate run stopped before recording all of its writes` +
+      (untracked.length > 0 ? `; untracked destination resources: ${untracked.join(", ")}` : "") +
+      `. Re-run the migration without includeFlags, excludeFlags or --since and let it complete cleanly (no failed ` +
+      `writes), overwriting or recording the untracked resources, or revert with --no-use-source-data after ` +
+      `checking the flags by hand.`,
+  );
+}
+
+/** What a completed run did that bears on whether an earlier abort's inventory gap can be considered closed. */
+export interface RunOutcome {
+  /** includeFlags, excludeFlags or --since left flags unattempted */
+  flagScopeFiltered: boolean;
+  /** Some flag or segment write failed */
+  failedWrites: boolean;
+  /** Source flag keys whose destination copy already existed and was skipped or prefix-renamed */
+  conflictedFlags: Iterable<string>;
+  /** "<sourceEnv>/<segmentKey>" of segments whose destination copy already existed and was skipped or prefix-renamed */
+  conflictedSegments: Iterable<string>;
+}
+
+/** The flag and segment entries a run is about to write. */
+export type ManifestEntries = Pick<SyncManifest, "flags" | "segments">;
+
+const mapsTo = (entries: Record<string, { destKey?: string }> | undefined, destKey: string): boolean =>
+  Object.entries(entries ?? {}).some(([key, entry]) => (entry.destKey ?? key) === destKey);
+
+const splitSegmentId = (id: string): [string, string] => {
+  const slash = id.indexOf("/");
+  return [id.slice(0, slash), id.slice(slash + 1)];
+};
+
+/**
  * The `incomplete` marker a run must keep from the previous manifest, or undefined when the run may
  * clear it. The aborted run's writes that finished without an entry surface later as conflicts on
  * keys the manifest does not map to; skipping or prefix-renaming them leaves the existing copy

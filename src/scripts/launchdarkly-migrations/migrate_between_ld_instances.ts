@@ -30,8 +30,11 @@ import {
   type SyncManifestEnv,
   type SyncManifestFlag,
   type SyncManifestSegment,
+  abortMarker,
   readSyncManifest,
+  recordedDestination,
   retainIncompleteMarker,
+  type RunOutcome,
   syncManifestPath as syncManifestPathFor,
 } from "../../utils/sync_manifest.ts";
 import { bigSegmentCsvPath, readExportedKeys } from "../../utils/big_segments.ts";
@@ -1218,8 +1221,12 @@ if (inputArgs.migrateSegments) {
       }
 
       segmentsAttempted.add(`${env.key}/${segment.key}`);
-      let segmentKey = segment.key;
-      let segmentName = segment.name;
+      // As for flags: a recorded destination key under another name is our own earlier prefixed copy
+      const recordedSegment = recordedDestination(
+        previousManifest?.segments?.[env.key]?.[segment.key], segment, inputArgs.conflictPrefix,
+      );
+      let segmentKey = recordedSegment.key;
+      let segmentName = recordedSegment.name;
       let attemptCount = 0;
       let segmentCreated = false;
       let segmentAlreadyExisted = false;
@@ -1266,8 +1273,8 @@ if (inputArgs.migrateSegments) {
           segmentCreated = true;
           console.log(Colors.green(`  ✓ Segment ${newSegment.key} created (status: ${segmentStatus})`));
         } else if (segmentStatus === 409) {
-          // Segment already exists — resolve according to --on-conflict
-          const action = attemptCount === 1
+          // Segment already exists — resolve according to --on-conflict; our own recorded copy is not a conflict
+          const action = attemptCount === 1 && !recordedSegment.recorded
             ? await resolveConflictAction('segment', segmentKey)
             : 'overwrite';
           if (action === 'abort') {
@@ -2020,7 +2027,11 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
   const flag = await getFlagDataByIndexOrKey(index, flagkey);
 
   if (!flag) {
-    console.log(Colors.yellow(`\tWarning: Could not load flag data for ${flagkey}, skipping...`));
+    // Counted as an error: the flag was not examined, so the run must not report success or clear an
+    // incomplete manifest marker on its account
+    console.log(Colors.red(`\t✗ Could not load extracted flag data for ${flagkey}`));
+    flagsWithErrors.add(flagkey);
+    flagErrorDetails.set(flagkey, "extracted flag data could not be loaded");
     return { incrementalSkipCountDelta: 0, incrementalEnvSkipCountDelta: 0 };
   }
 
@@ -2128,11 +2139,14 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
 
   const newVariations = flag.variations.map(({ _id, ...rest }: Variation) => rest);
 
-  let flagKey = flag.key;
-  let flagName = flag.name;
+  // A previous manifest entry under another key names this migration's own earlier copy (conflict
+  // prefix): update it instead of creating a second prefixed duplicate
+  const recorded = recordedDestination(previousManifest?.flags?.[flag.key], flag, inputArgs.conflictPrefix);
+  let flagKey = recorded.key;
+  let flagName = recorded.name;
   let attemptCount = 0;
   let flagCreated = false;
-  let createdFlagKey = flag.key;
+  let createdFlagKey = flagKey;
   let flagMaintainerId: string | null = null;
   let flagAlreadyExisted = false;
 
@@ -2146,7 +2160,13 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
     );
     const checkFlagResp = await rateLimitRequest(checkFlagReq, 'flags');
     
-    if (checkFlagResp.status === 200) {
+    if (checkFlagResp.status === 200 && recorded.recorded) {
+      // Our own earlier copy, recorded in the manifest: not a conflict, update it in place
+      flagCreated = true;
+      flagAlreadyExisted = true;
+      createdFlagKey = flagKey;
+      console.log(Colors.gray(`\t→ Updating the copy recorded in the sync manifest (${flagKey})`));
+    } else if (checkFlagResp.status === 200) {
       // Flag already exists — resolve according to --on-conflict
       const action = await resolveConflictAction('flag', flagKey);
       if (action === 'abort') {
@@ -2651,15 +2671,16 @@ async function writeSyncManifestFile(incomplete?: SyncManifest["incomplete"]): P
     flags: updatedManifestFlags,
     segments: Object.keys(updatedManifestSegments).length > 0 ? updatedManifestSegments : undefined,
   };
-  const previousUnresolved = previousManifest?.incomplete?.unresolved;
+  const run: RunOutcome = {
+    flagScopeFiltered,
+    failedWrites: flagsWithErrors.size > 0 || segmentsWithErrors.size > 0,
+    conflictedFlags: [...flagsSkippedByConflict, ...flagsPrefixedByConflict],
+    conflictedSegments: [...segmentsSkippedByConflict, ...segmentsPrefixedByConflict],
+  };
+  // An abort keeps the gaps found so far (previous marker plus this run's conflicts on unrecorded keys)
   const marker = incomplete
-    ? { ...incomplete, ...(previousUnresolved ? { unresolved: previousUnresolved } : {}) }
-    : retainIncompleteMarker(previousManifest, {
-      flagScopeFiltered,
-      failedWrites: flagsWithErrors.size > 0 || segmentsWithErrors.size > 0,
-      conflictedFlags: [...flagsSkippedByConflict, ...flagsPrefixedByConflict],
-      conflictedSegments: [...segmentsSkippedByConflict, ...segmentsPrefixedByConflict],
-    }, entries);
+    ? abortMarker(previousManifest, incomplete, run, entries)
+    : retainIncompleteMarker(previousManifest, run, entries);
   const manifest: SyncManifest = {
     lastSyncTimestamp: new Date().toISOString(),
     sourceProject: inputArgs.projKeySource,

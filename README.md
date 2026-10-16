@@ -365,7 +365,7 @@ migration:
   - `overwrite`, `prompt` or `abort`: the workflow stops and lists the keys, because the later source would overwrite the earlier one's targeting (or, with `abort`, the migrate step would stop part-way).
 
   The check reads extracted data, so `extract-source` must have run for every merged source.
-- `conflictPrefix` applies to *any* key that already exists in the destination, so rerunning a migration with it set creates prefixed duplicates instead of updating the flags from the first run.
+- `conflictPrefix` applies to *any* key that already exists in the destination. A rerun reuses the copies recorded in the sync manifest of the first run (`foo` migrated as `imported-foo` is updated as `imported-foo`), so prefixed duplicates only appear when there is no manifest for the pair (for example after a dry run only, or after deleting it).
 - Environments are matched by key across all sources (`migration.environmentMapping` applies to every project).
 
 #### Same-account guard
@@ -1234,9 +1234,10 @@ don't need to specify them manually.
   true. Set to false to skip segment migration.
 - `-c, --conflictPrefix`: (Optional) Prefix to use when resolving key conflicts
   (e.g., 'imported-'). When a resource with a conflicting key is detected, it
-  will be created with this prefix automatically. This includes flags from an
-  earlier run of the same migration, so reruns create prefixed copies instead
-  of updating.
+  will be created with this prefix automatically. A rerun updates the copies
+  recorded in the sync manifest of the earlier run instead of creating further
+  prefixed copies; without a manifest, a flag from an earlier run counts as a
+  conflict too.
 - `-v, --targetView`: (Optional) View key to link all migrated flags to. This
   will link all flags to the specified view in addition to any views they were
   already linked to in the source project.
