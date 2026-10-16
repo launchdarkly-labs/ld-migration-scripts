@@ -8,14 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-
 - `migration.migrateViews` (`--migrate-views=false`, extraction `--extract-views=false`): opt out of recreating views and linking flags and segments to them; `targetView` still applies (#20)
 - `scripts/verify-segments.ts --source-domain / --dest-domain / --env-map`: verify a cross-instance (US → EU) or environment-mapped migration; only mapped source environments are checked (#20)
 
-### Fixed
+### Changed
+- Workflow merge check (`destination.projectKeyMapping` merges): only resources the migrate step writes are compared (`includeFlags` / `excludeFlags`, `migrateSegments`, `environments`, `environmentMapping`; segments by destination environment), and the outcome follows the effective `onConflict` policy. `prefix` warns, and stops when a key is shared with two or more earlier sources or the prefixed key already exists (one prefix can only rename once); `skip` warns; `overwrite`, `prompt` and `abort` stop (#21)
+- Same-account guard: also stops when a destination key is another listed source's key (chained mappings such as `a -> b`, `b -> c`), not only a project's own key (#21)
+- `createEnvironments` also copies `requireComments` and `critical` from the source environment (#21)
+- `migration.tags` are now reconciled on flags and segments that an `--incremental` run skips as unchanged (the tags are not part of the source version), with one destination read per skipped resource when tags are set (#22)
+- The incremental fast path patches a flag under its manifest destination key, so a flag renamed by a conflict prefix is updated instead of its unprefixed namesake
+- A dry run looks up each segment in the destination and previews conflict handling and the tag patch for segments that already exist, instead of reporting every segment as created (#22)
+- A failed tag reconciliation on an existing segment (read or patch), and a failed lifecycle/tags reconciliation on a flag the incremental fast path skips, are now counted as errors (exit code `1`), like a failed flag-level update
 
+### Fixed
 - In approval-required environments, the `remove offVariation` patch (source serves the SDK fallback while off) is now listed under the approval's skipped fields instead of being dropped silently; semantic patches have no instruction for it (#20)
 - `views.ts`: paging no longer stops after the first page when the beta views endpoints omit `totalCount` (#20)
+
+### Documentation
+- README: how existing destination tags are handled with and without `migration.tags`, and that a flag whose create returns 409 is updated in place like one found by the pre-check (#22)
 
 ## [3.3.0] - 2026-10-15
 

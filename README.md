@@ -359,13 +359,18 @@ migration:
 
 - Every mapping key must appear in `source.projectKeys`; a typo stops the workflow before any step runs. The mapping is ignored (with a warning) when only `source.projectKey` is set.
 - The first source migrated into a merged destination creates it; later sources add their flags and segments to the existing project.
-- **Merge check:** before each later source migrates into a merged destination, the workflow compares its extracted flag and segment keys (per environment) with the earlier sources for that destination. If any overlap, the workflow stops and lists them, because without `migration.conflictPrefix` the later source would overwrite the earlier one's targeting. With `conflictPrefix` set, it warns and the overlapping keys are created with the prefix. The check reads extracted data, so `extract-source` must have run for every merged source.
+- **Merge check:** before each later source migrates into a merged destination, the workflow compares the flag keys and the segment keys (per destination environment) it is about to migrate with those of the earlier sources for that destination. Only resources that are actually migrated count: `includeFlags` / `excludeFlags`, `migrateSegments: false`, `environments` and `environmentMapping` are applied first. If any key overlaps, what happens depends on the effective conflict policy (`migration.onConflict`, which defaults to `prefix` when `conflictPrefix` is set and to `overwrite` otherwise):
+  - `prefix`: the workflow replays the earlier sources' writes to know which keys they hold in the destination, including the prefixed copies of their own collisions, and warns that the overlapping keys will be created with the prefix. It stops instead when the prefix cannot resolve a key: when the prefixed key is taken as well, because two or more earlier sources already share the key (the second one took the prefixed key), or a source has the prefixed key itself. One prefix can only rename a key once. A segment present in two source environments that map to the same destination environment is written twice (the second time with the prefix) and is counted that way, in the order the environments are listed in the source project. The replay starts from an empty destination: keys that already exist in the destination project before the merge (an existing project, or an earlier run) are not known offline, so collisions with them are left to the migrate step's own 409 handling and are not reported here.
+  - `skip`: the workflow warns; the later source's copies are not migrated and the earlier source's targeting is kept.
+  - `overwrite`, `prompt` or `abort`: the workflow stops and lists the keys, because the later source would overwrite the earlier one's targeting (or, with `abort`, the migrate step would stop part-way).
+
+  The check reads extracted data, so `extract-source` must have run for every merged source.
 - `conflictPrefix` applies to *any* key that already exists in the destination, so rerunning a migration with it set creates prefixed duplicates instead of updating the flags from the first run.
 - Environments are matched by key across all sources (`migration.environmentMapping` applies to every project).
 
 #### Same-account guard
 
-When the source and destination domains are the same, the workflow checks both API tokens with `GET /api/v2/caller-identity` before migrating. If they belong to the same account and any project would migrate onto its own key (for example `projectKeys` without a mapping), the workflow stops, since that would write into the source projects. Map those projects to new keys or use a destination token for another account. If the lookup fails (for example the token lacks access), the workflow warns and continues. Different domains skip the check.
+When the source and destination domains are the same, the workflow checks both API tokens with `GET /api/v2/caller-identity` before migrating. If they belong to the same account and any project would migrate onto a key that is also a source key, its own (for example `projectKeys` without a mapping) or another listed source's (`a: b` while `b` is itself a source), the workflow stops, since that would write into the source projects. Map those projects to new keys or use a destination token for another account. If the lookup fails (for example the token lacks access), the workflow warns and continues. Different domains skip the check.
 
 ### Third-Party Flag Import
 
@@ -668,7 +673,14 @@ migration:                   # Migration settings (also accepts "options:" as al
 
 **Note:** Config files accept either `migration:` or `options:` as the key for migration settings.
 
-`migration.tags` is optional (or `null`). When provided, its values are added to the source tags for migrated flags and segments. Duplicate tags are removed, and tags already present on an existing destination resource are retained. Direct `migrate` CLI usage also accepts comma-separated tags, for example `--tags imported-from-legacy,billing-team`.
+`migration.tags` is optional (or `null`). When provided, its values are added to the source tags for migrated flags and segments, and duplicates are removed. Direct `migrate` CLI usage also accepts comma-separated tags, for example `--tags imported-from-legacy,billing-team`.
+
+How existing destination resources are handled depends on whether `migration.tags` is set:
+
+- **With `migration.tags`**: the tags of an existing destination flag or segment are merged with the source tags and the migration tags, so no tag already on the destination is lost. This also applies to flags and segments an `incremental` run skips as unchanged, at the cost of one read per skipped resource (the migration tags are not part of the source version, so they would otherwise never be added on a rerun).
+- **Without `migration.tags`**: an existing flag that is overwritten gets the source tags, replacing whatever tags it had in the destination. An existing segment keeps its destination tags (segment patches only touch targeting).
+
+A dry run looks up each segment in the destination and previews the tag patch for the ones that already exist.
 
 ### Priority Order
 
@@ -791,6 +803,7 @@ deno task migrate -p SOURCE_PROJECT -d DEST_PROJECT -c "imported-"
 
 **Notes:**
 - Only applies when a conflict (HTTP 409) is detected
+- Without a prefix, a flag that already exists is updated in place: flag-level properties (name, description, tags, variations, lifecycle state, ...) that differ from the source are patched, then its environments. This is the case both when the pre-check finds the flag and when the create itself returns 409 (the flag appeared in between, or the pre-check failed)
 - The prefix is applied to both the resource key and name
 - All related patches and configurations use the prefixed key
 - Use a descriptive prefix to easily identify migrated resources (e.g., `migrated-`, `v2-`, `imported-`)
@@ -848,6 +861,7 @@ Reading flag 1 of 50 : my-feature
 
 **Notes:**
 - Only mapped source environments will be migrated
+- Several source environments may map to one destination environment. A segment key present in more than one of them is then written more than once into that environment: the later write replaces the earlier one, or with `onConflict: prefix` is created with the prefix
 - Destination environments must already exist in the target project, unless `migration.createEnvironments: true` (`--create-environments`) is set, in which case missing mapped environments are created from the source settings
 - If a mapped destination environment doesn't exist (and `createEnvironments` is off), migration will abort with error
 - Environment keys are case-sensitive
@@ -1283,10 +1297,11 @@ don't need to specify them manually.
 - The migration process is one-way and cannot be reversed automatically
 - Flag Maintainer IDs are different between the account instances and must be mapped
   using the `map-members` script before migration
-- Environment names and keys must match between source and destination projects
-  when migrating to an existing project
-- The destination project and its environments must exist before migrating; only
-  environments that exist in both projects are migrated
+- Environment keys must match between source and destination projects when migrating
+  to an existing project, unless `--env-map` maps them
+- The destination project and its environments must exist before migrating, unless
+  `--create-project` / `--create-environments` create them; otherwise only environments
+  that exist in both projects are migrated
 - Segment migration can be skipped using the `-s=false` flag if needed
 - Big (unbounded) segments are created in the destination; their members are only
   copied from LaunchDarkly sources when `migrateBigSegments` is enabled
