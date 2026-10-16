@@ -34,6 +34,7 @@ deno task workflow:full
 **Useful options** (commented out in the file):
 - `dryRun: true`: preview everything without writing to the destination. Recommended for the first run.
 - `migrateBigSegments: true`: also copy larger list-based (big) segments by exporting their members as CSV and importing them into the destination.
+- `migrateViews: false`: do not recreate views or link flags and segments to them (`targetView` still applies).
 - `includeFlags` / `excludeFlags`: migrate a subset of flags. Prerequisite flags must be included too; a real run stops before writing if one is missing.
 
 Views and their linked flags and segments are always migrated when the token can read them (`viewView`).
