@@ -359,13 +359,26 @@ Deno.test("selectRevertFlagKeys keeps every manifest key, even ones a sibling al
   );
 });
 
-Deno.test("selectRevertFlagKeys leaves extracted keys that a sibling also lists in place", () => {
+Deno.test("selectRevertFlagKeys leaves extracted keys that a sibling's manifest holds in place", () => {
   assertEquals(
     selectRevertFlagKeys(
       inv("b", ["shared", "only-b"], "extract"),
-      [inv("a", ["shared", "only-a"], "extract"), inv("c", ["only-c"], "manifest")],
+      [inv("a", ["shared", "only-a"], "manifest"), inv("c", ["only-c"], "manifest")],
     ),
     { keys: ["only-b"], ambiguous: ["shared"] },
+  );
+});
+
+Deno.test("selectRevertFlagKeys refuses raw keys when a sibling only has extracted data", () => {
+  // A's extracted "shared" may have landed as "imported-shared": B's raw "imported-shared" would be A's flag
+  assertThrows(
+    () =>
+      selectRevertFlagKeys(
+        inv("b", ["imported-shared"], "extract"),
+        [inv("a", ["shared"], "extract"), inv("c", ["only-c"], "manifest")],
+      ),
+    Error,
+    "a migrated into the same destination without a sync manifest",
   );
 });
 
@@ -393,7 +406,7 @@ Deno.test("selectRevertFlagKeys refuses raw keys when a sibling has no inventory
   assertThrows(
     () => selectRevertFlagKeys(inv("b", ["shared"], "extract"), [inv("a", [], "none"), inv("c", ["x"], "extract")]),
     Error,
-    "no sync manifest or extracted flags.json for a",
+    "no sync manifest for b, and a, c migrated into the same destination without a sync manifest",
   );
   // A manifest for the reverted source itself makes sibling inventories irrelevant
   assertEquals(

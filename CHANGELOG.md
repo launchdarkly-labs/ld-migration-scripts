@@ -27,8 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `revert_migration.ts`: the flag list for a source now comes from the sync manifest `migrate` wrote for that source and destination, so flags created with a conflict prefix are reverted under their destination key instead of matching another source's flag. Without a manifest, keys that a sibling source merged into the same destination also lists are left in place with a warning rather than guessed. The keep-the-view check for merged destinations uses the same keys (#21)
-
-- `revert_migration.ts`: an unreadable sync manifest, or one that records another project pair, stops the revert instead of falling back to raw source keys; and without a manifest, a sibling source that has neither a manifest nor extracted data stops raw-key deletion and keeps the shared views (#21)
+- `revert_migration.ts`: an unreadable sync manifest, or one that records another project pair, stops the revert instead of falling back to raw source keys. Without a manifest for the reverted source, raw-key deletion is only allowed when every sibling source merged into the same destination has a manifest (an extracted list does not name destination keys); otherwise the revert stops, and shared views are kept (#21)
 - In approval-required environments, the `remove offVariation` patch (source serves the SDK fallback while off) is now listed under the approval's skipped fields instead of being dropped silently; semantic patches have no instruction for it (#20)
 - `views.ts`: paging no longer stops after the first page when the beta views endpoints omit `totalCount` (#20)
 

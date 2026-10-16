@@ -366,8 +366,11 @@ const loadMigratedFlagKeys = async (
 /**
  * Splits a source's flag keys into the ones this revert may remove and the ambiguous ones.
  * Manifest keys are real destination keys and are all kept. Extracted source keys are not: a key
- * that another source merged into the same destination also lists may belong to that sibling's
- * flag (ours may have been created with a conflict prefix), so it is left in place.
+ * that another source merged into the same destination holds (per that sibling's manifest) may be
+ * the sibling's flag, ours having been created with a conflict prefix, so it is left in place.
+ * A sibling's own extracted list says nothing about its destination keys (a prefix may have renamed
+ * them), so without a manifest for every sibling, raw-key deletion is refused.
+ * @throws Error when `own` has no manifest and some sibling has no manifest either
  */
 export const selectRevertFlagKeys = (
   own: MigratedFlagKeys,
@@ -377,12 +380,12 @@ export const selectRevertFlagKeys = (
   if (own.source === "manifest" || siblings.length === 0) {
     return { keys: unique, ambiguous: [] };
   }
-  // A sibling without any inventory could own any of these keys, so raw-key deletion is not safe
-  const unverifiable = siblings.filter(s => s.source === "none").map(s => s.project);
+  const unverifiable = siblings.filter(s => s.source !== "manifest").map(s => s.project);
   if (unverifiable.length > 0) {
     throw new Error(
-      `Cannot attribute ${own.project}'s flags: no sync manifest for ${own.project}, and no sync manifest or extracted ` +
-      `flags.json for ${unverifiable.join(", ")}, which migrated into the same destination. Extract them, or revert ` +
+      `Cannot attribute ${own.project}'s flags: no sync manifest for ${own.project}, and ${unverifiable.join(", ")} ` +
+      `migrated into the same destination without a sync manifest of their own (extracted keys are not destination ` +
+      `keys: a conflict prefix may have renamed them). Re-run those migrations to write their manifests, or revert ` +
       `with --no-use-source-data after checking the flags by hand.`
     );
   }
@@ -516,10 +519,15 @@ const discoverMigrationFlags = async (
     const { keys: sourceFlags, ambiguous } = selectRevertFlagKeys(own, siblings);
     if (ambiguous.length > 0) {
       console.log(Colors.yellow(
-        `  ⚠ Leaving ${ambiguous.length} flag(s) in place: ${config.siblingSourceKeys!.join(", ")} list the same key(s) and ` +
-        `without a sync manifest for ${config.sourceProjectKey} they cannot be attributed to one source: ${ambiguous.join(", ")}`
+        `  ⚠ Leaving ${ambiguous.length} flag(s) in place: the sync manifests of ${config.siblingSourceKeys!.join(", ")} hold the same key(s), ` +
+        `and without a sync manifest for ${config.sourceProjectKey} they cannot be attributed to one source: ${ambiguous.join(", ")}`
       ));
       console.log(Colors.gray(`    Revert them by hand, or re-run after a migration has written ${syncManifestPath(config.sourceProjectKey, config.projectKey)}`));
+    }
+    if (own.source === "extract" && siblings.length > 0) {
+      console.log(Colors.gray(
+        `  Note: flags ${config.sourceProjectKey} migrated under a conflict prefix are not detected without its sync manifest`
+      ));
     }
     
     if (sourceFlags.length > 0) {
@@ -1039,15 +1047,20 @@ const revertViews = async (
   
   console.log(Colors.gray(`  Found ${targetViews.length} view(s) to process`));
 
-  // The view-link endpoints are unreliable, so a merged destination's view is kept while
-  // flags from its other sources (per their sync manifest, else extracted source data) still exist in the project.
+  // The view-link endpoints are unreliable, so a merged destination's view is kept while flags from
+  // its other sources still exist in the project. Only a sibling's sync manifest names its destination
+  // keys; its extracted list does not (a conflict prefix may have renamed them), so without a manifest
+  // the sibling's flags cannot be checked and the view stays.
   let otherSourceFlags: Flag[] = [];
   const unverifiableSiblings: string[] = [];
   if (config.deleteViews && config.siblingSourceKeys?.length) {
     const siblingKeys: string[] = [];
     for (const sibling of config.siblingSourceKeys) {
       const inventory = await loadMigratedFlagKeys(sibling, config.projectKey);
-      if (inventory.source === "none") unverifiableSiblings.push(sibling);
+      if (inventory.source !== "manifest") {
+        unverifiableSiblings.push(sibling);
+        continue;
+      }
       siblingKeys.push(...inventory.keys);
     }
     const remaining = findRemainingSiblingFlagKeys(
@@ -1090,8 +1103,8 @@ const revertViews = async (
     if (config.deleteViews && unverifiableSiblings.length > 0) {
       // Without an inventory the sibling's flags cannot be checked, so the view has to stay
       console.log(Colors.yellow(
-        `    ⚠ Keeping view: no sync manifest or extracted flags.json for ${unverifiableSiblings.join(", ")}, ` +
-        `so their flags in this destination cannot be checked`
+        `    ⚠ Keeping view: no sync manifest for ${unverifiableSiblings.join(", ")}, so their flags in this ` +
+        `destination cannot be checked (extracted keys are not destination keys)`
       ));
     } else if (config.deleteViews && otherSourceFlags.length > 0) {
       console.log(Colors.yellow(
