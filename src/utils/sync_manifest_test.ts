@@ -7,6 +7,8 @@ import {
   abortMarker,
   adoptUnresolved,
   assertManifestComplete,
+  emptyRecord,
+  legacySegmentEntries,
   recordedDestination,
   manifestDestinationFlagKeys,
   ownEntry,
@@ -303,10 +305,45 @@ Deno.test("segmentEnvironmentMismatches flags entries whose destination environm
       'prod/other: recorded in destination environment "staging", mapping now targets "production"',
     ],
   );
-  // An unmapped (unselected) source environment is not checked; an entry without destEnv means same key
-  assertEquals(segmentEnvironmentMismatches(previous, (e) => ({ test: "qa" })[e]), [
-    'test/t: recorded in destination environment "test", mapping now targets "qa"',
-  ]);
+  // An unselected source environment is not checked; a legacy entry (no destEnv) is not judged offline
+  assertEquals(segmentEnvironmentMismatches(previous, (e) => ({ test: "qa" })[e]), []);
   assertEquals(segmentEnvironmentMismatches(null, () => "x"), []);
+  // Legacy entries are listed for verification against the environment the mapping targets now
+  assertEquals(legacySegmentEntries(previous, (e) => ({ prod: "production", test: "qa" })[e]), [
+    { sourceEnv: "test", key: "t", destKey: "t", destEnv: "qa" },
+  ]);
+  assertEquals(legacySegmentEntries(previous, (e) => ({ prod: "production" })[e]), []);
+});
+
+Deno.test("readSyncManifest refuses a manifest written for another destination and accepts a legacy one", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const stamped: SyncManifest = { ...manifest, destDomain: "app.launchdarkly.com", destAccountId: "acct-1" };
+    await Deno.writeTextFile(syncManifestPath("payroll", "new-project", dir), JSON.stringify(stamped));
+    const same = { domain: "app.launchdarkly.com", accountId: "acct-1" };
+    assertEquals(await readSyncManifest("payroll", "new-project", dir, same), stamped);
+    assertEquals(await readSyncManifest("payroll", "new-project", dir, { domain: "app.launchdarkly.com" }), stamped, "unknown account is not checked");
+    await assertRejects(() => readSyncManifest("payroll", "new-project", dir, { domain: "app.eu.launchdarkly.com", accountId: "acct-1" }), Error, "destination domain app.launchdarkly.com, not app.eu.launchdarkly.com");
+    await assertRejects(() => readSyncManifest("payroll", "new-project", dir, { domain: "app.launchdarkly.com", accountId: "acct-2" }), Error, "destination account acct-1, not acct-2");
+    // A manifest from an older version has no identity: returned as is for the caller to warn about
+    await Deno.writeTextFile(syncManifestPath("payroll", "new-project", dir), JSON.stringify(manifest));
+    const legacy = await readSyncManifest("payroll", "new-project", dir, same);
+    assertEquals(legacy?.destDomain, undefined);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("a flag named __proto__ survives manifest rebuilds as an own entry", () => {
+  const parsed = JSON.parse('{"__proto__": {"version": 1, "environments": {}}, "a": {"version": 1, "environments": {}}}') as SyncManifest["flags"];
+  const before: SyncManifest = { ...manifest, flags: parsed };
+  const after = retireDeletedFlags(before, ["a"]);
+  assertEquals(Object.keys(after.flags), ["__proto__"]);
+  // (an object literal with a "__proto__" key would set a prototype, so compare the serialized form)
+  assertEquals(JSON.stringify(after.flags), '{"__proto__":{"version":1,"environments":{}}}');
+  assertEquals(manifestDestinationFlagKeys(after), ["__proto__"]);
+  const record = emptyRecord<number>();
+  record["__proto__"] = 1;
+  assertEquals(Object.keys(record), ["__proto__"]);
 });
 

@@ -32,6 +32,9 @@ import {
   type SyncManifestSegment,
   abortMarker,
   adoptUnresolved,
+  type DestinationIdentity,
+  emptyRecord,
+  legacySegmentEntries,
   ownEntry,
   readSyncManifest,
   recordedDestination,
@@ -42,6 +45,7 @@ import {
   syncManifestPath as syncManifestPathFor,
 } from "../../utils/sync_manifest.ts";
 import { bigSegmentCsvPath, readExportedKeys } from "../../utils/big_segments.ts";
+import { getAccountId } from "../../utils/account_guard.ts";
 import { linkToView, type SourceView } from "../../utils/views.ts";
 
 interface Arguments {
@@ -694,8 +698,9 @@ const destEnvBody = (srcKey: string): Record<string, unknown> => {
 
 const syncManifestPath = syncManifestPathFor(inputArgs.projKeySource, inputArgs.projKeyDest);
 let previousManifest: SyncManifest | null = null;
-const updatedManifestFlags: Record<string, SyncManifestFlag> = {};
-const updatedManifestSegments: Record<string, Record<string, SyncManifestSegment>> = {};
+// Null-prototype dictionaries: a flag or environment named "__proto__" must be an own entry that serializes
+const updatedManifestFlags = emptyRecord<SyncManifestFlag>();
+const updatedManifestSegments = emptyRecord<Record<string, SyncManifestSegment>>();
 let incrementalSkipCount = 0;
 let incrementalEnvSkipCount = 0;
 let incrementalSegmentSkipCount = 0;
@@ -705,25 +710,65 @@ let incrementalSegmentSkipCount = 0;
 // that cannot be read, or that records another project pair (keys containing "-" can share a file
 // name), stops the run while the destination is still unchanged, since its entries would be carried
 // forward and trusted by incremental skips, view linking and revert.
+// The manifest is only trusted for the destination it was written for (same project keys in another
+// account or domain are unrelated resources); the account is read best-effort from caller-identity
+const destIdentity: DestinationIdentity = {
+  domain,
+  accountId: await getAccountId(apiKey, domain).catch(() => undefined),
+};
 try {
-  previousManifest = await readSyncManifest(inputArgs.projKeySource, inputArgs.projKeyDest);
+  previousManifest = await readSyncManifest(inputArgs.projKeySource, inputArgs.projKeyDest, undefined, destIdentity);
 } catch (error) {
   console.log(Colors.red(`\n❌ ${error instanceof Error ? error.message : String(error)}`));
   console.log(Colors.yellow(`   Move or delete ${syncManifestPath} to start a fresh manifest.`));
   Deno.exit(1);
 }
 
+if (previousManifest && !previousManifest.destDomain) {
+  console.log(Colors.yellow(
+    `\n⚠ Sync manifest ${syncManifestPath} comes from an older version and does not record the destination it was written ` +
+      `for, so it cannot be verified against ${domain}${destIdentity.accountId ? ` (account ${destIdentity.accountId})` : ""}. ` +
+      `Make sure this working directory was only ever used for this destination; this run stamps it.`,
+  ));
+}
+
+// Destination environment a selected source environment migrates to (undefined: not migrated this run)
+const destEnvOfSelected = (sourceEnv: string): string | undefined =>
+  envkeys.includes(sourceEnv) ? (inputArgs.envMap && envMapping[sourceEnv] ? envMapping[sourceEnv] : sourceEnv) : undefined;
+
 // The manifest records where each segment copy lives; a mapping that now sends a source environment
 // elsewhere would make its entries claim unrelated segments there, so such a run stops before writing
-const envMismatches = segmentEnvironmentMismatches(
-  previousManifest,
-  (sourceEnv) => envkeys.includes(sourceEnv) ? (inputArgs.envMap && envMapping[sourceEnv] ? envMapping[sourceEnv] : sourceEnv) : undefined,
-);
+const envMismatches = segmentEnvironmentMismatches(previousManifest, destEnvOfSelected);
 if (envMismatches.length > 0) {
   console.log(Colors.red(`\n❌ The environment mapping differs from the one the sync manifest ${syncManifestPath} was written with:`));
   envMismatches.forEach((m) => console.log(Colors.red(`   ${m}`)));
   console.log(Colors.yellow(`   Re-run with the previous mapping, or revert that migration and remove the manifest before migrating with the new one.`));
   Deno.exit(1);
+}
+
+// Segment entries from older versions do not record their destination environment, so their ownership
+// is only reused once the copy is found where the current mapping points: found entries are stamped,
+// missing ones drop their ownership (conflict handling then applies), anything else stops the run
+const legacySegments = legacySegmentEntries(previousManifest, destEnvOfSelected);
+if (legacySegments.length > 0) {
+  console.log(Colors.yellow(`\n⚠ Verifying ${legacySegments.length} segment entr${legacySegments.length === 1 ? "y" : "ies"} from an older sync manifest against the destination...`));
+  const dropped: string[] = [];
+  for (const e of legacySegments) {
+    const resp = await rateLimitRequest(
+      ldAPIRequest(apiKey, domain, `segments/${inputArgs.projKeyDest}/${e.destEnv}/${e.destKey}`),
+      "segments",
+    );
+    if (resp.status === 200) {
+      previousManifest!.segments![e.sourceEnv][e.key].destEnv = e.destEnv;
+    } else if (resp.status === 404) {
+      delete previousManifest!.segments![e.sourceEnv][e.key];
+      dropped.push(`${e.sourceEnv}/${e.key} (not found as ${e.destEnv}/${e.destKey})`);
+    } else {
+      console.log(Colors.red(`\n❌ Could not verify legacy sync manifest entry ${e.sourceEnv}/${e.key} in ${e.destEnv} (HTTP ${resp.status}); stopping before any write.`));
+      Deno.exit(1);
+    }
+  }
+  console.log(Colors.gray(`  ${legacySegments.length - dropped.length} confirmed and stamped${dropped.length > 0 ? `; ownership dropped for ${dropped.join(", ")}` : ""}`));
 }
 
 // Flag-scope filters leave flags unattempted, so they cannot complete an inventory an aborted run left incomplete
@@ -1251,7 +1296,7 @@ if (inputArgs.migrateSegments) {
           console.log(Colors.gray(`    ✓ ${segment.key}: unchanged (v${segment.version})${tagNote}, skipping`));
           incrementalSegmentSkipCount++;
           // Carry forward previous manifest entry
-          if (!updatedManifestSegments[env.key]) updatedManifestSegments[env.key] = {};
+          if (!updatedManifestSegments[env.key]) updatedManifestSegments[env.key] = emptyRecord();
           updatedManifestSegments[env.key][segment.key] = prevSegment;
           continue;
         }
@@ -1315,7 +1360,8 @@ if (inputArgs.migrateSegments) {
             ? await resolveConflictAction('segment', segmentKey)
             : 'overwrite';
           if (action === 'abort') {
-            // The segment phase is sequential: nothing else is in flight
+            // The segment phase is sequential: nothing else is in flight, and this segment was not written
+            segmentsAttempted.delete(`${env.key}/${segment.key}`);
             requestAbort('segment', segmentKey);
             await finalizeAbort();
           } else if (action === 'skip') {
@@ -1486,12 +1532,12 @@ if (inputArgs.migrateSegments) {
 
       // Track segment version for sync manifest only if it was actually created/patched
       if (segmentCreated) {
-        if (!updatedManifestSegments[env.key]) updatedManifestSegments[env.key] = {};
+        if (!updatedManifestSegments[env.key]) updatedManifestSegments[env.key] = emptyRecord();
         updatedManifestSegments[env.key][segment.key] = withExtraDestKeys({
           version: segment.version ?? 0,
           lastModified: segment.lastModifiedDate,
           ...(segmentKey !== segment.key && { destKey: segmentKey }),
-          ...(destEnvKey !== env.key && { destEnv: destEnvKey }),
+          destEnv: destEnvKey,
         }, ownEntry(ownEntry(previousManifest?.segments, env.key), segment.key), segment.key);
       }
     };
@@ -2660,7 +2706,7 @@ function carryForwardManifestEntries(aborting = false): void {
       if (segmentsAttempted.has(id) && !segmentsSkippedByConflict.has(id) && !inFlight(hasEntry)) continue;
       const envEntries = Object.hasOwn(updatedManifestSegments, envKey)
         ? updatedManifestSegments[envKey]
-        : (updatedManifestSegments[envKey] = {});
+        : (updatedManifestSegments[envKey] = emptyRecord());
       if (!Object.hasOwn(envEntries, key)) envEntries[key] = entry;
     }
   }
@@ -2779,6 +2825,8 @@ async function writeSyncManifestFile(incomplete?: SyncManifest["incomplete"]): P
     lastSyncTimestamp: new Date().toISOString(),
     sourceProject: inputArgs.projKeySource,
     destProject: inputArgs.projKeyDest,
+    destDomain: domain,
+    ...(destIdentity.accountId ? { destAccountId: destIdentity.accountId } : {}),
     ...entries,
     ...(marker ? { incomplete: marker } : {}),
   };

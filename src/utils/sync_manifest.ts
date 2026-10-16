@@ -44,6 +44,10 @@ export interface SyncManifest {
   lastSyncTimestamp: string;
   sourceProject: string;
   destProject: string;
+  /** Destination domain the manifest was written for; absent in manifests from older versions */
+  destDomain?: string;
+  /** Destination account the manifest was written for (caller-identity), when the token could read it */
+  destAccountId?: string;
   flags: Record<string, SyncManifestFlag>;
   /** segments[sourceEnvKey][segmentKey] */
   segments?: Record<string, Record<string, SyncManifestSegment>>;
@@ -69,6 +73,17 @@ export interface IncompleteMarker {
   unresolved?: { flags: string[]; segments: string[] };
 }
 
+/** The destination a run or revert talks to; a manifest is only trusted for the one it was written for. */
+export interface DestinationIdentity {
+  domain: string;
+  accountId?: string;
+}
+
+/** A dictionary without a prototype, so keys such as "__proto__" or "constructor" are plain own entries. */
+export function emptyRecord<T>(): Record<string, T> {
+  return Object.create(null) as Record<string, T>;
+}
+
 export function syncManifestPath(
   sourceProject: string,
   destProject: string,
@@ -79,13 +94,16 @@ export function syncManifestPath(
 
 /**
  * Reads the manifest for a source/destination pair, or returns null when none exists.
- * @throws Error when the file exists but cannot be read or parsed, or records a different project
- *   pair (keys containing "-" can share a file name: a-b -> c and a -> b-c both map to a-b-c)
+ * @throws Error when the file exists but cannot be read or parsed, records a different project pair
+ *   (keys containing "-" can share a file name: a-b -> c and a -> b-c both map to a-b-c), or was written
+ *   for another destination domain or account than `identity`. A manifest from an older version has no
+ *   destination identity and is returned as is; callers warn and the next migrate run stamps it.
  */
 export async function readSyncManifest(
   sourceProject: string,
   destProject: string,
   baseDir: string = MIGRATION_DATA_DIR,
+  identity?: DestinationIdentity,
 ): Promise<SyncManifest | null> {
   const path = syncManifestPath(sourceProject, destProject, baseDir);
   let manifest: SyncManifest;
@@ -103,6 +121,18 @@ export async function readSyncManifest(
     throw new Error(
       `Sync manifest ${path} records ${manifest.sourceProject} -> ${manifest.destProject}, ` +
         `not ${sourceProject} -> ${destProject}; refusing to use its keys`,
+    );
+  }
+  if (identity && manifest.destDomain && manifest.destDomain !== identity.domain) {
+    throw new Error(
+      `Sync manifest ${path} was written for destination domain ${manifest.destDomain}, not ${identity.domain}; ` +
+        `refusing to use its keys (migrating the same projects to another destination needs its own working directory)`,
+    );
+  }
+  if (identity?.accountId && manifest.destAccountId && manifest.destAccountId !== identity.accountId) {
+    throw new Error(
+      `Sync manifest ${path} was written for destination account ${manifest.destAccountId}, not ${identity.accountId}; ` +
+        `refusing to use its keys (migrating the same projects to another destination needs its own working directory)`,
     );
   }
   return manifest;
@@ -320,7 +350,7 @@ export function adoptUnresolved(
  */
 export function retireDeletedFlags(manifest: SyncManifest, deletedDestKeys: Iterable<string>): SyncManifest {
   const deleted = new Set(deletedDestKeys);
-  const flags: SyncManifest["flags"] = {};
+  const flags: SyncManifest["flags"] = emptyRecord();
   for (const [key, entry] of Object.entries(manifest.flags)) {
     const remaining = ownedKeys(key, entry).filter((k) => !deleted.has(k));
     if (remaining.length === 0) continue;
@@ -342,7 +372,8 @@ export function retireDeletedFlags(manifest: SyncManifest, deletedDestKeys: Iter
  * Recorded segment copies whose destination environment differs from where the current mapping sends
  * their source environment (`destEnvOf` returns undefined for a source environment not migrated this
  * run). Treating such an entry as an owned copy would overwrite an unrelated segment in the new
- * environment, so a run with a changed mapping must stop before writing.
+ * environment, so a run with a changed mapping must stop before writing. Entries from older versions
+ * without a recorded destination environment cannot be checked offline; see legacySegmentEntries.
  */
 export function segmentEnvironmentMismatches(
   previous: SyncManifest | null,
@@ -353,13 +384,35 @@ export function segmentEnvironmentMismatches(
     const current = destEnvOf(sourceEnv);
     if (current === undefined) continue;
     for (const [key, entry] of Object.entries(segments)) {
-      const recorded = entry.destEnv ?? sourceEnv;
+      if (!entry.destEnv) continue;
+      const recorded = entry.destEnv;
       if (recorded !== current) {
         mismatches.push(`${sourceEnv}/${key}: recorded in destination environment "${recorded}", mapping now targets "${current}"`);
       }
     }
   }
   return mismatches;
+}
+
+/**
+ * Segment entries from older versions (no recorded destination environment) in source environments
+ * migrated this run, with the destination environment the current mapping targets. Their ownership
+ * can only be reused after the copy is found there: the caller probes the destination, stamps the
+ * entry when found and drops it when not.
+ */
+export function legacySegmentEntries(
+  previous: SyncManifest | null,
+  destEnvOf: (sourceEnv: string) => string | undefined,
+): Array<{ sourceEnv: string; key: string; destKey: string; destEnv: string }> {
+  const legacy: Array<{ sourceEnv: string; key: string; destKey: string; destEnv: string }> = [];
+  for (const [sourceEnv, segments] of Object.entries(previous?.segments ?? {})) {
+    const destEnv = destEnvOf(sourceEnv);
+    if (destEnv === undefined) continue;
+    for (const [key, entry] of Object.entries(segments)) {
+      if (!entry.destEnv) legacy.push({ sourceEnv, key, destKey: entry.destKey ?? key, destEnv });
+    }
+  }
+  return legacy;
 }
 
 /** Destination keys of the flags a manifest records: the destKey when the flag was renamed, else the source key, plus adopted extra copies. */

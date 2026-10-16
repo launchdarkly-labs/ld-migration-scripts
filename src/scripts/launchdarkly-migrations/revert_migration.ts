@@ -15,8 +15,10 @@ import * as Colors from "https://deno.land/std@0.149.0/fmt/colors.ts";
 import { parse as parseYaml } from "https://deno.land/std@0.224.0/yaml/parse.ts";
 import { ldAPIRequest, ldAPIPostRequest, rateLimitRequest } from "../../utils/utils.ts";
 import { getDestinationApiKey, getSourceApiKey } from "../../utils/api_keys.ts";
+import { getAccountId } from "../../utils/account_guard.ts";
 import {
   assertManifestComplete,
+  type DestinationIdentity,
   manifestDestinationFlagKeys,
   readSyncManifest,
   retireDeletedFlags,
@@ -347,14 +349,23 @@ export interface MigratedFlagKeys {
  * @throws Error when a manifest exists but is unreadable, records another project pair, or is marked
  *   incomplete by an aborted run: falling back to raw keys could select another source's flag
  */
+// The destination this revert talks to; set per project before any manifest is read
+let manifestIdentity: DestinationIdentity | undefined;
+
 const loadMigratedFlagKeys = async (
   sourceProjectKey: string,
   destProjectKey: string
 ): Promise<MigratedFlagKeys> => {
   const manifestPath = syncManifestPath(sourceProjectKey, destProjectKey);
-  const manifest = await readSyncManifest(sourceProjectKey, destProjectKey);
+  const manifest = await readSyncManifest(sourceProjectKey, destProjectKey, undefined, manifestIdentity);
   if (manifest) {
     assertManifestComplete(manifest, manifestPath);
+    if (!manifest.destDomain) {
+      console.log(Colors.yellow(
+        `  Warning: ${manifestPath} comes from an older version and does not record which destination it was written for; ` +
+        `make sure this working directory was only ever used for ${manifestIdentity?.domain ?? "this destination"}`
+      ));
+    }
     const keys = manifestDestinationFlagKeys(manifest);
     console.log(Colors.gray(`  Using sync manifest ${manifestPath} (${keys.length} flag(s), destination keys)`));
     return { project: sourceProjectKey, keys, source: "manifest" };
@@ -1046,7 +1057,7 @@ const retireRevertedManifestEntries = async (
   if (config.dryRun || !config.sourceProjectKey || deletedKeys.size === 0) return;
   const path = syncManifestPath(config.sourceProjectKey, config.projectKey);
   try {
-    const manifest = await readSyncManifest(config.sourceProjectKey, config.projectKey);
+    const manifest = await readSyncManifest(config.sourceProjectKey, config.projectKey, undefined, manifestIdentity);
     if (!manifest) return;
     const updated = retireDeletedFlags(manifest, deletedKeys);
     const retired = Object.keys(manifest.flags).length - Object.keys(updated.flags).length;
@@ -1263,6 +1274,7 @@ const revertProject = async (apiKey: string, config: RevertConfig): Promise<void
   
   try {
     const domain = config.domain || "app.launchdarkly.com";
+    manifestIdentity = { domain, accountId: await getAccountId(apiKey, domain).catch(() => undefined) };
     
     // 1. Discover migration flags (smart or full scan)
     console.log(Colors.cyan("\n🚩 Step 1: Identifying migration flags"));
