@@ -1454,8 +1454,14 @@ if (inputArgs.migrateSegments) {
           ldAPIRequest(apiKey, domain, `segments/${inputArgs.projKeyDest}/${destEnvKey}/${segmentKey}`),
           'segments',
         );
-        if (existingResp.status === 200) destinationSegment = await existingResp.json();
-        else console.log(Colors.yellow(`    ⚠ Could not read existing segment ${segmentKey} (HTTP ${existingResp.status}); targeting removed in the source is not cleared`));
+        if (existingResp.status === 200) {
+          destinationSegment = await existingResp.json();
+        } else {
+          // Removed targeting cannot be cleared: count it as an error so the run fails and the manifest
+          // writer drops the segment's cached version instead of recording the stale copy as synced
+          console.log(Colors.red(`    ✗ Could not read existing segment ${segmentKey} (HTTP ${existingResp.status}); targeting removed in the source is not cleared`));
+          segmentsWithErrors.add(`${destEnvKey}/${segmentKey}`);
+        }
       }
       const clearIfRemoved = (field: string): void => {
         if (Array.isArray(destinationSegment?.[field]) && destinationSegment[field].length > 0) {

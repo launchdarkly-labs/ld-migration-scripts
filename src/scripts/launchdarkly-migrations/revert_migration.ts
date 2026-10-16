@@ -1069,7 +1069,8 @@ const revertFlag = async (
  */
 const retireRevertedManifestEntries = async (
   config: RevertConfig,
-  deletedKeys: Set<string>
+  deletedKeys: Set<string>,
+  stats: RevertStats
 ): Promise<void> => {
   if (config.dryRun || !config.sourceProjectKey || deletedKeys.size === 0) return;
   const path = syncManifestPath(config.sourceProjectKey, config.projectKey);
@@ -1081,10 +1082,12 @@ const retireRevertedManifestEntries = async (
     await Deno.writeTextFile(path, JSON.stringify(updated, null, 2));
     console.log(Colors.gray(`  Sync manifest ${path}: ${retired} flag entr${retired === 1 ? "y" : "ies"} retired, ${Object.keys(updated.flags).length} kept`));
   } catch (error) {
-    console.log(Colors.yellow(
-      `  Warning: could not update ${path} after deleting flags (${error instanceof Error ? error.message : String(error)}); ` +
-      `remove its entries for the deleted flags by hand before rerunning the migration`
-    ));
+    // Recorded as an error: a manifest that still lists deleted flags would let the next migration treat a
+    // flag another source creates under one of those keys as its own, so the revert must not report success
+    const errorMsg = `Could not update ${path} after deleting flags (${error instanceof Error ? error.message : String(error)}); ` +
+      `remove its entries for the deleted flags by hand before rerunning the migration`;
+    stats.errors.push(errorMsg);
+    console.log(Colors.red(`  ✗ ${errorMsg}`));
   }
 };
 
@@ -1253,7 +1256,8 @@ const printProjectBanner = (index: number, total: number, projectKey: string): v
 /**
  * Reverts a single destination project
  */
-const revertProject = async (apiKey: string, config: RevertConfig): Promise<void> => {
+/** Reverts one destination project; false when the revert finished with errors. */
+const revertProject = async (apiKey: string, config: RevertConfig): Promise<boolean> => {
   console.log(Colors.cyan("Configuration:"));
   console.log(Colors.gray(`  Project: ${config.projectKey}`));
   if (config.sourceProjectKey) {
@@ -1309,8 +1313,8 @@ const revertProject = async (apiKey: string, config: RevertConfig): Promise<void
     if (migrationFlags.length === 0) {
       console.log(Colors.yellow("\nNo migration flags found. Nothing to revert."));
       // Entries of recorded flags that are confirmed gone are still retired
-      await retireRevertedManifestEntries(config, new Set(absent));
-      return;
+      await retireRevertedManifestEntries(config, new Set(absent), stats);
+      return stats.errors.length === 0;
     }
     
     // 3. Fetch environments
@@ -1330,10 +1334,11 @@ const revertProject = async (apiKey: string, config: RevertConfig): Promise<void
     }
 
     // 5b. Retire the manifest entries of deleted and confirmed-absent flags so a rerun does not claim another source's flag
-    await retireRevertedManifestEntries(config, new Set([...deletedKeys, ...absent]));
+    await retireRevertedManifestEntries(config, new Set([...deletedKeys, ...absent]), stats);
     
     // 6. Print summary
     printRevertSummary(config, stats);
+    return stats.errors.length === 0;
     
   } catch (error) {
     console.log(Colors.red(`\n❌ Fatal error: ${error instanceof Error ? error.message : String(error)}`));
@@ -1351,11 +1356,18 @@ const main = async (): Promise<void> => {
   console.log(Colors.blue("\n🔄 LaunchDarkly Migration Revert Tool"));
   console.log(Colors.blue("=".repeat(70) + "\n"));
 
+  let failed = 0;
   for (let i = 0; i < configs.length; i++) {
     if (configs.length > 1) {
       printProjectBanner(i, configs.length, configs[i].projectKey);
     }
-    await revertProject(apiKey, configs[i]);
+    if (!(await revertProject(apiKey, configs[i]))) failed++;
+  }
+  // A revert that finished with errors (a flag that could not be removed, a manifest that could not be
+  // updated) exits non-zero so the workflow stops instead of continuing on a partial revert
+  if (failed > 0) {
+    console.log(Colors.red(`\n${failed} of ${configs.length} project revert(s) finished with errors`));
+    Deno.exit(1);
   }
 };
 
