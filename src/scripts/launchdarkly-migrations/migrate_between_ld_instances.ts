@@ -2080,8 +2080,27 @@ const wouldPatchChangeEnvironment = (
  * Skips patch if environment is already in desired state
  */
 // Segment keys per source environment from the extracted data; null when not extracted.
+// Segment files are only trusted when the extraction that produced the flag data also extracted
+// segments (extraction.json): with segment extraction disabled, older segment files stay on disk
+// and would misclassify a segment created since as a dangling reference.
 const sourceSegmentKeysCache = new Map<string, Set<string> | null>();
+let extractionIncludedSegments: boolean | null = null;
+async function segmentsFromSameExtraction(): Promise<boolean> {
+  if (extractionIncludedSegments === null) {
+    try {
+      const meta = JSON.parse(await Deno.readTextFile(`./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/extraction.json`));
+      extractionIncludedSegments = meta.extractSegments === true;
+    } catch (_) {
+      extractionIncludedSegments = false; // no metadata (older extraction): cannot establish
+    }
+  }
+  return extractionIncludedSegments;
+}
+// Environments whose patch was applied without one or more dead rules, keyed flag\0destEnv.
+// Their version is left out of the sync manifest so --incremental reconsiders them.
+const envsWithDroppedRules = new Set<string>();
 async function segmentAbsentInSource(sourceEnv: string, segmentKey: string): Promise<boolean> {
+  if (!(await segmentsFromSameExtraction())) return false;
   if (!sourceSegmentKeysCache.has(sourceEnv)) {
     try {
       const data = JSON.parse(await Deno.readTextFile(`./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/segments/${sourceEnv}.json`));
@@ -2162,6 +2181,7 @@ const makePatchCall = async (
         console.log(Colors.yellow(`\t  ⚠ ${env}: segment "${segmentKey}" does not exist in source or destination; dropping ${removed.length} dead rule(s) and retrying`));
         if (!skippedFieldsByFlag.has(flagKey)) skippedFieldsByFlag.set(flagKey, new Set());
         for (const r of removed) skippedFieldsByFlag.get(flagKey)!.add(`${env}: ${r} (references unknown segment "${segmentKey}")`);
+        envsWithDroppedRules.add(`${flagKey}\u0000${env}`);
         return await makePatchCall(flagKey, stripped, env, maintainerId, fallbackMemberId, variations, destinationFlag, sourceEnv, retryCount, true);
       }
     } else if (segmentKey) {
@@ -2690,8 +2710,9 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
       });
       await makePatchCall(createdFlagKey, patchReq, destEnvKey, flagMaintainerId, currentMemberId, destinationVariations, destinationFlag, env);
 
-    // Track env version in manifest
-    if (envVersion !== undefined) {
+    // Track env version in manifest. An environment applied without dead rules gets no entry, so
+    // the next --incremental run re-evaluates it (and restores the rules if the segment exists by then).
+    if (envVersion !== undefined && !envsWithDroppedRules.has(`${createdFlagKey}\u0000${destEnvKey}`)) {
       flagManifestEnvs[env] = { version: envVersion, lastModified: envLastModified };
     }
     }

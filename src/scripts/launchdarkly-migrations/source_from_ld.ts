@@ -336,3 +336,14 @@ if (inputArgs.extractViews === false) {
     console.log(`  Warning: could not extract views: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
+
+// Record what this extraction covered, so migrate can tell whether the segment files next to the
+// flag data come from the same extraction (segment extraction can be disabled, leaving old files).
+await writeSourceData(projPath, "extraction", {
+  extractedAt: new Date().toISOString(),
+  extractSegments: Boolean(inputArgs.extractSegments),
+  extractBigSegments: Boolean(inputArgs.extractBigSegments),
+  includeArchived: Boolean(inputArgs.includeArchived),
+  environments: allEnvironments.map((e: any) => e.key),
+  flagCount: flags.length,
+});
