@@ -857,6 +857,9 @@ const segmentsWithErrors: Set<string> = new Set();
 // --on-conflict skip: the destination copy stays as it is, so the previous manifest entry is kept
 const flagsSkippedByConflict: Set<string> = new Set();
 const segmentsSkippedByConflict: Set<string> = new Set(); // "<sourceEnv>/<segmentKey>"
+// Segments whose create was attempted this run ("<sourceEnv>/<segmentKey>"); a previous manifest entry
+// for anything else (no extracted data for the environment, unselected environment, segments off) is kept
+const segmentsAttempted: Set<string> = new Set();
 const flagErrorDetails: Map<string, string> = new Map();
 
 // Prerequisite check: with include/exclude filters, every prerequisite of a selected flag must be
@@ -1183,6 +1186,7 @@ if (inputArgs.migrateSegments) {
         }
       }
 
+      segmentsAttempted.add(`${env.key}/${segment.key}`);
       let segmentKey = segment.key;
       let segmentName = segment.name;
       let attemptCount = 0;
@@ -2539,10 +2543,12 @@ if (previousManifest) {
   for (const [key, entry] of Object.entries(previousManifest.flags ?? {})) {
     if (!attempted.has(key) && !Object.hasOwn(updatedManifestFlags, key)) updatedManifestFlags[key] = entry;
   }
+  // Attempted segments were rewritten above (or failed and stay absent); a selected environment alone
+  // does not mean every recorded segment was attempted, e.g. when it has no extracted segment data
   for (const [envKey, segments] of Object.entries(previousManifest.segments ?? {})) {
-    const rewritten = inputArgs.migrateSegments && envkeys.includes(envKey);
     for (const [key, entry] of Object.entries(segments)) {
-      if (rewritten && !segmentsSkippedByConflict.has(`${envKey}/${key}`)) continue;
+      const id = `${envKey}/${key}`;
+      if (segmentsAttempted.has(id) && !segmentsSkippedByConflict.has(id)) continue;
       const envEntries = Object.hasOwn(updatedManifestSegments, envKey)
         ? updatedManifestSegments[envKey]
         : (updatedManifestSegments[envKey] = {});

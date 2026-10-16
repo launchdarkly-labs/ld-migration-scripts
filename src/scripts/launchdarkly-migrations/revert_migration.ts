@@ -569,6 +569,12 @@ const discoverMigrationFlags = async (
       };
     }
     
+    if (own.source === "manifest") {
+      // An empty manifest is authoritative too (e.g. every flag was conflict-skipped): a destination-wide
+      // scan could select marker-matching flags that this migration never wrote
+      console.log(Colors.yellow("  The sync manifest lists no flags for this source; nothing to revert"));
+      return { flags: [], stats: { checked: 0, identified: 0 } };
+    }
     if (ambiguous.length > 0) {
       // Every key was ambiguous: a full scan would only find marker-less flags, which could be the siblings'
       console.log(Colors.yellow("  No unambiguous flags to revert"));
