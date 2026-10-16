@@ -987,6 +987,10 @@ const flagsAttempted: Set<string> = new Set();
 // a possibly-existing untracked copy and must not block revert through the incomplete marker
 const flagsCreateRejected: Set<string> = new Set();
 const segmentsCreateRejected: Set<string> = new Set(); // "<sourceEnv>/<segmentKey>"
+// A manifest that could not be saved leaves no trustworthy inventory for revert or --incremental: the run
+// fails so the workflow stops instead of advancing on a missing or stale manifest. Declared here because
+// the manifest writer can run from an abort or phase failure before the flag phase.
+let manifestWriteFailed = false;
 const flagErrorDetails: Map<string, string> = new Map();
 
 // Prerequisite check: with include/exclude filters, every prerequisite of a selected flag must be
@@ -2745,9 +2749,6 @@ await writeSyncManifestFile();
 
 // Link migrated flags and segments to their views. Done after migration so it also covers
 // flags and segments that already existed in the destination.
-// A manifest that could not be saved leaves no trustworthy inventory for revert or --incremental: the
-// run fails so the workflow stops instead of advancing on a missing or stale manifest
-let manifestWriteFailed = false;
 let viewLinkingFailed = false;
 if (usableViews.size > 0) try {
   console.log(Colors.cyan("\n=== View Links ==="));
