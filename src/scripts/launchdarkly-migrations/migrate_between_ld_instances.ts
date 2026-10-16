@@ -59,6 +59,7 @@ interface Arguments {
   concurrency?: number;
   createProject?: boolean;
   createEnvironments?: boolean;
+  migrateViews?: boolean;
 }
 
 // Sync manifest types and path live in utils/sync_manifest.ts, shared with the revert tool
@@ -91,6 +92,7 @@ interface MigrationConfig {
     concurrency?: number;
     createProject?: boolean;
     createEnvironments?: boolean;
+    migrateViews?: boolean;
   };
   /** Alias for options — YAML configs may use migration: instead of options: */
   migration?: MigrationConfig["options"];
@@ -289,6 +291,10 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .default("concurrency", 10)
   .alias("create-project", "createProject")
   .alias("create-environments", "createEnvironments")
+  .alias("migrate-views", "migrateViews")
+  .boolean("migrate-views")
+  .default("migrate-views", undefined)
+  .describe("migrate-views", "Recreate the source project's views and link flags and segments to them (default: true; --migrate-views=false to skip)")
   .alias("dest-project-name", "destProjectName")
   .string("dest-project-name")
   .boolean("m")
@@ -356,6 +362,7 @@ if (cliArgs.config) {
       concurrency: cliArgs.concurrency ?? opts?.concurrency ?? 10,
       createProject: cliArgs.createProject ?? opts?.createProject ?? false,
       createEnvironments: cliArgs.createEnvironments ?? opts?.createEnvironments ?? false,
+      migrateViews: cliArgs.migrateViews ?? opts?.migrateViews ?? true,
       config: cliArgs.config
     };
     
@@ -370,6 +377,8 @@ const migrationTags = inputArgs.tags
   ?.split(",")
   .map((tag) => tag.trim())
   .filter(Boolean) ?? [];
+// Views are migrated unless opted out; --target-view links are created either way
+const migrateViews = inputArgs.migrateViews ?? true;
 
 console.log(Colors.blue("\n=== Migration Script Starting ==="));
 console.log(Colors.gray(`Source Project: ${cliArgs.projKeySource || '(from config)'}`));
@@ -391,6 +400,7 @@ console.log(Colors.gray(`  Migrate Big Segment Members: ${inputArgs.migrateBigSe
 console.log(Colors.gray(`  Conflict Prefix: ${inputArgs.conflictPrefix || 'none'}`));
 console.log(Colors.gray(`  On Conflict: ${inputArgs.onConflict || (inputArgs.conflictPrefix ? 'prefix' : 'overwrite')}`));
 console.log(Colors.gray(`  Target View: ${inputArgs.targetView || 'none'}`));
+console.log(Colors.gray(`  Migrate Views: ${migrateViews}`));
 console.log(Colors.gray(`  Tags: ${migrationTags.length > 0 ? migrationTags.join(', ') : 'none'}`));
 console.log(Colors.gray(`  Environments: ${inputArgs.environments || 'all'}`));
 console.log(Colors.gray(`  Env Mapping: ${inputArgs.envMap || 'none'}`));
@@ -589,6 +599,8 @@ projectJson.environments.items.forEach((env: any) => {
   if (env.confirmChanges) newEnv.confirmChanges = env.confirmChanges;
   if (env.secureMode) newEnv.secureMode = env.secureMode;
   if (env.defaultTrackEvents) newEnv.defaultTrackEvents = env.defaultTrackEvents;
+  if (env.requireComments) newEnv.requireComments = env.requireComments;
+  if (env.critical) newEnv.critical = env.critical;
   if (env.tags) newEnv.tags = env.tags;
 
   buildEnv.push(newEnv);
@@ -884,9 +896,11 @@ if (missingPrereqs.size > 0) {
 }
 }
 
-// Views come from the views API during extraction; flags don't report which views they belong to
-const sourceViews: SourceView[] =
-  (await getJson(`./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/views.json`)) ?? [];
+// Views come from the views API during extraction; flags don't report which views they belong to.
+// With migrateViews off, no source view is recreated or linked; only --target-view applies.
+const sourceViews: SourceView[] = migrateViews
+  ? (await getJson(`./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/views.json`)) ?? []
+  : [];
 const viewsToCreate = new Map<string, View>();
 for (const v of sourceViews) {
   const view: View = { key: v.key, name: v.name };
@@ -910,7 +924,7 @@ if (inputArgs.targetView && !viewsToCreate.has(inputArgs.targetView)) {
 
 const usableViews = new Set<string>(); // views that exist (or would, in a dry run) in the destination
 if (viewsToCreate.size === 0) {
-  console.log("No views found in extracted source data.");
+  console.log(migrateViews ? "No views found in extracted source data." : "Views are not migrated (migrateViews: false).");
 }
 for (const view of viewsToCreate.values()) {
   if (await checkViewExists(apiKey, domain, inputArgs.projKeyDest, view.key)) {
@@ -967,6 +981,48 @@ if (contextKinds && contextKinds.length > 0) {
       console.log(Colors.red(`  ✗ Context kind "${kind.key}" failed (${resp.status}): ${await resp.text()}`));
     }
   }
+}
+
+// ==================== Segment Tags ====================
+
+/**
+ * Merges the source tags and the migration tags into an existing destination segment's tags.
+ * Only runs when migration tags are set: without them an existing segment keeps its tags.
+ * Returns a short log note, empty when nothing was changed.
+ */
+async function syncExistingSegmentTags(
+  destEnvKey: string,
+  destSegmentKey: string,
+  sourceTags: string[] | undefined,
+): Promise<string> {
+  if (migrationTags.length === 0) return "";
+  const segmentPath = `segments/${inputArgs.projKeyDest}/${destEnvKey}/${destSegmentKey}`;
+  const existingResp = await rateLimitRequest(ldAPIRequest(apiKey, domain, segmentPath), "segments");
+  if (existingResp.status !== 200) {
+    // Without the current tags the merge cannot run; count it so the run does not report success with tags missing
+    console.log(Colors.red(`    ✗ Could not read existing tags for segment ${destSegmentKey} (${existingResp.status})`));
+    segmentsWithErrors.add(`${destEnvKey}/${destSegmentKey}`);
+    return "";
+  }
+  const existing = await existingResp.json();
+  const desiredTags = mergeTags(sourceTags, migrationTags, existing.tags);
+  if (JSON.stringify(desiredTags) === JSON.stringify(existing.tags ?? [])) return "";
+  const tagResp = await dryRunAwarePatch(
+    inputArgs.dryRun || false,
+    apiKey,
+    domain,
+    segmentPath,
+    [buildPatch("tags", "replace", desiredTags)],
+    false,
+    "segments",
+    `environment: ${destEnvKey}`,
+  );
+  if (tagResp.status >= 400) {
+    console.log(Colors.red(`    ✗ Failed to update tags for segment ${destSegmentKey} (${tagResp.status})`));
+    segmentsWithErrors.add(`${destEnvKey}/${destSegmentKey}`);
+    return "";
+  }
+  return ", tags synced";
 }
 
 // ==================== Big Segment CSV Import ====================
@@ -1115,7 +1171,9 @@ if (inputArgs.migrateSegments) {
       if (inputArgs.incremental && previousManifest && !(isBigSegment && segment._importKeys)) {
         const prevSegment = previousManifest.segments?.[env.key]?.[segment.key];
         if (prevSegment && segment.version !== undefined && prevSegment.version === segment.version) {
-          console.log(Colors.gray(`    ✓ ${segment.key}: unchanged (v${segment.version}), skipping`));
+          // Migration tags are not part of the source version, so reconcile them on the skipped segment too
+          const tagNote = await syncExistingSegmentTags(destEnvKey, prevSegment.destKey ?? segment.key, segment.tags);
+          console.log(Colors.gray(`    ✓ ${segment.key}: unchanged (v${segment.version})${tagNote}, skipping`));
           incrementalSegmentSkipCount++;
           // Carry forward previous manifest entry
           if (!updatedManifestSegments[env.key]) updatedManifestSegments[env.key] = {};
@@ -1156,7 +1214,17 @@ if (inputArgs.migrateSegments) {
         'segments'
       );
 
-      const segmentStatus = await segmentResp.status;
+      let segmentStatus = segmentResp.status;
+      if (inputArgs.dryRun && segmentStatus === 201) {
+        // The simulated POST always succeeds; look the segment up so conflict handling and the tag patch are previewed
+        const probe = await rateLimitRequest(
+          ldAPIRequest(apiKey, domain, `segments/${inputArgs.projKeyDest}/${destEnvKey}/${segmentKey}`),
+          'segments',
+        );
+        // Only 404 means absent; any other failure goes through the error path below instead of a "created" preview
+        if (probe.status === 200) segmentStatus = 409;
+        else if (probe.status !== 404) segmentStatus = probe.status;
+      }
         
         if (segmentStatus === 201 || segmentStatus === 200) {
           segmentCreated = true;
@@ -1201,33 +1269,8 @@ if (inputArgs.migrateSegments) {
         }
       }
 
-      if (segmentCreated && segmentAlreadyExisted && migrationTags.length > 0) {
-        const segmentPath = `segments/${inputArgs.projKeyDest}/${destEnvKey}/${segmentKey}`;
-        const existingSegmentResp = await rateLimitRequest(
-          ldAPIRequest(apiKey, domain, segmentPath),
-          "segments",
-        );
-        if (existingSegmentResp.status === 200) {
-          const existingSegment = await existingSegmentResp.json();
-          const desiredTags = mergeTags(segment.tags, migrationTags, existingSegment.tags);
-          if (JSON.stringify(desiredTags) !== JSON.stringify(existingSegment.tags ?? [])) {
-            const tagResp = await dryRunAwarePatch(
-              inputArgs.dryRun || false,
-              apiKey,
-              domain,
-              segmentPath,
-              [buildPatch("tags", "replace", desiredTags)],
-              false,
-              "segments",
-              `environment: ${destEnvKey}`,
-            );
-            if (tagResp.status >= 400) {
-              console.log(Colors.red(`    ✗ Failed to update tags for segment ${segmentKey} (${tagResp.status})`));
-            }
-          }
-        } else {
-          console.log(Colors.yellow(`    ⚠ Could not read existing tags for segment ${segmentKey} (${existingSegmentResp.status})`));
-        }
+      if (segmentCreated && segmentAlreadyExisted) {
+        await syncExistingSegmentTags(destEnvKey, segmentKey, segment.tags);
       }
 
       // Big segments: load members via the CSV import endpoint instead of patches
@@ -1490,6 +1533,9 @@ const convertPatchToSemanticInstruction = (
     case 'on':
       return { instruction: convertOnOffInstruction(patch.value), shouldSkip: false };
     case 'offVariation':
+      // Semantic patches have no instruction that clears the off variation (the source serves the SDK
+      // fallback while off); report it as skipped so it shows up under the approval's skipped fields
+      if (patch.op === 'remove') return { instruction: null, shouldSkip: true };
       return { instruction: convertOffVariationInstruction(patch.value, getVariationId), shouldSkip: false };
     case 'fallthrough':
       return { instruction: convertFallthroughInstruction(patch.value, getVariationId), shouldSkip: false };
@@ -1964,13 +2010,23 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
         }
       }
       if (allEnvsUnchanged) {
-        // Sync lifecycle (archived/deprecated) even when versions match — LD may not bump version for lifecycle-only changes
-        const destKey = flag.key;
+        // Sync lifecycle (archived/deprecated) even when versions match — LD may not bump version for lifecycle-only
+        // changes — and reconcile migration tags, which are not part of the source version either.
+        // The destination key comes from the manifest, so a flag renamed by a conflict prefix is patched, not its namesake.
+        const destKey = prevEntry.destKey ?? flag.key;
         let lifecycleSynced = false;
+        // A failed read or patch here leaves lifecycle/tags unsynced; record it so the summary and exit code say so
+        const reconcileFailed = (detail: string) => {
+          console.log(Colors.red(`\t  ✗ ${destKey}: ${detail}`));
+          flagsWithErrors.add(flag.key);
+          flagErrorDetails.set(flag.key, `lifecycle/tags reconcile failed: ${detail.slice(0, 300)}`);
+        };
         try {
           const destReq = ldAPIRequest(apiKey, domain, `flags/${inputArgs.projKeyDest}/${destKey}`);
           const destResp = await rateLimitRequest(destReq, 'flags');
-          if (destResp.status === 200) {
+          if (destResp.status !== 200) {
+            reconcileFailed(`could not read destination flag (HTTP ${destResp.status})`);
+          } else {
             const destFlag = await destResp.json();
             const changed = (a: any, b: any) => JSON.stringify(a) !== JSON.stringify(b);
             const lifecyclePatches: any[] = [];
@@ -1980,21 +2036,28 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
               lifecyclePatches.push(buildPatch("deprecated", "replace", flag.deprecated));
             if (flag.deprecatedDate !== undefined && changed(flag.deprecatedDate, destFlag.deprecatedDate))
               lifecyclePatches.push(buildPatch("deprecatedDate", "replace", flag.deprecatedDate));
+            if (migrationTags.length > 0) {
+              const desiredTags = mergeTags(flag.tags, migrationTags, destFlag.tags);
+              if (changed(desiredTags, destFlag.tags ?? []))
+                lifecyclePatches.push(buildPatch("tags", "replace", desiredTags));
+            }
             if (lifecyclePatches.length > 0) {
               const patchResp = await dryRunAwarePatch(
                 inputArgs.dryRun || false, apiKey, domain,
-                `flags/${inputArgs.projKeyDest}/${destKey}`, lifecyclePatches, false, 'flags', 'lifecycle (archived/deprecated)');
+                `flags/${inputArgs.projKeyDest}/${destKey}`, lifecyclePatches, false, 'flags', 'lifecycle (archived/deprecated) and tags');
               if (patchResp.status >= 200 && patchResp.status < 300) {
-                console.log(Colors.gray(`\t  → synced lifecycle (archived/deprecated)`));
+                console.log(Colors.gray(`\t  → synced ${lifecyclePatches.map((p) => p.path.replace(/^\//, "")).join(", ")}`));
                 lifecycleSynced = true;
+              } else {
+                reconcileFailed(`patch of ${lifecyclePatches.map((p) => p.path.replace(/^\//, "")).join(", ")} failed (HTTP ${patchResp.status}): ${(await patchResp.text()).slice(0, 200)}`);
               }
             }
           }
-        } catch (_) {
-          // ignore
+        } catch (error) {
+          reconcileFailed(error instanceof Error ? error.message : String(error));
         }
         const ts = flag.creationDate ? `, updated ${flag.creationDate}` : '';
-        console.log(Colors.gray(`\t✓ ${flag.key}: unchanged (v${flag._version}${ts})${lifecycleSynced ? ', lifecycle synced' : ''}, skipping`));
+        console.log(Colors.gray(`\t✓ ${flag.key}: unchanged (v${flag._version}${ts})${lifecycleSynced ? ', lifecycle/tags synced' : ''}, skipping`));
         // Carry forward the previous manifest entry unchanged
         updatedManifestFlags[flag.key] = prevEntry;
         incrementalSkipCountDelta++;
@@ -2139,7 +2202,7 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
       }
       
       // Add source flag's view associations (if not already added)
-      if (flag.viewKeys && Array.isArray(flag.viewKeys)) {
+      if (migrateViews && flag.viewKeys && Array.isArray(flag.viewKeys)) {
         flag.viewKeys.forEach((viewKey: string) => {
           if (!viewKeys.includes(viewKey)) {
             viewKeys.push(viewKey);
@@ -2171,7 +2234,9 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
           console.log(Colors.green(`\t✓ Created`));
         }
       } else if (flagResp.status === 409) {
-        // Flag already exists (shouldn't happen if our check above worked)
+        // The flag appeared between the existence check and the POST, or the check itself failed.
+        // Without a prefix it is treated like a flag found by the check: flag-level properties
+        // (name, tags, variations, lifecycle, ...) and environments are updated below.
         if (inputArgs.conflictPrefix && attemptCount === 1) {
           // Conflict detected with prefix enabled, retry with prefix
           console.log(Colors.yellow(`\t⚠ Conflict detected, retrying with prefix "${inputArgs.conflictPrefix}"`));

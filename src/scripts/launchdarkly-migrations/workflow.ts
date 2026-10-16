@@ -11,13 +11,20 @@ import { parse as parseYaml } from "https://deno.land/std@0.224.0/yaml/parse.ts"
 import * as Colors from "https://deno.land/std@0.149.0/fmt/colors.ts";
 import {
   coerceProjectKey,
-  findMergeCollisions,
+  computeMergeCollisions,
+  effectiveConflictPolicy,
   findMergedDestinations,
   hasMergeCollisions,
+  loadMergeKeys,
+  type MergeCollisions,
+  type MergeKeys,
+  mergeSelectionFromConfig,
   normalizeWorkflowConfig,
   partitionWorkflowSteps,
   type ProjectPair,
   resolveProjectPairs,
+  simulatePrefixedMerge,
+  SOURCE_DATA_DIR,
   usesProjectKeyMapping,
   usesProjectKeysList,
   withProjectPair,
@@ -163,6 +170,9 @@ const buildExtractSourceArgs = (config: WorkflowConfig): string[] => {
   if (config.migration?.migrateBigSegments === true) {
     args = [...args, "--extract-segments=true", "--extract-big-segments=true"];
   }
+  if (config.migration?.migrateViews === false) {
+    args = [...args, "--extract-views=false"];
+  }
   
   return args;
 };
@@ -292,6 +302,7 @@ const buildMigrationArgs = (config: WorkflowConfig): string[] => {
   args = addBooleanFlag(args, "-m", migration.assignMaintainerIds);
   args = addBooleanFlag(args, "-s=false", migration.migrateSegments === false);
   args = addBooleanFlag(args, "--migrate-big-segments", migration.migrateBigSegments);
+  args = addBooleanFlag(args, "--migrate-views=false", migration.migrateViews === false);
   args = addBooleanFlag(args, "--dry-run", migration.dryRun);
   args = addBooleanFlag(args, "--incremental", migration.incremental);
   args = addBooleanFlag(args, "--create-project", migration.createProject);
@@ -521,9 +532,19 @@ const runAccountGuard = async (steps: string[], config: WorkflowConfig): Promise
   }
 };
 
+const printCollisions = (collisions: MergeCollisions, color: (s: string) => string): void => {
+  if (collisions.flags.length > 0) {
+    console.log(color(`  flags: ${collisions.flags.join(", ")}`));
+  }
+  for (const [env, keys] of Object.entries(collisions.segments)) {
+    console.log(color(`  segments (${env}): ${keys.join(", ")}`));
+  }
+};
+
 /**
- * Exits when this pair's source shares flag or segment keys with earlier sources
- * merged into the same destination, unless migration.conflictPrefix is set.
+ * Exits when this pair's source shares flag or segment keys, among the resources being migrated,
+ * with earlier sources merged into the same destination, unless the migrate step's conflict
+ * policy keeps the earlier copies: `prefix` with a prefix that resolves every collision, or `skip`.
  */
 const runMergePreflight = async (
   pair: ProjectPair,
@@ -533,38 +554,79 @@ const runMergePreflight = async (
   if (earlierSources.length === 0) {
     return;
   }
-  let collisions;
+  const selection = mergeSelectionFromConfig(config);
+  let current: MergeKeys;
+  let earlier: MergeKeys[];
   try {
-    collisions = await findMergeCollisions(pair.source, earlierSources);
+    current = await loadMergeKeys(pair.source, SOURCE_DATA_DIR, selection);
+    earlier = await Promise.all(earlierSources.map((s) => loadMergeKeys(s, SOURCE_DATA_DIR, selection)));
   } catch (error) {
     console.log(Colors.red(`Error: ${error instanceof Error ? error.message : String(error)}`));
     Deno.exit(1);
   }
-  if (!hasMergeCollisions(collisions)) {
+  const others = earlierSources.join(", ");
+  const noCollisions = () =>
     console.log(Colors.gray(
-      `Merge check: no flag or segment keys shared with ${earlierSources.join(", ")} in ${pair.destination}`,
+      `Merge check: no migrated flag or segment keys shared with ${others} in ${pair.destination}`,
     ));
+
+  const { policy, prefix } = effectiveConflictPolicy(config);
+  if (policy === "prefix") {
+    if (!prefix) {
+      console.log(Colors.red(`Error: migration.onConflict is "prefix" but migration.conflictPrefix is not set`));
+      Deno.exit(1);
+    }
+    // Earlier sources hold prefixed copies of their own collisions, so compare against those, not raw keys
+    const { collisions, unresolvable } = simulatePrefixedMerge(current, earlier, prefix);
+    if (hasMergeCollisions(unresolvable)) {
+      console.log(Colors.red(
+        `Error: ${pair.source} shares keys with ${others} in ${pair.destination} that prefix "${prefix}" cannot resolve: ` +
+          `the prefixed key is taken as well (a second source already shares the key, or a resource has the prefixed key), ` +
+          `so the migrate step would overwrite it:`,
+      ));
+      printCollisions(unresolvable, Colors.red);
+      console.log(Colors.red(
+        `Exclude these keys (migration.includeFlags / excludeFlags), rename them in the source, or merge fewer projects into ${pair.destination}.`,
+      ));
+      Deno.exit(1);
+    }
+    if (!hasMergeCollisions(collisions)) {
+      noCollisions();
+      return;
+    }
+    console.log(Colors.yellow(
+      `Warning: ${pair.source} shares keys with ${others} in ${pair.destination}; these will be created with prefix "${prefix}":`,
+    ));
+    printCollisions(collisions, Colors.yellow);
     return;
   }
 
-  const lines = [
-    ...(collisions.flags.length > 0 ? [`  flags: ${collisions.flags.join(", ")}`] : []),
-    ...Object.entries(collisions.segments).map(([env, keys]) => `  segments (${env}): ${keys.join(", ")}`),
-  ];
-  const prefix = coerceProjectKey(config.migration?.conflictPrefix);
-  if (prefix) {
-    console.log(Colors.yellow(
-      `Warning: ${pair.source} shares keys with ${earlierSources.join(", ")} in ${pair.destination}; ` +
-        `these will be created with prefix "${prefix}":`,
-    ));
-    lines.forEach((line) => console.log(Colors.yellow(line)));
+  const collisions = computeMergeCollisions(current, earlier);
+  if (!hasMergeCollisions(collisions)) {
+    noCollisions();
     return;
   }
+  if (policy === "skip") {
+    console.log(Colors.yellow(
+      `Warning: ${pair.source} shares keys with ${others} in ${pair.destination}; with onConflict: skip, ` +
+        `these keep the targeting migrated from the earlier source(s) and ${pair.source}'s copies are not migrated:`,
+    ));
+    printCollisions(collisions, Colors.yellow);
+    return;
+  }
+  const consequence = policy === "abort"
+    ? `the migrate step would stop at the first shared key, after writing the keys before it`
+    : policy === "prompt"
+    ? `${pair.source} would overwrite their targeting (prompt can choose overwrite, and falls back to it outside a TTY or in a dry run)`
+    : `${pair.source} would overwrite their targeting`;
   console.log(Colors.red(
-    `Error: ${pair.source} shares keys with ${earlierSources.join(", ")}, which also migrate into ${pair.destination}. ` +
-      `Without migration.conflictPrefix, ${pair.source} would overwrite their targeting:`,
+    `Error: ${pair.source} shares keys with ${others}, which also migrate into ${pair.destination}. ` +
+      `With onConflict: ${policy}, ${consequence}:`,
   ));
-  lines.forEach((line) => console.log(Colors.red(line)));
+  printCollisions(collisions, Colors.red);
+  console.log(Colors.red(
+    `Set migration.conflictPrefix with migration.onConflict: prefix to migrate prefixed copies, or onConflict: skip to keep the earlier copies.`,
+  ));
   Deno.exit(1);
 };
 

@@ -60,6 +60,8 @@ export interface WorkflowConfig {
     concurrency?: number;
     createProject?: boolean;
     createEnvironments?: boolean;
+    /** false: views are neither extracted nor recreated/linked (targetView still applies) */
+    migrateViews?: boolean;
   };
   thirdPartyImport?: {
     inputFile: string;
@@ -293,7 +295,62 @@ export const SOURCE_DATA_DIR = "./data/launchdarkly-migrations/source/project";
 
 export interface MergeCollisions {
   flags: string[];
-  /** Environment key -> overlapping segment keys */
+  /** Destination environment key -> overlapping segment keys */
+  segments: Record<string, string[]>;
+}
+
+/** Which of a source's extracted resources the migrate step actually writes. */
+export interface MergeSelection {
+  includeFlags?: string[];
+  excludeFlags?: string[];
+  /** false: segments are not migrated, so they cannot collide */
+  migrateSegments?: boolean;
+  /** Source environment keys to migrate (unset: all) */
+  environments?: string[];
+  /** Source env key -> destination env key; when set, only mapped source environments migrate */
+  environmentMapping?: Record<string, string>;
+}
+
+/** The migrate step's resource selection; the workflow passes the same one to every project. */
+export function mergeSelectionFromConfig(config: WorkflowConfig): MergeSelection {
+  const m = config.migration ?? {};
+  // Same normalization as the migrate step applies to the comma-joined CLI values: trimmed, blanks dropped
+  const list = (values?: unknown[]): string[] | undefined => {
+    const out = (values ?? []).map((v) => String(v).trim()).filter(Boolean);
+    return out.length > 0 ? out : undefined;
+  };
+  const mapping = Object.fromEntries(
+    Object.entries(m.environmentMapping ?? {})
+      .map(([k, v]) => [k.trim(), String(v).trim()])
+      .filter(([k, v]) => k && v),
+  );
+  return {
+    includeFlags: list(m.includeFlags),
+    excludeFlags: list(m.excludeFlags),
+    migrateSegments: m.migrateSegments,
+    environments: list(m.environments),
+    environmentMapping: Object.keys(mapping).length > 0 ? mapping : undefined,
+  };
+}
+
+export type ConflictPolicy = "prompt" | "skip" | "overwrite" | "prefix" | "abort";
+
+/**
+ * The conflict policy the migrate step will apply for this config: migration.onConflict,
+ * else `prefix` when migration.conflictPrefix is set, else `overwrite` (mirrors migrate's default).
+ */
+export function effectiveConflictPolicy(
+  config: WorkflowConfig,
+): { policy: ConflictPolicy; prefix?: string } {
+  const prefix = coerceProjectKey(config.migration?.conflictPrefix);
+  const policy = (config.migration?.onConflict as ConflictPolicy | undefined) ??
+    (prefix ? "prefix" : "overwrite");
+  return { policy, prefix };
+}
+
+/** Keys one source contributes to a merged destination: flags, and segments per destination environment. */
+export interface MergeKeys {
+  flags: string[];
   segments: Record<string, string[]>;
 }
 
@@ -334,6 +391,10 @@ const loadFlagKeys = async (
   return extractKeys(data);
 };
 
+/**
+ * Source environment keys that have extracted segments, in the order migrate processes them
+ * (project.json order, which decides which duplicate write gets the prefix); sorted when project.json is absent.
+ */
 const listSegmentEnvs = async (
   baseDir: string,
   projectKey: string,
@@ -350,50 +411,179 @@ const listSegmentEnvs = async (
       throw error;
     }
   }
-  return envs.sort();
+  const project = await readJsonFile(`${baseDir}/${projectKey}/project.json`) as
+    | { environments?: { items?: Array<{ key?: unknown }> } }
+    | undefined;
+  const order = new Map(
+    (project?.environments?.items ?? [])
+      .map((e) => e.key)
+      .filter((k): k is string => typeof k === "string")
+      .map((k, i) => [k, i] as const),
+  );
+  const rank = (env: string) => order.get(env) ?? order.size;
+  return envs.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+};
+
+/** Own-property lookup: an environment key such as "constructor" must not resolve to an inherited member. */
+const ownList = (record: Record<string, string[]>, key: string): string[] =>
+  Object.hasOwn(record, key) ? record[key] : [];
+
+/** Own-property write: an environment key such as "__proto__" must become a data property, not set the prototype. */
+const setOwn = (record: Record<string, string[]>, key: string, value: string[]): void => {
+  Object.defineProperty(record, key, { value, enumerable: true, writable: true, configurable: true });
+};
+
+const selectFlagKeys = (keys: string[], selection: MergeSelection): string[] => {
+  const include = selection.includeFlags ? new Set(selection.includeFlags) : undefined;
+  const exclude = new Set(selection.excludeFlags ?? []);
+  return keys.filter((k) => (!include || include.has(k)) && !exclude.has(k));
+};
+
+/** Destination environment a source environment migrates to, or undefined when it is not migrated. */
+const destinationEnv = (
+  env: string,
+  selection: MergeSelection,
+): string | undefined => {
+  if (selection.environments && !selection.environments.includes(env)) {
+    return undefined;
+  }
+  if (selection.environmentMapping) {
+    return Object.hasOwn(selection.environmentMapping, env)
+      ? selection.environmentMapping[env]
+      : undefined;
+  }
+  return env;
 };
 
 /**
+ * Loads the flag and segment keys of one extracted source that the migrate step would write
+ * under `selection`. Segments are grouped by destination environment; a missing segment
+ * file counts as no segments.
+ * @throws Error if the source's flags.json has not been extracted
+ */
+export async function loadMergeKeys(
+  source: string,
+  baseDir: string = SOURCE_DATA_DIR,
+  selection: MergeSelection = {},
+): Promise<MergeKeys> {
+  const flags = selectFlagKeys(await loadFlagKeys(baseDir, source), selection);
+  const segments: Record<string, string[]> = {};
+  if (selection.migrateSegments !== false) {
+    for (const env of await listSegmentEnvs(baseDir, source)) {
+      const destEnv = destinationEnv(env, selection);
+      if (!destEnv) continue;
+      const keys = extractKeys(
+        await readJsonFile(`${baseDir}/${source}/segments/${env}.json`),
+      );
+      // Keep duplicates: a segment in two source environments mapped to one destination environment is
+      // written twice, and the second write collides with the first
+      setOwn(segments, destEnv, [...ownList(segments, destEnv), ...keys]);
+    }
+  }
+  return { flags, segments };
+}
+
+const perEnvironment = (
+  current: MergeKeys,
+  earlier: MergeKeys[],
+  pick: (keys: string[], others: string[][]) => string[],
+): MergeCollisions => {
+  const segments: Record<string, string[]> = {};
+  for (const [env, keys] of Object.entries(current.segments)) {
+    const found = pick(keys, earlier.map((e) => ownList(e.segments, env)));
+    if (found.length > 0) setOwn(segments, env, found);
+  }
+  return { flags: pick(current.flags, earlier.map((e) => e.flags)), segments };
+};
+
+/**
+ * Keys of `current` that at least one of `earlier` also has: what the migrate step 409s on under
+ * overwrite, skip, prompt and abort, where earlier sources hold their raw keys.
+ */
+export function computeMergeCollisions(
+  current: MergeKeys,
+  earlier: MergeKeys[],
+): MergeCollisions {
+  return perEnvironment(current, earlier, (keys, others) => {
+    const own = new Set(keys);
+    return [...new Set(others.flat().filter((k) => own.has(k)))].sort();
+  });
+}
+
+export interface PrefixedMerge {
+  /** Keys of `current` whose first create would 409 and be retried with the prefix */
+  collisions: MergeCollisions;
+  /** Collisions whose prefixed retry would 409 as well, so the migrate step would overwrite that resource */
+  unresolvable: MergeCollisions;
+}
+
+/**
+ * Replays the earlier sources' writes under `onConflict: prefix` to find the keys they actually hold
+ * in the destination (a key already taken is written as prefix + key, so prefixed copies count), then
+ * checks every write of `current`, in order, against them. Duplicate writes matter: a segment present
+ * in two source environments that map to one destination environment is written twice, the second
+ * time with the prefix. A `current` key whose prefixed form is also one of its own keys is reported as
+ * unresolvable, since which of the two is written first depends on migration order.
+ */
+export function simulatePrefixedMerge(
+  current: MergeKeys,
+  earlier: MergeKeys[],
+  prefix: string,
+): PrefixedMerge {
+  const replay = (keys: string[], others: string[][]) => {
+    const taken = new Set<string>();
+    for (const list of others) {
+      for (const k of list) taken.add(taken.has(k) ? prefix + k : k);
+    }
+    const own = new Set(keys);
+    const collisions = new Set<string>();
+    const unresolvable = new Set<string>();
+    for (const k of keys) {
+      if (!taken.has(k)) {
+        taken.add(k);
+        continue;
+      }
+      collisions.add(k);
+      if (taken.has(prefix + k) || own.has(prefix + k)) {
+        unresolvable.add(k);
+      } else {
+        taken.add(prefix + k);
+      }
+    }
+    return { collisions: [...collisions].sort(), unresolvable: [...unresolvable].sort() };
+  };
+  return {
+    collisions: perEnvironment(current, earlier, (k, o) => replay(k, o).collisions),
+    unresolvable: perEnvironment(current, earlier, (k, o) => replay(k, o).unresolvable),
+  };
+}
+
+/** The unresolvable part of simulatePrefixedMerge. */
+export function computePrefixedMergeCollisions(
+  current: MergeKeys,
+  earlier: MergeKeys[],
+  prefix: string,
+): MergeCollisions {
+  return simulatePrefixedMerge(current, earlier, prefix).unresolvable;
+}
+
+/**
  * Finds flag and segment keys in a source's extracted data that also appear in
- * earlier sources merged into the same destination.
- * Segments are compared per environment; a missing segment file counts as no segments.
+ * earlier sources merged into the same destination, among the resources `selection` migrates.
  * @throws Error if any source's flags.json has not been extracted
  */
 export async function findMergeCollisions(
   currentSource: string,
   earlierSources: string[],
   baseDir: string = SOURCE_DATA_DIR,
+  selection: MergeSelection = {},
 ): Promise<MergeCollisions> {
-  const currentFlags = new Set(await loadFlagKeys(baseDir, currentSource));
-  const flagOverlap = new Set<string>();
-  for (const earlier of earlierSources) {
-    for (const key of await loadFlagKeys(baseDir, earlier)) {
-      if (currentFlags.has(key)) flagOverlap.add(key);
-    }
+  const current = await loadMergeKeys(currentSource, baseDir, selection);
+  const earlier: MergeKeys[] = [];
+  for (const source of earlierSources) {
+    earlier.push(await loadMergeKeys(source, baseDir, selection));
   }
-
-  const segments: Record<string, string[]> = {};
-  for (const env of await listSegmentEnvs(baseDir, currentSource)) {
-    const current = new Set(
-      extractKeys(
-        await readJsonFile(`${baseDir}/${currentSource}/segments/${env}.json`),
-      ),
-    );
-    const overlap = new Set<string>();
-    for (const earlier of earlierSources) {
-      const keys = extractKeys(
-        await readJsonFile(`${baseDir}/${earlier}/segments/${env}.json`),
-      );
-      for (const key of keys) {
-        if (current.has(key)) overlap.add(key);
-      }
-    }
-    if (overlap.size > 0) {
-      segments[env] = [...overlap].sort();
-    }
-  }
-
-  return { flags: [...flagOverlap].sort(), segments };
+  return computeMergeCollisions(current, earlier);
 }
 
 /** True when findMergeCollisions found any overlapping key. */

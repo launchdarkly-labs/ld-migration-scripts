@@ -21,6 +21,7 @@ interface Arguments {
   extractSegments?: boolean;
   extractBigSegments?: boolean;
   includeArchived?: boolean;
+  extractViews?: boolean;
 }
 
 const inputArgs: Arguments = yargs(Deno.args)
@@ -36,6 +37,9 @@ const inputArgs: Arguments = yargs(Deno.args)
   .boolean("include-archived")
   .default("include-archived", false)
   .describe("include-archived", "Also list archived flags (the API omits them by default) (default: false)")
+  .boolean("extract-views")
+  .default("extract-views", true)
+  .describe("extract-views", "Extract views and their linked flags and segments (default: true; --extract-views=false to skip)")
   .parse() as Arguments;
 
 // ensure output directory exists
@@ -312,17 +316,23 @@ await Promise.all(
 
 // View Data //
 // Flags don't report their views, so view membership is read from the views API.
-console.log("\nExtracting views...");
-try {
-  const views = await extractViews(apiKey, domain, inputArgs.projKey);
-  await writeSourceData(projPath, "views", views);
-  if (views.length === 0) {
-    console.log("  No views found (if the project uses views, the token needs the viewView action to see them)");
+if (inputArgs.extractViews === false) {
+  // Remove an earlier snapshot so a later migrate with views enabled can't pick up stale data
+  await Deno.remove(`${projPath}/views.json`).catch(() => {});
+  console.log("\nSkipping views extraction (disabled in config)");
+} else {
+  console.log("\nExtracting views...");
+  try {
+    const views = await extractViews(apiKey, domain, inputArgs.projKey);
+    await writeSourceData(projPath, "views", views);
+    if (views.length === 0) {
+      console.log("  No views found (if the project uses views, the token needs the viewView action to see them)");
+    }
+    for (const v of views) {
+      console.log(`  View ${v.key}: ${v.flags.length} flag(s), ${v.segments.length} segment(s)`);
+    }
+  } catch (error) {
+    await Deno.writeTextFile(`${projPath}/views.json`, "[]");
+    console.log(`  Warning: could not extract views: ${error instanceof Error ? error.message : String(error)}`);
   }
-  for (const v of views) {
-    console.log(`  View ${v.key}: ${v.flags.length} flag(s), ${v.segments.length} segment(s)`);
-  }
-} catch (error) {
-  await Deno.writeTextFile(`${projPath}/views.json`, "[]");
-  console.log(`  Warning: could not extract views: ${error instanceof Error ? error.message : String(error)}`);
 }

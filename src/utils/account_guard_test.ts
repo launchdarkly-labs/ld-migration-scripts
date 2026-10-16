@@ -92,3 +92,37 @@ Deno.test("a failed lookup warns and continues", async () => {
   assertEquals(warnings.length, 1);
   assertEquals(warnings[0].includes("caller-identity returned 401"), true);
 });
+
+Deno.test("same account with a chained mapping (a -> b, b -> c) throws and names the pair", async () => {
+  await assertRejects(
+    () =>
+      assertNotSelfMigration(
+        [{ source: "a", destination: "b" }, { source: "b", destination: "c" }],
+        "app.launchdarkly.com",
+        "app.launchdarkly.com",
+        deps(accountFetch({ "src-token": "acct", "dest-token": "acct" })),
+      ),
+    Error,
+    "migrating a -> b would write into the source project",
+  );
+});
+
+Deno.test("chained mapping passes when the accounts differ", async () => {
+  await assertNotSelfMigration(
+    [{ source: "a", destination: "b" }, { source: "b", destination: "c" }],
+    "app.launchdarkly.com",
+    "app.launchdarkly.com",
+    deps(accountFetch({ "src-token": "acct-1", "dest-token": "acct-2" })),
+  );
+});
+
+Deno.test("destinations that are not source keys make no API calls", async () => {
+  const calls: string[] = [];
+  await assertNotSelfMigration(
+    [{ source: "a", destination: "x" }, { source: "b", destination: "y" }],
+    "app.launchdarkly.com",
+    "app.launchdarkly.com",
+    deps(accountFetch({ "src-token": "acct", "dest-token": "acct" }, calls)),
+  );
+  assertEquals(calls, []);
+});

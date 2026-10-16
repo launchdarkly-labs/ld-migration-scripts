@@ -195,6 +195,13 @@ After migrating, compare segments, big segment members and views between the two
 deno run --allow-net --allow-read scripts/verify-segments.ts my-source-project my-dest-project
 ```
 
+For a cross-instance or environment-mapped migration, pass the same domains and mapping as the migration:
+
+```bash
+deno run --allow-net --allow-read scripts/verify-segments.ts my-source-project my-dest-project \
+  --dest-domain app.eu.launchdarkly.com --env-map prod:production,dev:development
+```
+
 ## Flag Import Template Files
 
 ### `flags_template.json`

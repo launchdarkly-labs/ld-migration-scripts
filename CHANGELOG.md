@@ -7,16 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+### Added
 
-- `revert_migration.ts`: the flag list for a source now comes from the sync manifest `migrate` wrote for that source and destination, so flags created with a conflict prefix are reverted under their destination key instead of matching another source's flag. Without a manifest, keys that a sibling source merged into the same destination also lists are left in place with a warning rather than guessed. The keep-the-view check for merged destinations uses the same keys (#21)
-
-- `revert_migration.ts`: an unreadable sync manifest, or one that records another project pair, stops the revert instead of falling back to raw source keys; and without a manifest, a sibling source that has neither a manifest nor extracted data stops raw-key deletion and keeps the shared views (#21)
+- `migration.migrateViews` (`--migrate-views=false`, extraction `--extract-views=false`): opt out of recreating views and linking flags and segments to them; `targetView` still applies (#20)
+- `scripts/verify-segments.ts --source-domain / --dest-domain / --env-map`: verify a cross-instance (US → EU) or environment-mapped migration; only mapped source environments are checked (#20)
 
 ### Changed
 
 - The sync manifest is now cumulative: a `migrate` run keeps the entries of flags and segments outside its scope (include/exclude filters, `--since`, unselected environments, `migrateSegments: false`) or skipped by `--on-conflict skip` instead of dropping them, so it stays a complete inventory of migrated resources for revert and view linking. `migrate` loads the previous manifest before any write and stops when it is unreadable or records another project pair (#21)
 - Sync manifest types and path moved to `src/utils/sync_manifest.ts`, shared by `migrate` and `revert`; `readSyncManifest` rejects a manifest whose recorded project pair differs from the requested one
+- Workflow merge check (`destination.projectKeyMapping` merges): only resources the migrate step writes are compared (`includeFlags` / `excludeFlags`, `migrateSegments`, `environments`, `environmentMapping`; segments by destination environment), and the outcome follows the effective `onConflict` policy. `prefix` warns, and stops when a key is shared with two or more earlier sources or the prefixed key already exists (one prefix can only rename once); `skip` warns; `overwrite`, `prompt` and `abort` stop (#21)
+- Same-account guard: also stops when a destination key is another listed source's key (chained mappings such as `a -> b`, `b -> c`), not only a project's own key (#21)
+- `createEnvironments` also copies `requireComments` and `critical` from the source environment (#21)
+- `migration.tags` are now reconciled on flags and segments that an `--incremental` run skips as unchanged (the tags are not part of the source version), with one destination read per skipped resource when tags are set (#22)
+- The incremental fast path patches a flag under its manifest destination key, so a flag renamed by a conflict prefix is updated instead of its unprefixed namesake
+- A dry run looks up each segment in the destination and previews conflict handling and the tag patch for segments that already exist, instead of reporting every segment as created (#22)
+- A failed tag reconciliation on an existing segment (read or patch), and a failed lifecycle/tags reconciliation on a flag the incremental fast path skips, are now counted as errors (exit code `1`), like a failed flag-level update
+
+### Fixed
+
+- `revert_migration.ts`: the flag list for a source now comes from the sync manifest `migrate` wrote for that source and destination, so flags created with a conflict prefix are reverted under their destination key instead of matching another source's flag. Without a manifest, keys that a sibling source merged into the same destination also lists are left in place with a warning rather than guessed. The keep-the-view check for merged destinations uses the same keys (#21)
+
+- `revert_migration.ts`: an unreadable sync manifest, or one that records another project pair, stops the revert instead of falling back to raw source keys; and without a manifest, a sibling source that has neither a manifest nor extracted data stops raw-key deletion and keeps the shared views (#21)
+- In approval-required environments, the `remove offVariation` patch (source serves the SDK fallback while off) is now listed under the approval's skipped fields instead of being dropped silently; semantic patches have no instruction for it (#20)
+- `views.ts`: paging no longer stops after the first page when the beta views endpoints omit `totalCount` (#20)
+
+### Documentation
+
+- README: how existing destination tags are handled with and without `migration.tags`, and that a flag whose create returns 409 is updated in place like one found by the pre-check (#22)
 
 ## [3.3.0] - 2026-10-15
 
