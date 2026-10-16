@@ -11,7 +11,7 @@
 #   tag there, no Release        -> create the Release (an earlier run failed
 #                                   half-way)
 #   tag and Release both there   -> nothing to do (a no-release merge, or a
-#                                   re-run), unless this push changed that
+#                                   re-run), unless a later push changed that
 #                                   version's changelog section, which means
 #                                   a second PR merged under an already
 #                                   released version: fail loudly
@@ -79,8 +79,12 @@ jobs:
           tag_sha=$(git rev-parse -q --verify "refs/tags/$tag^{commit}" || true)
           if gh release view "$tag" >/dev/null 2>&1; then released=true; else released=false; fi
 
+          # Did this push edit the section of a version main already introduced
+          # earlier? Only meaningful for pushes of a commit other than the
+          # introducing one (a re-run of that commit must stay a no-op), so the
+          # check is skipped for the introducing commit and for manual runs.
           section_changed=false
-          if git rev-parse -q --verify HEAD^1 >/dev/null 2>&1; then
+          if [ "$GITHUB_EVENT_NAME" = push ] && [ "$GITHUB_SHA" != "$target" ] && git rev-parse -q --verify HEAD^1 >/dev/null 2>&1; then
             if [ "$(section HEAD^1 "$version")" != "$(section HEAD "$version")" ]; then section_changed=true; fi
           fi
 
@@ -110,7 +114,7 @@ jobs:
               gh release create "$tag" --title "$tag" --notes-file notes.md --latest
               echo "::notice::Tag $tag existed without a release; created the release"
             elif [ "$section_changed" = true ]; then
-              echo "::error::$tag was already released from ${target:0:12}, but this push changed the [$version] changelog section (or re-bumped to it). Another PR released $version first; the changes merged here are unreleased. Open a follow-up PR that bumps to the next version and moves these notes under it."
+              echo "::error::$tag was already released from ${target:0:12}, but this push changed the [$version] changelog section. Another PR released $version first; the changes merged here are unreleased. Open a follow-up PR that bumps to the next version and moves these notes under it."
               exit 1
             else
               echo "::notice::$tag is already released; nothing to do"
