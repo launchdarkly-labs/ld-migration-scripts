@@ -74,13 +74,16 @@ export class SplitClient {
    * GET a Split Admin API path (relative to the API host, e.g.
    * "/internal/api/v2/workspaces") with Bearer auth and 429 retry.
    */
-  async get<T>(path: string, params?: Record<string, string | number>): Promise<T> {
+  async get<T>(
+    path: string,
+    params?: Record<string, string | number>,
+  ): Promise<T> {
     const url = new URL(`${this.baseUrl}${path}`);
     for (const [key, value] of Object.entries(params ?? {})) {
       url.searchParams.set(key, String(value));
     }
 
-    for (let attempt = 0, serverErrors = 0; ; attempt++) {
+    for (let attempt = 0, serverErrors = 0;; attempt++) {
       const req = new Request(url.toString(), {
         headers: {
           "Authorization": `Bearer ${this.apiKey}`,
@@ -101,7 +104,11 @@ export class SplitClient {
           continue;
         }
         if (timedOut) {
-          throw new SplitApiError(408, path, `no response after ${REQUEST_TIMEOUT_MS / 1000}s`);
+          throw new SplitApiError(
+            408,
+            path,
+            `no response after ${REQUEST_TIMEOUT_MS / 1000}s`,
+          );
         }
         throw e;
       }
@@ -153,7 +160,11 @@ export class SplitClient {
     const results: T[] = [];
     let offset = 0;
     while (true) {
-      const page = await this.get<SplitPage<T> | T[]>(path, { ...params, limit, offset });
+      const page = await this.get<SplitPage<T> | T[]>(path, {
+        ...params,
+        limit,
+        offset,
+      });
       // Some endpoints return a BARE ARRAY instead of the documented
       // objects/offset/limit/totalCount envelope (observed live on
       // rule-based-segments in-environment, whose docs show {objects});
@@ -166,7 +177,9 @@ export class SplitClient {
       if (objects.length === 0) break;
       results.push(...objects);
       offset += objects.length;
-      if (typeof page.totalCount === "number" && offset >= page.totalCount) break;
+      if (typeof page.totalCount === "number" && offset >= page.totalCount) {
+        break;
+      }
     }
     return results;
   }
@@ -197,7 +210,10 @@ export class SplitClient {
   listFlags(workspaceId: string, tag?: string): Promise<SplitFlag[]> {
     const params: Record<string, string> = {};
     if (tag) params.tag = tag;
-    return this.getAllPages<SplitFlag>(`/internal/api/v2/splits/ws/${workspaceId}`, params);
+    return this.getAllPages<SplitFlag>(
+      `/internal/api/v2/splits/ws/${workspaceId}`,
+      params,
+    );
   }
 
   /** Per-environment flag definitions (treatments, rules, default rule). */
@@ -253,7 +269,10 @@ export class SplitClient {
       if (pageKeys.length === 0) break;
       keys.push(...pageKeys.map((k) => k.key));
       offset += pageKeys.length;
-      onProgress?.(offset, typeof page.count === "number" ? page.count : undefined);
+      onProgress?.(
+        offset,
+        typeof page.count === "number" ? page.count : undefined,
+      );
       if (typeof page.count === "number" && offset >= page.count) break;
     }
     return keys;

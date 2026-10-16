@@ -25,18 +25,29 @@ export interface SourceView {
   segments: Array<{ environmentKey: string; segmentKey: string }>;
 }
 
-async function getAllPages(apiKey: string, domain: string, path: string): Promise<any[]> {
+async function getAllPages(
+  apiKey: string,
+  domain: string,
+  path: string,
+): Promise<any[]> {
   const items: any[] = [];
   // The offset advances by the number of items actually returned, so a short page that still has a
   // next link (e.g. 20 of 30) continues at 20 and not at PAGE_SIZE
-  for (let offset = 0; ; offset = items.length) {
+  for (let offset = 0;; offset = items.length) {
     const sep = path.includes("?") ? "&" : "?";
     const resp = await rateLimitRequest(
-      ldAPIRequest(apiKey, domain, `${path}${sep}limit=${PAGE_SIZE}&offset=${offset}`, true),
+      ldAPIRequest(
+        apiKey,
+        domain,
+        `${path}${sep}limit=${PAGE_SIZE}&offset=${offset}`,
+        true,
+      ),
       "views",
     );
     if (resp.status !== 200) {
-      throw new Error(`GET ${path} failed (HTTP ${resp.status}): ${await resp.text()}`);
+      throw new Error(
+        `GET ${path} failed (HTTP ${resp.status}): ${await resp.text()}`,
+      );
     }
     const body = await resp.json();
     const page: any[] = body.items ?? [];
@@ -55,22 +66,39 @@ async function getAllPages(apiKey: string, domain: string, path: string): Promis
  * Reads every view in a project with its linked flags and segments.
  * Note: the list only includes views the token has `viewView` on; others are silently omitted.
  */
-export async function extractViews(apiKey: string, domain: string, projectKey: string): Promise<SourceView[]> {
-  const views = await getAllPages(apiKey, domain, `projects/${projectKey}/views`);
+export async function extractViews(
+  apiKey: string,
+  domain: string,
+  projectKey: string,
+): Promise<SourceView[]> {
+  const views = await getAllPages(
+    apiKey,
+    domain,
+    `projects/${projectKey}/views`,
+  );
   const result: SourceView[] = [];
   for (const v of views) {
     const linkedBase = `projects/${projectKey}/views/${v.key}/linked`;
     const flags = await getAllPages(apiKey, domain, `${linkedBase}/flags`);
-    const segments = await getAllPages(apiKey, domain, `${linkedBase}/segments`);
+    const segments = await getAllPages(
+      apiKey,
+      domain,
+      `${linkedBase}/segments`,
+    );
     result.push({
       key: v.key,
       name: v.name,
       description: v.description || undefined,
       tags: v.tags?.length ? v.tags : undefined,
-      maintainerId: v.maintainer?.maintainerMember?.id ?? v.maintainerId ?? undefined,
-      maintainerTeamKey: v.maintainer?.maintainerTeam?.key ?? v.maintainerTeamKey ?? undefined,
+      maintainerId: v.maintainer?.maintainerMember?.id ?? v.maintainerId ??
+        undefined,
+      maintainerTeamKey: v.maintainer?.maintainerTeam?.key ??
+        v.maintainerTeamKey ?? undefined,
       flags: flags.map((f) => f.resourceKey),
-      segments: segments.map((s) => ({ environmentKey: s.environmentKey, segmentKey: s.resourceKey })),
+      segments: segments.map((s) => ({
+        environmentKey: s.environmentKey,
+        segmentKey: s.resourceKey,
+      })),
     });
   }
   return result;
@@ -95,21 +123,40 @@ export async function linkToView(
     const batch = items.slice(i, i + LINK_BATCH_SIZE);
     const body = resourceType === "flags"
       ? { keys: batch, comment: "Linked by ld-migration-scripts" }
-      : { segmentIdentifiers: batch, comment: "Linked by ld-migration-scripts" };
+      : {
+        segmentIdentifiers: batch,
+        comment: "Linked by ld-migration-scripts",
+      };
     const resp = await rateLimitRequest(
-      ldAPIPostRequest(apiKey, domain, `projects/${projectKey}/views/${viewKey}/link/${resourceType}`, body, true),
+      ldAPIPostRequest(
+        apiKey,
+        domain,
+        `projects/${projectKey}/views/${viewKey}/link/${resourceType}`,
+        body,
+        true,
+      ),
       "views",
     );
     const label = (x: any) => (typeof x === "string" ? x : `${x.segmentKey}`);
     if (resp.status >= 300) {
       const err = await resp.text();
-      result.failed.push(...batch.map((x: any) => `${label(x)} (HTTP ${resp.status}: ${err.slice(0, 200)})`));
+      result.failed.push(
+        ...batch.map((x: any) =>
+          `${label(x)} (HTTP ${resp.status}: ${err.slice(0, 200)})`
+        ),
+      );
       continue;
     }
     const data = await resp.json().catch(() => ({}));
     const failedHere: any[] = data.failedResources ?? [];
     result.linked += data.successCount ?? batch.length - failedHere.length;
-    result.failed.push(...failedHere.map((f: any) => `${f.resourceKey ?? JSON.stringify(f)}${f.errorMessage ? ` (${f.errorMessage})` : ""}`));
+    result.failed.push(
+      ...failedHere.map((f: any) =>
+        `${f.resourceKey ?? JSON.stringify(f)}${
+          f.errorMessage ? ` (${f.errorMessage})` : ""
+        }`
+      ),
+    );
   }
   return result;
 }

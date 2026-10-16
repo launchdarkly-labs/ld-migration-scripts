@@ -16,17 +16,20 @@ interface ServerSideSdkKeys {
   baseUrlB?: string;
 }
 
-async function loadKeysFromFile(keysPath: URL | string): Promise<ServerSideSdkKeys> {
-  const configUrl =
-    keysPath instanceof URL
-      ? keysPath
-      : keysPath.startsWith("/") || keysPath.match(/^[A-Za-z]:/)
-        ? new URL(`file://${keysPath}`)
-        : new URL(keysPath, `file://${Deno.cwd()}/`);
+async function loadKeysFromFile(
+  keysPath: URL | string,
+): Promise<ServerSideSdkKeys> {
+  const configUrl = keysPath instanceof URL
+    ? keysPath
+    : keysPath.startsWith("/") || keysPath.match(/^[A-Za-z]:/)
+    ? new URL(`file://${keysPath}`)
+    : new URL(keysPath, `file://${Deno.cwd()}/`);
   const pathLabel = keysPath instanceof URL ? configUrl.pathname : keysPath;
   const text = await Deno.readTextFile(configUrl).catch((err) => {
     throw new Error(
-      `Could not read keys file ${pathLabel}: ${err instanceof Error ? err.message : String(err)}`,
+      `Could not read keys file ${pathLabel}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
     );
   });
   const data = JSON.parse(text) as Record<string, unknown>;
@@ -37,8 +40,12 @@ async function loadKeysFromFile(keysPath: URL | string): Promise<ServerSideSdkKe
       "Keys file must contain sdkKeyA and sdkKeyB (strings). See config/server_side_sdk_keys.json.example.",
     );
   }
-  const baseUrlA = typeof data.baseUrlA === "string" ? data.baseUrlA : undefined;
-  const baseUrlB = typeof data.baseUrlB === "string" ? data.baseUrlB : undefined;
+  const baseUrlA = typeof data.baseUrlA === "string"
+    ? data.baseUrlA
+    : undefined;
+  const baseUrlB = typeof data.baseUrlB === "string"
+    ? data.baseUrlB
+    : undefined;
   return { sdkKeyA, sdkKeyB, baseUrlA, baseUrlB };
 }
 
@@ -108,7 +115,10 @@ if (args._.length >= 2) {
     sdkKeyA = keys.sdkKeyA;
     sdkKeyB = keys.sdkKeyB;
   } catch (err) {
-    console.error("Error loading SDK keys:", err instanceof Error ? err.message : String(err));
+    console.error(
+      "Error loading SDK keys:",
+      err instanceof Error ? err.message : String(err),
+    );
     Deno.exit(1); // never returns
   }
 }
@@ -124,8 +134,10 @@ if (format !== "jsonpatch" && format !== "delta" && format !== "console") {
 const baseUrl = args["base-url"] ||
   Deno.env.get("LD_BASE_URL") ||
   "https://sdk.launchdarkly.com";
-const baseUrlA = args["base-url-a"] || Deno.env.get("LD_BASE_URL_A") || keysFile?.baseUrlA || baseUrl;
-const baseUrlB = args["base-url-b"] || Deno.env.get("LD_BASE_URL_B") || keysFile?.baseUrlB || baseUrl;
+const baseUrlA = args["base-url-a"] || Deno.env.get("LD_BASE_URL_A") ||
+  keysFile?.baseUrlA || baseUrl;
+const baseUrlB = args["base-url-b"] || Deno.env.get("LD_BASE_URL_B") ||
+  keysFile?.baseUrlB || baseUrl;
 
 const includeSegments = args["include-segments"] as boolean;
 

@@ -32,5 +32,8 @@
     "version:bump:minor": "./scripts/bump-version.sh minor",
     "version:bump:major": "./scripts/bump-version.sh major",
     "diff": "deno run --allow-net --allow-env --allow-read src/scripts/diff-payload/diff_payload.ts"
+  },
+  "fmt": {
+    "proseWrap": "preserve"
   }
 }

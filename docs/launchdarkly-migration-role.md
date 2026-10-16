@@ -13,12 +13,12 @@ This is useful for same-account migrations or when you prefer one token with lea
 
 LaunchDarkly custom roles are defined by **policies**: JSON arrays of statements with `effect`, `actions`, and `resources`. The policy below covers everything the **ld-migration-scripts** workflow uses:
 
-| Workflow step / script | Source | Destination / account |
-|------------------------|--------|------------------------|
-| **extract-source** | Project, environments, flags, segments, views (read); big segment export (`migrateBigSegments`) | — |
-| **map-members** | Members (read) | Members (read) |
-| **migrate** | — | Project, environments, flags, segments, **views**, **approval-requests** (read + write) |
-| **revert** | — | Flags, views, approval-requests (read, patch, delete) |
+| Workflow step / script | Source                                                                                          | Destination / account                                                                   |
+| ---------------------- | ----------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| **extract-source**     | Project, environments, flags, segments, views (read); big segment export (`migrateBigSegments`) | —                                                                                       |
+| **map-members**        | Members (read)                                                                                  | Members (read)                                                                          |
+| **migrate**            | —                                                                                               | Project, environments, flags, segments, **views**, **approval-requests** (read + write) |
+| **revert**             | —                                                                                               | Flags, views, approval-requests (read, patch, delete)                                   |
 
 Resource specifiers are hierarchical, e.g. `proj/<projectKey>:env/<envKey>:flag/<flagKey>`. Use `*` for “all” at any level.
 
@@ -169,15 +169,15 @@ Paste the output into the role's **Advanced editor**. **Docs on roles and role a
 ]
 ```
 
-| Statement | Grants |
-|-----------|--------|
-| `proj/SOURCE_PROJECT_KEY` → `viewProject` | Read the source project, its flags and segments |
+| Statement                                                         | Grants                                                                                                                                                  |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `proj/SOURCE_PROJECT_KEY` → `viewProject`                         | Read the source project, its flags and segments                                                                                                         |
 | `proj/SOURCE_PROJECT_KEY:env/*:segment/*` → `createSegmentExport` | Export big segment members as CSV (`migrateBigSegments`). Starts an export job; does not change the segment. Drop it if you don't migrate big segments. |
-| `proj/SOURCE_PROJECT_KEY:view/*` → `viewView` | Read views. Without it the views list silently returns 0 and no views are migrated. |
-| `proj/DEST_PROJECT_KEY` → `viewProject` | Read the destination project |
-| `proj/DEST_PROJECT_KEY:env/*:flag/*` | Create and update flags (and delete, for **revert**) |
-| `proj/DEST_PROJECT_KEY:env/*:segment/*` | Create and update segments, including big segment imports (`updateIncluded`) |
-| `proj/DEST_PROJECT_KEY:view/*` | Create views and link flags and segments to them |
+| `proj/SOURCE_PROJECT_KEY:view/*` → `viewView`                     | Read views. Without it the views list silently returns 0 and no views are migrated.                                                                     |
+| `proj/DEST_PROJECT_KEY` → `viewProject`                           | Read the destination project                                                                                                                            |
+| `proj/DEST_PROJECT_KEY:env/*:flag/*`                              | Create and update flags (and delete, for **revert**)                                                                                                    |
+| `proj/DEST_PROJECT_KEY:env/*:segment/*`                           | Create and update segments, including big segment imports (`updateIncluded`)                                                                            |
+| `proj/DEST_PROJECT_KEY:view/*`                                    | Create views and link flags and segments to them                                                                                                        |
 
 - **Each statement** covers one resource kind only, so the policy satisfies LaunchDarkly's "same kind of resource" rule per statement.
 - **Source access is read-only**, apart from `createSegmentExport`. All writes are scoped to the destination project.

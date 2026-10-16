@@ -89,7 +89,12 @@ export async function assertNotSelfMigration(
 
   if (sourceAccount === destAccount) {
     const list = overlapping
-      .map((p) => (p.source === p.destination ? p.source : `${p.source} -> ${p.destination}`))
+      .map((
+        p,
+      ) => (p.source === p.destination
+        ? p.source
+        : `${p.source} -> ${p.destination}`)
+      )
       .join(", ");
     throw new Error(
       `Source and destination tokens belong to the same account (${sourceAccount}) on ${source}, ` +

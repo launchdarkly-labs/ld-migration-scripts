@@ -6,35 +6,34 @@
 
 source:
   projectKey: us-production
-  domain: app.launchdarkly.com  # Optional: Defaults to app.launchdarkly.com
+  domain: app.launchdarkly.com # Optional: Defaults to app.launchdarkly.com
 
 destination:
   projectKey: eu-production
-  domain: app.eu.launchdarkly.com  # EU instance example
+  domain: app.eu.launchdarkly.com # EU instance example
 
 migration:
   # Enable maintainer mapping
   assignMaintainerIds: true
-  
+
   # Include segments in migration
   migrateSegments: true
-  
+
   # Add prefix for conflict resolution
   conflictPrefix: "us-migrated-"
-  
+
   # Organize in a specific view
   targetView: "us-migration-2024"
-  
+
   # Only migrate production and staging
   environments:
     - production
     - staging
-  
+
   # Map US environment names to EU equivalents
   environmentMapping:
     production: production
     staging: staging
-  
+
   # Preview migration without making changes (recommended first time!)
   # dryRun: true
-

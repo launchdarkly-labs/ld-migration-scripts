@@ -70,8 +70,7 @@ Deno.test("concurrency is bounded to permit count", async () => {
       maxRunning = Math.max(maxRunning, running);
       await delay(20); // Simulate work
       running--;
-    })()
-  );
+    })());
 
   await Promise.all(tasks);
 

@@ -14,10 +14,10 @@ the core migration writes.
 
 ## Branches
 
-| Repo | Branch | Base |
-|------|--------|------|
-| `ld-migration-scripts` | `split-migration-fixes` | `split-migration` |
-| `ps-seed-harness-split-account-with-data` | `trial-tier-coverage-fixes` | `main` |
+| Repo                                      | Branch                      | Base              |
+| ----------------------------------------- | --------------------------- | ----------------- |
+| `ld-migration-scripts`                    | `split-migration-fixes`     | `split-migration` |
+| `ps-seed-harness-split-account-with-data` | `trial-tier-coverage-fixes` | `main`            |
 
 ---
 
@@ -28,7 +28,7 @@ the core migration writes.
 caveats", ~L146–162)
 
 **Problem.** The section lists only **two** un-exercised paths (large segments,
-oversized standard segments). The trial org actually could not seed *many* of
+oversized standard segments). The trial org actually could not seed _many_ of
 the highest-value translations, so they remain untested against live data:
 
 - `IN_SPLIT` → **prerequisite** (in-split-matcher probe → `400`)
@@ -58,7 +58,7 @@ output (11 relaxed expectations).
 `src/check_report.ts` (`probeAccepted`, L46–60), `src/split_client.ts`
 (`SplitApiError`, already exposes `isPaywall`/`isConflict`, L48–65)
 
-**Problem.** `isProbeRejection` treats *every* non-conflict 4xx identically, and
+**Problem.** `isProbeRejection` treats _every_ non-conflict 4xx identically, and
 `check-report` relaxes any not-`accepted` probe the same way. So a genuine
 `400 Invalid json structure` (e.g. `all-keys-matcher`, `semver-*`) — which
 signals the harness may be sending a request shape the current Split API
@@ -66,6 +66,7 @@ rejects — is silently relaxed as if it were an expected plan limit. This masks
 a potential real payload bug behind a "coverage caveat".
 
 **Fix.**
+
 1. In `seed.ts`, when recording a rejected probe, classify the reason using the
    already-available `SplitApiError` getters: `paywall:` (`isPaywall`),
    `malformed:` (status 400 && !isPaywall && !isConflict), else `error:`.
@@ -85,7 +86,7 @@ most basic matcher is suspicious.
 
 ---
 
-## Fix 3 — Correct the `deno task -- ` guidance mismatch
+## Fix 3 — Correct the `deno task --` guidance mismatch
 
 **Repo:** `ps-seed-harness-split-account-with-data`
 **Files:** `src/main.ts:148` (printed "Next" hint), `README.md` (L26–49)
@@ -93,11 +94,12 @@ most basic matcher is suspicious.
 **Problem.** `main.ts:148` prints
 `deno task source-from-split -- -w "…"` — but the migration repo's readme
 correctly documents that a literal `--` breaks arg parsing on Deno ≥2.4.5
-(confirmed on 2.6.0: running `source-from-split` *without* `--` parsed cleanly;
+(confirmed on 2.6.0: running `source-from-split` _without_ `--` parsed cleanly;
 the `--` form would forward a literal `--` to the script). The seed repo hands
 the user a command that fails.
 
 **Fix.**
+
 1. `main.ts:148`: drop the `--` from the printed `source-from-split` hint.
 2. Add a one-line note in seed `README.md` that the seed repo's own tasks accept
    `--`, but `source-from-split` in `ld-migration-scripts` must be run
@@ -118,17 +120,18 @@ without error.
 (`checkProjectExists`, L180; members/me block, L332–345; project gate, L537–541)
 
 **Problem.** `checkProjectExists` returns `false` for **any** non-200, so an
-invalid/expired key (401) makes migrate report *"Destination project does not
-exist"* even when it does — a misleading error. The `members/me` call at L333
+invalid/expired key (401) makes migrate report _"Destination project does not
+exist"_ even when it does — a misleading error. The `members/me` call at L333
 is wrapped in try/catch and a non-200 is treated as "service token", so a dead
 key is never surfaced as an auth failure. (Observed live: the key committed in
 `config/api_keys.json` was stale and returned 401 on every endpoint.)
 
 **Fix.**
+
 1. Add an explicit preflight right after the key loads (before any writes):
    `GET members/me` → on 401/403, exit with
-   *"Destination API key is invalid or lacks access — check
-   `destination_account_api_key`."*
+   _"Destination API key is invalid or lacks access — check
+   `destination_account_api_key`."_
 2. Make `checkProjectExists` distinguish `404` (missing project → current
    message) from `401/403` (auth → the message above), so the two failure modes
    never get conflated.
@@ -149,7 +152,7 @@ before attempting writes.
 prerequisites with **zero** notes in `split-fidelity-report.json`. In this run
 the Split source genuinely had no rules (the `IN_SPLIT` matcher never seeded, by
 design of the trial gap), so "nothing to map" was correct — but a flag whose
-Split definition *did* carry rules/dependencies that all got dropped would
+Split definition _did_ carry rules/dependencies that all got dropped would
 disappear with no trace.
 
 **Fix.** In the mapping loop, when a source flag/environment had ≥1 Split

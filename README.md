@@ -69,17 +69,19 @@ All scripts support configurable LaunchDarkly domains to work with different ins
 ### How to Configure Domains
 
 **Via YAML configuration files** (recommended):
+
 ```yaml
 source:
   projectKey: my-project
-  domain: app.launchdarkly.com  # Default if not specified
+  domain: app.launchdarkly.com # Default if not specified
 
 destination:
   projectKey: eu-project
-  domain: app.eu.launchdarkly.com  # EU instance
+  domain: app.eu.launchdarkly.com # EU instance
 ```
 
 **Via CLI flags**:
+
 ```bash
 # Source extraction with custom domain
 deno task source -p my-project --domain app.launchdarkly.com
@@ -92,6 +94,7 @@ deno task map-members --source-domain app.launchdarkly.com --dest-domain app.eu.
 ```
 
 **Use cases**:
+
 - Migrating from US to EU instance
 - Moving between different LaunchDarkly environments (production vs. sandbox)
 - Working with custom or on-premise LaunchDarkly instances
@@ -156,6 +159,7 @@ deno task workflow -f my-migration.yaml
 ```
 
 **Default behavior**: If you don't specify `workflow.steps`, it runs the **full workflow**:
+
 1. Extract source project data
 2. Map members between instances
 3. Migrate to destination
@@ -258,6 +262,7 @@ deno task workflow -f workflow-full.yaml
 ```
 
 **This automatically runs:**
+
 1. `extract-source` - Downloads all project data
 2. `map-members` - Creates member ID mappings
 3. `migrate` - Runs the migration
@@ -293,7 +298,7 @@ destination:
   projectKey: my-dest-project
 
 migration:
-  assignMaintainerIds: false  # No map-members step
+  assignMaintainerIds: false # No map-members step
   conflictPrefix: "imported-"
   targetView: "migration-2024"
 ```
@@ -339,9 +344,9 @@ Add `destination.projectKeyMapping` (source key -> destination key) to send some
 ```yaml
 source:
   projectKeys:
-    - ld-mfe-examples                      # -> ld-mfe-examples
-    - njordan-cd-example                   # -> new-project
-    - njordan-ld-migration-scripts-source  # -> new-project
+    - ld-mfe-examples # -> ld-mfe-examples
+    - njordan-cd-example # -> new-project
+    - njordan-ld-migration-scripts-source # -> new-project
   domain: ld-stg.launchdarkly.com
 
 destination:
@@ -349,7 +354,7 @@ destination:
   projectKeyMapping:
     njordan-cd-example: new-project
     njordan-ld-migration-scripts-source: new-project
-  projectNames:                             # Optional: destination key -> name, used only when createProject creates it
+  projectNames: # Optional: destination key -> name, used only when createProject creates it
     new-project: "New Project"
 
 migration:
@@ -405,19 +410,19 @@ workflow:
     - migrate
 
 source:
-  projectKey: split-workspace   # local label for the extracted data
+  projectKey: split-workspace # local label for the extracted data
 
 destination:
   projectKey: my-ld-project
 
 splitExtract:
-  workspace: Default            # Split workspace ID or name
+  workspace: Default # Split workspace ID or name
   environmentMapping:
     Prod-Default: production
     Staging: test
 
 migration:
-  dryRun: true                  # review, then flip to false
+  dryRun: true # review, then flip to false
   onConflict: prompt
 ```
 
@@ -440,7 +445,7 @@ mapping semantics are documented in
 workflow:
   steps:
     - extract-source
-    - migrate  # Skip map-members
+    - migrate # Skip map-members
 
 source:
   projectKey: source-project
@@ -449,7 +454,7 @@ destination:
   projectKey: dest-project
 
 migration:
-  assignMaintainerIds: false  # Must be false when skipping map-members
+  assignMaintainerIds: false # Must be false when skipping map-members
   environmentMapping:
     prod: production
     dev: development
@@ -458,62 +463,62 @@ migration:
 ### Workflow Configuration Structure
 
 ```yaml
-workflow:                    # Optional - defaults to full workflow
-  steps:                     # Run in order; with projectKeys, account steps run once first, then project steps per key
-    - extract-source         # Download source project data (per project)
-    - map-members           # Map member IDs (account-level)
-    - migrate               # Run migration (per project)
-    - third-party-import    # Or import from external sources (account-level)
+workflow: # Optional - defaults to full workflow
+  steps: # Run in order; with projectKeys, account steps run once first, then project steps per key
+    - extract-source # Download source project data (per project)
+    - map-members # Map member IDs (account-level)
+    - migrate # Run migration (per project)
+    - third-party-import # Or import from external sources (account-level)
 
-source:                      # Required: projectKey OR projectKeys
-  projectKey: string         # Single source project
-  projectKeys: string[]      # Multiple projects (same key on destination each, unless mapped)
-  domain: string            # Optional: Defaults to app.launchdarkly.com
+source: # Required: projectKey OR projectKeys
+  projectKey: string # Single source project
+  projectKeys: string[] # Multiple projects (same key on destination each, unless mapped)
+  domain: string # Optional: Defaults to app.launchdarkly.com
 
-destination:                 # Required for migrate step (per-project key set automatically when using projectKeys)
-  projectKey: string         # Destination project key (single-project mode)
-  projectName: string        # Optional: Name used only when migration.createProject creates the project
-  projectKeyMapping:         # Optional, projectKeys only: source key -> destination key (several may share one)
+destination: # Required for migrate step (per-project key set automatically when using projectKeys)
+  projectKey: string # Destination project key (single-project mode)
+  projectName: string # Optional: Name used only when migration.createProject creates the project
+  projectKeyMapping: # Optional, projectKeys only: source key -> destination key (several may share one)
     sourceKey: destKey
-  projectNames:              # Optional, projectKeys only: destination key -> name used when the project is created
+  projectNames: # Optional, projectKeys only: destination key -> name used when the project is created
     destKey: "Display Name"
-  domain: string            # Optional: Defaults to app.launchdarkly.com
+  domain: string # Optional: Defaults to app.launchdarkly.com
 
-extraction:                  # Optional - controls what data to extract
-  includeSegments: boolean   # Set to true to extract segments (default: false)
+extraction: # Optional - controls what data to extract
+  includeSegments: boolean # Set to true to extract segments (default: false)
 
-memberMapping:               # Optional - for map-members step
-  outputFile: string         # Where to save mapping file
+memberMapping: # Optional - for map-members step
+  outputFile: string # Where to save mapping file
 
-migration:                   # Optional - for migrate step
+migration: # Optional - for migrate step
   assignMaintainerIds: boolean
   migrateSegments: boolean
-  tags: string[] | null      # Optional tags added to migrated flags and segments
-  migrateBigSegments: boolean  # Copy big segment members via CSV export/import (default: false)
-  migrateViews: boolean      # Recreate views and link flags/segments to them (default: true)
-  adoptUnresolved: boolean   # Record resources an incomplete sync manifest lists as untracked as this migration's copies
+  tags: string[] | null # Optional tags added to migrated flags and segments
+  migrateBigSegments: boolean # Copy big segment members via CSV export/import (default: false)
+  migrateViews: boolean # Recreate views and link flags/segments to them (default: true)
+  adoptUnresolved: boolean # Record resources an incomplete sync manifest lists as untracked as this migration's copies
   conflictPrefix: string
   targetView: string
   environments: string[]
   environmentMapping:
     sourceEnv: destEnv
-  dryRun: boolean           # Preview changes without applying (no destination writes, no sync manifest)
-  includeFlags: string[]    # Only migrate these flag keys (prerequisites must be included too)
-  excludeFlags: string[]    # Skip these flag keys
-  concurrency: number       # Parallel flag migrations (default: 10)
-  createProject: boolean    # Create the destination project if missing, with the migrated environments
-  createEnvironments: boolean  # Create destination environments that are missing, from source settings
+  dryRun: boolean # Preview changes without applying (no destination writes, no sync manifest)
+  includeFlags: string[] # Only migrate these flag keys (prerequisites must be included too)
+  excludeFlags: string[] # Skip these flag keys
+  concurrency: number # Parallel flag migrations (default: 10)
+  createProject: boolean # Create the destination project if missing, with the migrated environments
+  createEnvironments: boolean # Create destination environments that are missing, from source settings
 
-thirdPartyImport:           # Required for third-party-import step
-  inputFile: string          # JSON or CSV file path
-  targetProject: string      # Target LD project
-  dryRun: boolean           # Validation only
-  reportOutput: string      # Optional report path
+thirdPartyImport: # Required for third-party-import step
+  inputFile: string # JSON or CSV file path
+  targetProject: string # Target LD project
+  dryRun: boolean # Validation only
+  reportOutput: string # Optional report path
 
-revert:                     # Optional - for revert step
-  dryRun: boolean           # Preview revert without applying
-  deleteViews: boolean      # Whether to delete views after unlinking
-  viewKeys: string[]        # Specific views to process
+revert: # Optional - for revert step
+  dryRun: boolean # Preview revert without applying
+  deleteViews: boolean # Whether to delete views after unlinking
+  viewKeys: string[] # Specific views to process
 ```
 
 ### Available Steps
@@ -549,6 +554,7 @@ data/launchdarkly-migrations/source/project/{projectKey}/
 **Note:** Flag data files use index-prefixed filenames (`0-flag-key.json`, `1-flag-key.json`, ...) to avoid case collisions on case-insensitive filesystems (e.g. macOS) while remaining human-browsable. The migrate script also supports older SHA-based and key-based filenames for backward compatibility.
 
 **Note:** Segments are only extracted if:
+
 - `extraction.includeSegments` is explicitly set to `true` OR
 - `migration.migrateSegments` is set to `true`
 
@@ -584,11 +590,11 @@ Create a YAML file for the individual migrate task (e.g., `migration-config.yaml
 
 source:
   projectKey: my-source-project
-  domain: app.launchdarkly.com  # Optional: Defaults to app.launchdarkly.com
+  domain: app.launchdarkly.com # Optional: Defaults to app.launchdarkly.com
 
 destination:
   projectKey: my-destination-project
-  domain: app.launchdarkly.com  # Optional: Use app.eu.launchdarkly.com for EU
+  domain: app.launchdarkly.com # Optional: Use app.eu.launchdarkly.com for EU
 
 # Migration settings
 migration:
@@ -644,32 +650,32 @@ For use with `deno task migrate -f` (not workflow orchestrator). Migration setti
 
 ```yaml
 source:
-  projectKey: string         # Required: Source project key
-  domain: string             # Optional: Defaults to app.launchdarkly.com
+  projectKey: string # Required: Source project key
+  domain: string # Optional: Defaults to app.launchdarkly.com
 
 destination:
-  projectKey: string         # Required: Destination project key
-  projectName: string        # Optional: Name for a project created by createProject
-  domain: string             # Optional: Defaults to app.launchdarkly.com
+  projectKey: string # Required: Destination project key
+  projectName: string # Optional: Name for a project created by createProject
+  domain: string # Optional: Defaults to app.launchdarkly.com
 
-migration:                   # Migration settings (also accepts "options:" as alias)
-  assignMaintainerIds: boolean          # Default: false
-  migrateSegments: boolean              # Default: true
-  migrateBigSegments: boolean           # Default: false; needs CSVs from extraction
-  conflictPrefix: string                # Optional
-  targetView: string                    # Optional
-  includeFlags: string[]                # Optional
-  excludeFlags: string[]                # Optional
-  dryRun: boolean                       # Default: false
-  environments: string[]                # Optional, list format
-  environmentMapping:                   # Optional, key-value mapping
+migration: # Migration settings (also accepts "options:" as alias)
+  assignMaintainerIds: boolean # Default: false
+  migrateSegments: boolean # Default: true
+  migrateBigSegments: boolean # Default: false; needs CSVs from extraction
+  conflictPrefix: string # Optional
+  targetView: string # Optional
+  includeFlags: string[] # Optional
+  excludeFlags: string[] # Optional
+  dryRun: boolean # Default: false
+  environments: string[] # Optional, list format
+  environmentMapping: # Optional, key-value mapping
     sourceEnv: destEnv
-    ...
-  includeFlags: string[]                # Optional: only migrate these flag keys
-  excludeFlags: string[]                # Optional: skip these flag keys
-  tags: string[]                        # Optional: tags added to flags and segments
-  migrateViews: boolean                 # Optional: recreate views and their links (default: true)
-  concurrency: number                   # Optional: parallel flags (default: 10)
+      ...
+  includeFlags: string[] # Optional: only migrate these flag keys
+  excludeFlags: string[] # Optional: skip these flag keys
+  tags: string[] # Optional: tags added to flags and segments
+  migrateViews: boolean # Optional: recreate views and their links (default: true)
+  concurrency: number # Optional: parallel flags (default: 10)
 ```
 
 **Note:** Config files accept either `migration:` or `options:` as the key for migration settings.
@@ -686,11 +692,13 @@ A dry run looks up each segment in the destination and previews the tag patch fo
 ### Priority Order
 
 When using both config files and CLI arguments:
+
 1. **CLI arguments** (highest priority)
 2. **Config file values**
 3. **Default values** (lowest priority)
 
 Example:
+
 ```bash
 # Config file has: conflictPrefix: "config-"
 # CLI override:
@@ -718,6 +726,7 @@ deno task migrate -p SOURCE_PROJECT -d DEST_PROJECT -v my-target-view
 ```
 
 **Notes:**
+
 - Views are an Enterprise feature in LaunchDarkly.
 - The source token needs `viewView`. Without it the views list silently comes back empty and no views are migrated; extraction prints a warning when it finds none.
 - The destination token needs `createView`, `updateView`, `linkFlagToView` and `linkSegmentToView`. See [docs/launchdarkly-migration-role.md](docs/launchdarkly-migration-role.md).
@@ -734,6 +743,7 @@ Big segments are always created in the destination with the same key and context
 Without `migrateBigSegments`, big segments are created empty with a warning.
 
 **Notes:**
+
 - Needs `createSegmentExport` on the source and `createSegment`/`updateIncluded` on the destination.
 - Synced segments (fed by an external integration) have no exportable members; they are created empty. Reconnect the integration in the destination.
 - Big segments with exported members are re-imported on every run, including `incremental` runs.
@@ -803,6 +813,7 @@ deno task migrate -p SOURCE_PROJECT -d DEST_PROJECT -c "imported-"
 ```
 
 **Notes:**
+
 - Only applies when a conflict (HTTP 409) is detected
 - Resources recorded in the [sync manifest](#sync-manifest) from an earlier run are updated under their recorded key, whatever the conflict policy; the policy applies to resources the manifest does not know
 - With `--on-conflict abort`, the run stops at the first existing key after writing the sync manifest marked incomplete (see [Sync Manifest](#sync-manifest))
@@ -840,6 +851,7 @@ deno task migrate \
 ```
 
 **Example output:**
+
 ```
 === Environment Mapping ===
 Source → Destination:
@@ -857,12 +869,14 @@ Reading flag 1 of 50 : my-feature
 ```
 
 **How it works:**
+
 1. Reads flag configurations from **source** environments (e.g., `prod`, `dev`)
 2. Creates/patches flags in **destination** environments (e.g., `production`, `development`)
 3. Applies to both flags and segments automatically
 4. Validates that destination environments exist before starting
 
 **Notes:**
+
 - Only mapped source environments will be migrated
 - Several source environments may map to one destination environment. A segment key present in more than one of them is then written more than once into that environment: the later write replaces the earlier one, or with `onConflict: prefix` is created with the prefix
 - Destination environments must already exist in the target project, unless `migration.createEnvironments: true` (`--create-environments`) is set, in which case missing mapped environments are created from the source settings
@@ -872,6 +886,7 @@ Reading flag 1 of 50 : my-feature
 - Can be combined with `-e` flag for additional filtering
 
 **Error handling:**
+
 ```bash
 # If destination environment doesn't exist:
 Error: The following mapped destination environments don't exist in target project:
@@ -897,6 +912,7 @@ deno task migrate -p SOURCE_PROJECT -d test-project -e "development" -c "test-"
 ```
 
 **Example output:**
+
 ```
 === Environment Filtering ===
 Requested environments: production, staging
@@ -914,6 +930,7 @@ Reading flag 1 of 50 : my-feature
 ```
 
 **Notes:**
+
 - Only the specified environments will be migrated for both flags and segments
 - If an environment doesn't exist in the source, you'll see a warning
 - If none of the requested environments exist, the migration will abort
@@ -924,6 +941,7 @@ Reading flag 1 of 50 : my-feature
 Migrate only specific flags or exclude certain flags from migration:
 
 **Via YAML config:**
+
 ```yaml
 migration:
   # Only migrate these flags
@@ -938,6 +956,7 @@ migration:
 ```
 
 **Via CLI:**
+
 ```bash
 # Only migrate specific flags
 deno task migrate -p SOURCE -d DEST --include-flags "feature-one,feature-two"
@@ -961,6 +980,7 @@ deno task migrate -p SOURCE -d DEST --concurrency 1
 ```
 
 **Via YAML config:**
+
 ```yaml
 migration:
   concurrency: 20
@@ -1026,6 +1046,7 @@ If you need to undo a migration (e.g., after a failed or partial migration), you
 ### Revert Methods
 
 **Via Workflow (Recommended):**
+
 ```bash
 # Preview what will be reverted (dry-run)
 deno task workflow -f examples/workflow-revert-and-migrate.yaml
@@ -1035,6 +1056,7 @@ deno task workflow -f examples/workflow-revert-and-migrate.yaml
 ```
 
 **Via Individual Revert Task:**
+
 ```bash
 # Preview revert with config file
 deno task revert -f examples/revert-migration-example.yaml --dry-run
@@ -1049,6 +1071,7 @@ deno task revert -p DEST_PROJECT -s SOURCE_PROJECT -v "migration-view" --dry-run
 ### What Gets Reverted
 
 The revert process:
+
 1. **Identifies migrated flags** - Uses the sync manifest written by `migrate` (destination keys, including conflict-prefixed ones), or the extracted source data when there is no manifest, to know exactly which flags were migrated (smart mode)
 2. **Deletes approval requests** - Removes any pending approval requests for migrated flags
 3. **Unlinks from views** - Removes flags from the target view
@@ -1060,6 +1083,7 @@ The revert process:
 ### Revert Configuration
 
 **YAML Config Example:**
+
 ```yaml
 source:
   projectKey: source-project
@@ -1068,11 +1092,11 @@ destination:
   projectKey: dest-project
 
 migration:
-  targetView: "migration-2024"  # View to clean up
+  targetView: "migration-2024" # View to clean up
 
 revert:
-  dryRun: true                   # Preview first (recommended)
-  deleteViews: false              # Set to true to also delete views
+  dryRun: true # Preview first (recommended)
+  deleteViews: false # Set to true to also delete views
   # viewKeys:                     # Optional: Only revert specific views
   #   - migration-view-1
 ```
@@ -1097,12 +1121,13 @@ The `revert:` block applies both in the workflow orchestrator and when running `
 ### Revert Workflow Examples
 
 **Revert and Re-migrate Pattern:**
+
 ```yaml
 # workflow-revert-and-migrate.yaml
 workflow:
   steps:
-    - revert      # Clean up previous migration
-    - migrate     # Run migration again with corrected settings
+    - revert # Clean up previous migration
+    - migrate # Run migration again with corrected settings
 
 source:
   projectKey: source-project
@@ -1111,15 +1136,16 @@ destination:
   projectKey: dest-project
 
 revert:
-  dryRun: true    # Change to false after previewing
+  dryRun: true # Change to false after previewing
 
 migration:
   assignMaintainerIds: true
   targetView: "migration-2024"
-  dryRun: true    # Change to false after previewing
+  dryRun: true # Change to false after previewing
 ```
 
 **Best Practices:**
+
 1. **Always use `--dry-run` first** to preview what will be deleted
 2. **Use smart mode** (default) - leverages source data for faster, more accurate reverts
 3. **Back up critical flags** if you're unsure about the revert scope
@@ -1392,7 +1418,7 @@ The project includes a **Flag Import Tool** that allows you to bulk create featu
    # Copy the template files to get started
    cp examples/flags_template.json my_flags.json
    cp examples/flags_template.csv my_flags.csv
-   
+
    # Edit the copied files with your flag definitions
    # Or create your own files in the import-files directory
    ```
@@ -1418,6 +1444,7 @@ The project includes a **Flag Import Tool** that allows you to bulk create featu
 ### File Formats
 
 #### JSON Format
+
 ```json
 [
   {
@@ -1434,6 +1461,7 @@ The project includes a **Flag Import Tool** that allows you to bulk create featu
 ```
 
 #### CSV Format
+
 ```csv
 key,name,description,kind,variations,defaultOnVariation,defaultOffVariation,tags
 flag-key,Flag Name,Flag description,boolean,"true,false",true,false,"tag1,tag2"
@@ -1497,6 +1525,7 @@ deno task version:bump:major    # 1.0.0 → 2.0.0
 ### Manual Version Management
 
 You can also manage versions manually:
+
 - **deno.json**: Update the `version` field
 - **README.md**: nothing to do; the version badge is dynamic and reads `deno.json` on `main` (GitHub's image cache may show the previous version for a few minutes)
 - **CHANGELOG.md**: Move items from `[Unreleased]` to a new version section
@@ -1507,8 +1536,8 @@ Apache 2.0 - see LICENSE file
 
 ## LaunchDarkly Labs Disclaimer
 
-This repository is maintained by LaunchDarkly Labs. While we try to keep it 
-up to date, it is not officially supported by LaunchDarkly. For officially 
+This repository is maintained by LaunchDarkly Labs. While we try to keep it
+up to date, it is not officially supported by LaunchDarkly. For officially
 supported SDKs and tools, visit https://launchdarkly.com
 
 ## Support

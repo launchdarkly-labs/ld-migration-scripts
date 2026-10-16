@@ -1,10 +1,15 @@
-import { assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assertEquals,
+  assertRejects,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { SplitApiError, SplitClient } from "./client.ts";
 
 type StubHandler = (req: Request) => Response;
 
 /** Builds a SplitClient whose fetch is served by `handler`; records requests. */
-function stubClient(handler: StubHandler): { client: SplitClient; requests: Request[] } {
+function stubClient(
+  handler: StubHandler,
+): { client: SplitClient; requests: Request[] } {
   const requests: Request[] = [];
   const client = new SplitClient("test-key", {
     fetchFn: (req) => {
@@ -16,7 +21,11 @@ function stubClient(handler: StubHandler): { client: SplitClient; requests: Requ
   return { client, requests };
 }
 
-const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
+const json = (
+  body: unknown,
+  status = 200,
+  headers: Record<string, string> = {},
+) =>
   new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json", ...headers },
@@ -40,7 +49,12 @@ Deno.test("sends Bearer auth and query params", async () => {
 
 Deno.test("paginates objects envelope until totalCount reached", async () => {
   const pages = [
-    { objects: [{ name: "a" }, { name: "b" }], offset: 0, limit: 2, totalCount: 3 },
+    {
+      objects: [{ name: "a" }, { name: "b" }],
+      offset: 0,
+      limit: 2,
+      totalCount: 3,
+    },
     { objects: [{ name: "c" }], offset: 2, limit: 2, totalCount: 3 },
   ];
   const { client, requests } = stubClient((req) => {
@@ -74,7 +88,10 @@ Deno.test("retries 429 with retry-after header, then succeeds", async () => {
   const { client, requests } = stubClient(() => {
     calls++;
     if (calls === 1) {
-      return new Response("rate limited", { status: 429, headers: { "retry-after": "1" } });
+      return new Response("rate limited", {
+        status: 429,
+        headers: { "retry-after": "1" },
+      });
     }
     return json({ objects: [], offset: 0, limit: 50, totalCount: 0 });
   });
@@ -102,7 +119,12 @@ Deno.test("getSegmentKeys paginates the keys/count envelope", async () => {
   const { client, requests } = stubClient((req) => {
     const offset = Number(new URL(req.url).searchParams.get("offset"));
     if (offset === 0) {
-      return json({ keys: [{ key: "u1" }, { key: "u2" }], count: 3, offset: 0, limit: 2 });
+      return json({
+        keys: [{ key: "u1" }, { key: "u2" }],
+        count: 3,
+        offset: 0,
+        limit: 2,
+      });
     }
     return json({ keys: [{ key: "u3" }], count: 3, offset: 2, limit: 2 });
   });

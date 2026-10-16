@@ -1,4 +1,10 @@
-import { ldAPIRequest, rateLimitRequest, getJson, ldAPIPostRequest, ldAPIPatchRequest } from "./utils.ts";
+import {
+  getJson,
+  ldAPIPatchRequest,
+  ldAPIPostRequest,
+  ldAPIRequest,
+  rateLimitRequest,
+} from "./utils.ts";
 import { getDestinationApiKey } from "./api_keys.ts";
 
 interface RateLimitInfo {
@@ -32,14 +38,19 @@ interface TimeEstimate {
  * @param debug Whether to log all response headers
  * @returns Rate limit information
  */
-export async function testRateLimits(path: string, projectKey: string, domain = "app.launchdarkly.com", debug = false): Promise<RateLimitInfo> {
+export async function testRateLimits(
+  path: string,
+  projectKey: string,
+  domain = "app.launchdarkly.com",
+  debug = false,
+): Promise<RateLimitInfo> {
   const apiKey = await getDestinationApiKey();
-  
+
   // Test GET request
   console.log(`\nTesting GET request for ${path}...`);
   const getReq = ldAPIRequest(apiKey, domain, `projects/${projectKey}/${path}`);
   const getResponse = await rateLimitRequest(getReq, path);
-  
+
   if (debug) {
     console.log(`\nGET response headers for ${path}:`);
     console.log("========================");
@@ -51,13 +62,18 @@ export async function testRateLimits(path: string, projectKey: string, domain = 
 
   // Test POST request (create)
   console.log(`\nTesting POST request for ${path}...`);
-  const testData = path === "flags" 
+  const testData = path === "flags"
     ? { key: "test-flag", name: "Test Flag", variations: [{ value: true }] }
     : { key: "test-segment", name: "Test Segment" };
-  
-  const postReq = ldAPIPostRequest(apiKey, domain, `${path}/${projectKey}`, testData);
+
+  const postReq = ldAPIPostRequest(
+    apiKey,
+    domain,
+    `${path}/${projectKey}`,
+    testData,
+  );
   const postResponse = await rateLimitRequest(postReq, path);
-  
+
   if (debug) {
     console.log(`\nPOST response headers for ${path}:`);
     console.log("========================");
@@ -70,13 +86,13 @@ export async function testRateLimits(path: string, projectKey: string, domain = 
   // Test PATCH request
   console.log(`\nTesting PATCH request for ${path}...`);
   const patchReq = ldAPIPatchRequest(
-    apiKey, 
-    domain, 
-    `${path}/${projectKey}/${testData.key}`, 
-    [{ op: "replace", path: "/name", value: "Updated Test" }]
+    apiKey,
+    domain,
+    `${path}/${projectKey}/${testData.key}`,
+    [{ op: "replace", path: "/name", value: "Updated Test" }],
   );
   const patchResponse = await rateLimitRequest(patchReq, path);
-  
+
   if (debug) {
     console.log(`\nPATCH response headers for ${path}:`);
     console.log("========================");
@@ -85,7 +101,7 @@ export async function testRateLimits(path: string, projectKey: string, domain = 
     }
     console.log("========================");
   }
-  
+
   // Check for rate limit headers in any of the responses
   const responses = [getResponse, postResponse, patchResponse];
   let globalRemaining = 0;
@@ -95,26 +111,34 @@ export async function testRateLimits(path: string, projectKey: string, domain = 
   for (const response of responses) {
     const headers = response.headers;
     if (headers.has("x-ratelimit-global-remaining")) {
-      globalRemaining = parseInt(headers.get("x-ratelimit-global-remaining") || "0", 10);
+      globalRemaining = parseInt(
+        headers.get("x-ratelimit-global-remaining") || "0",
+        10,
+      );
     }
     if (headers.has("x-ratelimit-route-remaining")) {
-      routeRemaining = parseInt(headers.get("x-ratelimit-route-remaining") || "0", 10);
+      routeRemaining = parseInt(
+        headers.get("x-ratelimit-route-remaining") || "0",
+        10,
+      );
     }
     if (headers.has("x-ratelimit-reset")) {
       // Convert from milliseconds to seconds
-      resetTime = Math.floor(parseInt(headers.get("x-ratelimit-reset") || "0", 10) / 1000);
+      resetTime = Math.floor(
+        parseInt(headers.get("x-ratelimit-reset") || "0", 10) / 1000,
+      );
     }
   }
-  
+
   console.log(`\nFound rate limits for ${path}:`);
   console.log(`- Global remaining: ${globalRemaining}`);
   console.log(`- Route remaining: ${routeRemaining}`);
   console.log(`- Reset time: ${new Date(resetTime * 1000).toLocaleString()}`);
-  
+
   return {
     globalRemaining,
     routeRemaining,
-    resetTime
+    resetTime,
   };
 }
 
@@ -123,34 +147,44 @@ export async function testRateLimits(path: string, projectKey: string, domain = 
  * @param sourceProjectKey The source project key
  * @returns Counts of different resource types
  */
-export async function analyzeSourceProject(sourceProjectKey: string): Promise<ResourceCounts> {
-  const projectJson = await getJson(`./data/launchdarkly-migrations/source/project/${sourceProjectKey}/project.json`);
-  const flagList = await getJson(`./data/launchdarkly-migrations/source/project/${sourceProjectKey}/flags.json`);
-  
+export async function analyzeSourceProject(
+  sourceProjectKey: string,
+): Promise<ResourceCounts> {
+  const projectJson = await getJson(
+    `./data/launchdarkly-migrations/source/project/${sourceProjectKey}/project.json`,
+  );
+  const flagList = await getJson(
+    `./data/launchdarkly-migrations/source/project/${sourceProjectKey}/flags.json`,
+  );
+
   const environments = projectJson.environments.items.length;
   const flags = flagList.length;
-  
+
   // Count segments across all environments
   let segments = 0;
   for (const env of projectJson.environments.items) {
     try {
-      const segmentData = await getJson(`./data/launchdarkly-migrations/source/project/${sourceProjectKey}/segment-${env.key}.json`);
+      const segmentData = await getJson(
+        `./data/launchdarkly-migrations/source/project/${sourceProjectKey}/segment-${env.key}.json`,
+      );
       if (segmentData && segmentData.items) {
         segments += segmentData.items.length;
       }
     } catch (_error) {
-      console.log(`Warning: Could not read segments for environment ${env.key}`);
+      console.log(
+        `Warning: Could not read segments for environment ${env.key}`,
+      );
     }
   }
-  
+
   // Calculate total flag * environment combinations
   const flagEnvironments = flags * environments;
-  
+
   return {
     flags,
     segments,
     environments,
-    flagEnvironments
+    flagEnvironments,
   };
 }
 
@@ -162,43 +196,47 @@ export async function analyzeSourceProject(sourceProjectKey: string): Promise<Re
  */
 export async function estimateMigrationTime(
   sourceProjectKey: string,
-  customRateLimit?: number
+  customRateLimit?: number,
 ): Promise<TimeEstimate> {
   // Get resource counts
   const counts = await analyzeSourceProject(sourceProjectKey);
-  
+
   // Calculate requests needed for each resource type
   // Flags: 1 create + 1 patch per environment
   const flagRequests = counts.flags * (1 + counts.environments);
-  
+
   // Segments: 1 create + 1 patch per segment
   const segmentRequests = counts.segments * 2;
-  
+
   // Apply specific rate limits
   // Flag POST/PATCH: 5 requests per 10s (default) or custom rate limit
   // Segments: No rate limit
-  
+
   // Calculate time in seconds (10 second window)
   const flagRequestsPerWindow = customRateLimit || 5; // Flag POST/PATCH limit
   const flagTime = Math.ceil(flagRequests / flagRequestsPerWindow) * 10;
   const segmentTime = 0; // No rate limit for segments
-  
+
   // Add some buffer time for potential retries and other operations
   const totalTime = Math.ceil((flagTime + segmentTime) * 1.2);
-  
+
   console.log("\nRequest calculations:");
-  console.log(`Flag requests: ${flagRequests} (${counts.flags} creates + ${counts.flagEnvironments} patches)`);
-  console.log(`Segment requests: ${segmentRequests} (${counts.segments} creates + ${counts.segments} patches)`);
+  console.log(
+    `Flag requests: ${flagRequests} (${counts.flags} creates + ${counts.flagEnvironments} patches)`,
+  );
+  console.log(
+    `Segment requests: ${segmentRequests} (${counts.segments} creates + ${counts.segments} patches)`,
+  );
   console.log(`Flag requests per window: ${flagRequestsPerWindow}`);
-  
+
   return {
     totalTime,
     breakdown: {
       flags: flagTime,
       segments: segmentTime,
-      environments: 0 // Environments are created as part of project creation
+      environments: 0, // Environments are created as part of project creation
     },
-    resourceCounts: counts
+    resourceCounts: counts,
   };
 }
 
@@ -211,11 +249,11 @@ export function formatTimeEstimate(estimate: TimeEstimate): string {
   const hours = Math.floor(estimate.totalTime / 3600);
   const minutes = Math.floor((estimate.totalTime % 3600) / 60);
   const seconds = estimate.totalTime % 60;
-  
+
   const parts = [];
-  if (hours > 0) parts.push(`${hours} hour${hours !== 1 ? 's' : ''}`);
-  if (minutes > 0) parts.push(`${minutes} minute${minutes !== 1 ? 's' : ''}`);
-  if (seconds > 0) parts.push(`${seconds} second${seconds !== 1 ? 's' : ''}`);
-  
-  return parts.join(', ');
-} 
+  if (hours > 0) parts.push(`${hours} hour${hours !== 1 ? "s" : ""}`);
+  if (minutes > 0) parts.push(`${minutes} minute${minutes !== 1 ? "s" : ""}`);
+  if (seconds > 0) parts.push(`${seconds} second${seconds !== 1 ? "s" : ""}`);
+
+  return parts.join(", ");
+}

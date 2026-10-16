@@ -6,11 +6,11 @@
 
 source:
   projectKey: legacy-project
-  domain: app.launchdarkly.com  # Optional: Defaults to app.launchdarkly.com
+  domain: app.launchdarkly.com # Optional: Defaults to app.launchdarkly.com
 
 destination:
   projectKey: new-project
-  domain: app.launchdarkly.com  # Optional: Use app.eu.launchdarkly.com for EU instance
+  domain: app.launchdarkly.com # Optional: Use app.eu.launchdarkly.com for EU instance
 
 migration:
   migrateSegments: true
@@ -19,6 +19,6 @@ migration:
   # tags:
   #   - imported-from-legacy
   #   - billing-team
-  
+
   # Preview migration without making changes (optional)
   # dryRun: true

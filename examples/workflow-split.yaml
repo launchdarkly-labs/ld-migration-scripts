@@ -30,7 +30,7 @@ source:
 
 destination:
   projectKey: my-ld-project
-  domain: app.launchdarkly.com  # Optional: Defaults to app.launchdarkly.com
+  domain: app.launchdarkly.com # Optional: Defaults to app.launchdarkly.com
 
 splitExtract:
   # Split workspace (project) ID or name
