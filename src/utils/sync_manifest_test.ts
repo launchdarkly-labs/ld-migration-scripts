@@ -11,11 +11,13 @@ import {
   legacySegmentEntries,
   recordedDestination,
   manifestDestinationFlagKeys,
+  markerAfterRun,
   ownEntry,
   readSyncManifest,
   retainIncompleteMarker,
   retireDeletedFlags,
   segmentEnvironmentMismatches,
+  stampIdentity,
   type SyncManifest,
   syncManifestPath,
   withExtraDestKeys,
@@ -347,3 +349,32 @@ Deno.test("a flag named __proto__ survives manifest rebuilds as an own entry", (
   assertEquals(Object.keys(record), ["__proto__"]);
 });
 
+
+Deno.test("markerAfterRun raises a marker when failed writes left resources without an entry", () => {
+  const previous: SyncManifest = { ...manifest, flags: { a: { version: 1, environments: {} } } };
+  const next = { flags: { a: previous.flags.a } };
+  const clean = { flagScopeFiltered: false, failedWrites: false, conflictedFlags: [], conflictedSegments: [] };
+  // b's create succeeded but a later patch threw: no entry, flagged as failed, possibly written
+  const failed = { ...clean, failedWrites: true, pendingDestKeys: { flags: ["b"], segments: [] } };
+  const marker = markerAfterRun(previous, failed, next, "2026-10-16T09:00:00.000Z");
+  assertEquals(marker?.unresolved, { flags: ["b"], segments: [] });
+  assertEquals(marker?.reason.includes("1 failed write(s)"), true);
+  // A failure that kept its entry (flag-level patch failed after the entry was written) needs no marker
+  assertEquals(markerAfterRun(previous, { ...clean, failedWrites: true }, next, "x"), undefined);
+  assertEquals(markerAfterRun(previous, clean, next, "x"), undefined);
+  // The retry that records b clears it; a retry that only prefixes b keeps it
+  const after: SyncManifest = { ...previous, incomplete: marker };
+  assertEquals(markerAfterRun(after, clean, { flags: { ...next.flags, b: { version: 1, environments: {} } } }, "x"), undefined);
+  assertEquals(
+    markerAfterRun(after, { ...clean, conflictedFlags: ["b"] }, { flags: { ...next.flags, b: { version: 1, environments: {}, destKey: "imported-b" } } }, "x"),
+    marker,
+  );
+});
+
+Deno.test("stampIdentity keeps the previous account stamp when the lookup fails", () => {
+  const stamped: SyncManifest = { ...manifest, destDomain: "app.launchdarkly.com", destAccountId: "acct-1" };
+  assertEquals(stampIdentity(stamped, { domain: "app.launchdarkly.com" }), { destDomain: "app.launchdarkly.com", destAccountId: "acct-1" });
+  assertEquals(stampIdentity(stamped, { domain: "app.launchdarkly.com", accountId: "acct-1" }), { destDomain: "app.launchdarkly.com", destAccountId: "acct-1" });
+  assertEquals(stampIdentity(null, { domain: "app.eu.launchdarkly.com" }), { destDomain: "app.eu.launchdarkly.com" });
+  assertEquals(stampIdentity(manifest, { domain: "app.launchdarkly.com", accountId: "acct-9" }), { destDomain: "app.launchdarkly.com", destAccountId: "acct-9" });
+});

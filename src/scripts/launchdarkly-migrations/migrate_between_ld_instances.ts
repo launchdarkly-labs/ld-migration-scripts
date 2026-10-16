@@ -35,12 +35,14 @@ import {
   type DestinationIdentity,
   emptyRecord,
   legacySegmentEntries,
+  markerAfterRun,
   ownEntry,
   readSyncManifest,
   recordedDestination,
   retainIncompleteMarker,
   type RunOutcome,
   segmentEnvironmentMismatches,
+  stampIdentity,
   withExtraDestKeys,
   syncManifestPath as syncManifestPathFor,
 } from "../../utils/sync_manifest.ts";
@@ -2787,10 +2789,10 @@ async function writeSyncManifestFile(incomplete?: SyncManifest["incomplete"]): P
       ? Colors.cyan(`\nAdopted ${list.length} untracked destination resource(s) into the sync manifest: ${list.join(", ")}`)
       : Colors.yellow(`\nNo untracked destination resource could be adopted (no matching source resource in this run)`));
   }
-  // An abort keeps the gaps found so far (previous marker plus this run's conflicts on unrecorded keys)
-  // and records the destination keys of writes still in flight: the key being written, plus the
-  // prefixed key when the write was a prefix retry, since either copy may exist without an entry
-  if (incomplete) {
+  // Attempted resources without an entry: in flight at an abort, or failed after a create may already
+  // have succeeded. Their destination keys (the key being written, plus the prefixed key for a prefix
+  // retry) may exist without an entry, so they are recorded as pending in the marker.
+  {
     const prefix = inputArgs.conflictPrefix;
     const splitId = (id: string): [string, string] => {
       const slash = id.indexOf("/");
@@ -2818,15 +2820,29 @@ async function writeSyncManifestFile(incomplete?: SyncManifest["incomplete"]): P
       });
     run.pendingDestKeys = { flags: pendingFlags, segments: pendingSegments };
   }
+  // A resource whose synchronization failed keeps its entry (ownership) but not its cached versions,
+  // so the next --incremental run retries it instead of taking the failed sync for current
+  for (const key of flagsWithErrors) {
+    const entry = ownEntry(entries.flags, key);
+    if (entry) Object.assign(entry, { version: 0, lastModified: undefined, environments: {} });
+  }
+  for (const [srcEnv, segments] of Object.entries(entries.segments ?? {})) {
+    for (const [key, entry] of Object.entries(segments)) {
+      if (segmentsWithErrors.has(`${entry.destEnv ?? srcEnv}/${entry.destKey ?? key}`)) {
+        Object.assign(entry, { version: 0, lastModified: undefined });
+      }
+    }
+  }
+  // An abort keeps the gaps found so far (previous marker plus this run's conflicts on unrecorded keys);
+  // a completed run retains an earlier marker, or raises one when failed writes left resources untracked
   const marker = incomplete
     ? abortMarker(previousManifest, incomplete, run, entries)
-    : retainIncompleteMarker(previousManifest, run, entries);
+    : markerAfterRun(previousManifest, run, entries, new Date().toISOString());
   const manifest: SyncManifest = {
     lastSyncTimestamp: new Date().toISOString(),
     sourceProject: inputArgs.projKeySource,
     destProject: inputArgs.projKeyDest,
-    destDomain: domain,
-    ...(destIdentity.accountId ? { destAccountId: destIdentity.accountId } : {}),
+    ...stampIdentity(previousManifest, destIdentity),
     ...entries,
     ...(marker ? { incomplete: marker } : {}),
   };

@@ -280,6 +280,44 @@ export function abortMarker(
 }
 
 /**
+ * The marker a completed run must write, or undefined. An existing marker is retained by the rules of
+ * retainIncompleteMarker. Without one, failed writes that left attempted resources without an entry
+ * (`run.pendingDestKeys`: the create may have succeeded before a later step threw) raise a new marker
+ * listing those destination keys, so revert does not trust an inventory that omits an existing copy.
+ */
+export function markerAfterRun(
+  previous: SyncManifest | null,
+  run: RunOutcome,
+  next: ManifestEntries,
+  at: string,
+): IncompleteMarker | undefined {
+  const retained = retainIncompleteMarker(previous, run, next);
+  if (retained) return retained;
+  if (!run.failedWrites) return undefined;
+  const pending = [...(run.pendingDestKeys?.flags ?? []), ...(run.pendingDestKeys?.segments ?? [])];
+  if (pending.length === 0) return undefined;
+  return abortMarker(
+    previous,
+    { reason: `${pending.length} failed write(s) left destination resources without an entry`, at },
+    run,
+    next,
+  );
+}
+
+/**
+ * The destination identity to stamp on the manifest being written: the current domain, and the current
+ * account when the caller-identity lookup worked, else the account the previous manifest recorded, so a
+ * failed lookup never erases an existing account stamp.
+ */
+export function stampIdentity(
+  previous: SyncManifest | null,
+  identity: DestinationIdentity,
+): Pick<SyncManifest, "destDomain" | "destAccountId"> {
+  const accountId = identity.accountId ?? previous?.destAccountId;
+  return { destDomain: identity.domain, ...(accountId ? { destAccountId: accountId } : {}) };
+}
+
+/**
  * The destination key and name a rerun should write a source resource under. Any previous manifest
  * entry names this migration's own earlier copy: under the source key, or under another key after a
  * conflict-prefix rename. The rerun updates that copy instead of treating it as a conflict, so a
