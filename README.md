@@ -490,6 +490,7 @@ migration:                   # Optional - for migrate step
   migrateSegments: boolean
   tags: string[] | null      # Optional tags added to migrated flags and segments
   migrateBigSegments: boolean  # Copy big segment members via CSV export/import (default: false)
+  migrateViews: boolean      # Recreate views and link flags/segments to them (default: true)
   conflictPrefix: string
   targetView: string
   environments: string[]
@@ -666,6 +667,7 @@ migration:                   # Migration settings (also accepts "options:" as al
   includeFlags: string[]                # Optional: only migrate these flag keys
   excludeFlags: string[]                # Optional: skip these flag keys
   tags: string[]                        # Optional: tags added to flags and segments
+  migrateViews: boolean                 # Optional: recreate views and their links (default: true)
   concurrency: number                   # Optional: parallel flags (default: 10)
 ```
 
@@ -719,6 +721,7 @@ deno task migrate -p SOURCE_PROJECT -d DEST_PROJECT -v my-target-view
 - The source token needs `viewView`. Without it the views list silently comes back empty and no views are migrated; extraction prints a warning when it finds none.
 - The destination token needs `createView`, `updateView`, `linkFlagToView` and `linkSegmentToView`. See [docs/launchdarkly-migration-role.md](docs/launchdarkly-migration-role.md).
 - If a view already exists in the destination, it is reused and its details are not changed.
+- Opt out with `migration.migrateViews: false` (`--migrate-views=false`): the workflow then skips view extraction (`--extract-views=false`, which also removes an earlier `views.json`), and the migrate step neither recreates views nor links flags or segments to them. `targetView` still applies.
 
 ### Big Segments (Larger List-Based Segments)
 
@@ -747,8 +750,12 @@ Flags are migrated in prerequisite order, so prerequisite links land correctly. 
 `scripts/verify-segments.ts` compares the source and destination after a migration:
 
 ```bash
-deno run --allow-net --allow-read scripts/verify-segments.ts SOURCE_PROJECT DEST_PROJECT [keyPrefix]
+deno run --allow-net --allow-read scripts/verify-segments.ts SOURCE_PROJECT DEST_PROJECT [keyPrefix] \
+  [--source-domain app.launchdarkly.com] [--dest-domain app.eu.launchdarkly.com] \
+  [--env-map prod:production,dev:development]
 ```
+
+The projects may live on different instances (`--source-domain` / `--dest-domain`, both default to `app.launchdarkly.com`), and destination environment keys may differ (`--env-map`, same format as the migrate option). With `--env-map`, only the mapped source environments are checked, as in the migration.
 
 - **Segments** (per environment): name, description, tags, included/excluded targets and rules, ignoring IDs, versions and dates.
 - **Big segments**: every key from the extracted CSV is checked for membership in the destination.
@@ -1266,6 +1273,8 @@ don't need to specify them manually.
   to 10. Speeds up large migrations while rate limiting still applies.
 - `--migrate-big-segments`: (Optional) Import big segment members from the CSVs exported
   during extraction (`--extract-big-segments`).
+- `--migrate-views=false`: (Optional) Do not recreate the source project's views or link
+  flags and segments to them (config: `migration.migrateViews`). `-v` still applies.
 - `--dry-run`: (Optional) Preview without writing to the destination or the sync manifest.
 
 **Exit code.** After the summary, `migrate` reconciles the flag keys (and segment keys per mapped environment) in the source data against the destination and exits with code `1` when any flag or segment failed to create or update, is missing from the destination, or when the reconciliation itself could not be completed (flags skipped by `--since` are out of scope). The workflow runner stops at that step. Exit code `0` means every resource in scope is present in the destination; use `scripts/verify-segments.ts` or an external field-level comparison for content parity.

@@ -60,6 +60,8 @@ export interface WorkflowConfig {
     concurrency?: number;
     createProject?: boolean;
     createEnvironments?: boolean;
+    /** false: views are neither extracted nor recreated/linked (targetView still applies) */
+    migrateViews?: boolean;
   };
   thirdPartyImport?: {
     inputFile: string;

@@ -27,7 +27,9 @@ export interface SourceView {
 
 async function getAllPages(apiKey: string, domain: string, path: string): Promise<any[]> {
   const items: any[] = [];
-  for (let offset = 0; ; offset += PAGE_SIZE) {
+  // The offset advances by the number of items actually returned, so a short page that still has a
+  // next link (e.g. 20 of 30) continues at 20 and not at PAGE_SIZE
+  for (let offset = 0; ; offset = items.length) {
     const sep = path.includes("?") ? "&" : "?";
     const resp = await rateLimitRequest(
       ldAPIRequest(apiKey, domain, `${path}${sep}limit=${PAGE_SIZE}&offset=${offset}`, true),
@@ -37,8 +39,15 @@ async function getAllPages(apiKey: string, domain: string, path: string): Promis
       throw new Error(`GET ${path} failed (HTTP ${resp.status}): ${await resp.text()}`);
     }
     const body = await resp.json();
-    items.push(...(body.items ?? []));
-    if (!body.items?.length || items.length >= (body.totalCount ?? 0)) return items;
+    const page: any[] = body.items ?? [];
+    items.push(...page);
+    if (page.length === 0) return items;
+    // The beta endpoints don't always return totalCount; without it, a short page with no next link ends the list
+    if (typeof body.totalCount === "number") {
+      if (items.length >= body.totalCount) return items;
+    } else if (page.length < PAGE_SIZE && !body._links?.next) {
+      return items;
+    }
   }
 }
 
