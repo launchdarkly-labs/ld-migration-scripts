@@ -7,6 +7,7 @@ import {
   assertManifestComplete,
   manifestDestinationFlagKeys,
   readSyncManifest,
+  retainIncompleteMarker,
   type SyncManifest,
   syncManifestPath,
 } from "./sync_manifest.ts";
@@ -85,4 +86,27 @@ Deno.test("assertManifestComplete rejects a manifest written by an aborted run a
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
+});
+
+Deno.test("retainIncompleteMarker: an aborted run's marker survives until a clean unfiltered run reconciles every conflict", () => {
+  const incomplete = { reason: 'aborted: flag "c" already exists (--on-conflict abort)', at: "2026-10-16T09:00:00.000Z" };
+  // The aborted run recorded "a"; its concurrent create of "b" finished without an entry
+  const aborted: SyncManifest = {
+    ...manifest,
+    flags: { a: { version: 1, environments: {} } },
+    segments: { production: { seg: { version: 1 } } },
+    incomplete,
+  };
+  const clean = { flagScopeFiltered: false, failedWrites: false, conflictedFlags: [], conflictedSegments: [] };
+
+  assertEquals(retainIncompleteMarker(manifest, clean), undefined, "no marker to keep");
+  assertEquals(retainIncompleteMarker(aborted, clean), undefined, "a clean unfiltered run closes the gap");
+  assertEquals(retainIncompleteMarker(aborted, { ...clean, flagScopeFiltered: true }), incomplete, "filtered run");
+  assertEquals(retainIncompleteMarker(aborted, { ...clean, failedWrites: true }), incomplete, "failed writes");
+  // Retry with --on-conflict skip or prefix: "b" exists but has no entry, so it may be the unrecorded write
+  assertEquals(retainIncompleteMarker(aborted, { ...clean, conflictedFlags: ["b"] }), incomplete, "unrecorded flag conflict");
+  assertEquals(retainIncompleteMarker(aborted, { ...clean, conflictedFlags: ["a"] }), undefined, "recorded flag conflict");
+  assertEquals(retainIncompleteMarker(aborted, { ...clean, conflictedSegments: ["production/other"] }), incomplete, "unrecorded segment conflict");
+  assertEquals(retainIncompleteMarker(aborted, { ...clean, conflictedSegments: ["test/seg"] }), incomplete, "same key, unrecorded environment");
+  assertEquals(retainIncompleteMarker(aborted, { ...clean, conflictedSegments: ["production/seg"] }), undefined, "recorded segment conflict");
 });

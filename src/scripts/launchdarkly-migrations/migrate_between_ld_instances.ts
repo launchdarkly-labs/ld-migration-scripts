@@ -31,6 +31,7 @@ import {
   type SyncManifestFlag,
   type SyncManifestSegment,
   readSyncManifest,
+  retainIncompleteMarker,
   syncManifestPath as syncManifestPathFor,
 } from "../../utils/sync_manifest.ts";
 import { bigSegmentCsvPath, readExportedKeys } from "../../utils/big_segments.ts";
@@ -692,7 +693,7 @@ if (previousManifest?.incomplete) {
   console.log(Colors.yellow(
     `\n⚠ Previous sync manifest is marked incomplete (${previousManifest.incomplete.reason}, at ${previousManifest.incomplete.at}); ` +
       `revert refuses it until a run without includeFlags, excludeFlags or --since completes with no failed writes ` +
-      `and no conflict-skipped resource missing from the manifest` +
+      `and no skipped or prefix-renamed conflict on a resource missing from the manifest` +
       (flagScopeFiltered ? `. This run is filtered, so the marker is kept.` : `. This run clears it if it completes cleanly.`),
   ));
 }
@@ -878,6 +879,9 @@ const flagsSkippedByDate: Set<string> = new Set(); // --since: never attempted, 
 // --on-conflict skip: the destination copy stays as it is, so the previous manifest entry is kept
 const flagsSkippedByConflict: Set<string> = new Set();
 const segmentsSkippedByConflict: Set<string> = new Set(); // "<sourceEnv>/<segmentKey>"
+// --on-conflict prefix: the existing destination copy under the original key stays untracked
+const flagsPrefixedByConflict: Set<string> = new Set();
+const segmentsPrefixedByConflict: Set<string> = new Set(); // "<sourceEnv>/<segmentKey>"
 // Segments whose create was attempted this run ("<sourceEnv>/<segmentKey>"); a previous manifest entry
 // for anything else (no extracted data for the environment, unselected environment, segments off) is kept
 const segmentsAttempted: Set<string> = new Set();
@@ -1272,6 +1276,7 @@ if (inputArgs.migrateSegments) {
           } else if (action === 'prefix' && inputArgs.conflictPrefix && attemptCount === 1) {
             // Conflict detected with prefix enabled, retry with prefix
             console.log(Colors.yellow(`  ⚠ Segment "${segmentKey}" already exists, retrying with prefix...`));
+            segmentsPrefixedByConflict.add(`${env.key}/${segment.key}`);
             segmentKey = applyConflictPrefix(segment.key, inputArgs.conflictPrefix);
             segmentName = `${inputArgs.conflictPrefix}${segment.name}`;
 
@@ -2150,6 +2155,7 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
       } else if (action === 'prefix' && inputArgs.conflictPrefix) {
         // Conflict prefix enabled - we'll try creating with prefix
         console.log(Colors.yellow(`\t⚠ Flag exists, will try with prefix "${inputArgs.conflictPrefix}"`));
+        flagsPrefixedByConflict.add(flag.key);
         flagKey = applyConflictPrefix(flag.key, inputArgs.conflictPrefix);
         flagName = `${inputArgs.conflictPrefix}${flag.name}`;
         flagAlreadyExisted = false; // Will attempt creation with prefixed key
@@ -2269,6 +2275,7 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
         if (inputArgs.conflictPrefix && attemptCount === 1) {
           // Conflict detected with prefix enabled, retry with prefix
           console.log(Colors.yellow(`\t⚠ Conflict detected, retrying with prefix "${inputArgs.conflictPrefix}"`));
+          flagsPrefixedByConflict.add(flag.key);
           flagKey = applyConflictPrefix(flag.key, inputArgs.conflictPrefix);
           flagName = `${inputArgs.conflictPrefix}${flag.name}`;
           flagAlreadyExisted = false; // Reset to attempt creation with new key
@@ -2633,26 +2640,16 @@ if (usableViews.size > 0) {
 
 // Always write sync manifest so --incremental works on next run
 /**
- * Writes the cumulative manifest. `incomplete` marks a run that stopped early. Otherwise a marker left
- * by an earlier abort is cleared only when this run could have recorded every write the aborted run
- * made: no flag-scope filters, no failed writes, and no conflict-skipped resource without a previous
- * entry (an existing resource with no entry may be the aborted run's unrecorded write).
+ * Writes the cumulative manifest. An explicit `incomplete` marks a run that stopped early and skips the
+ * recovery checks; otherwise retainIncompleteMarker decides whether an earlier abort's marker is kept.
  */
-function hasUnrecordedConflictSkips(): boolean {
-  const prevFlags = previousManifest?.flags ?? {};
-  const prevSegments = previousManifest?.segments ?? {};
-  if ([...flagsSkippedByConflict].some((k) => !Object.hasOwn(prevFlags, k))) return true;
-  return [...segmentsSkippedByConflict].some((id) => {
-    const slash = id.indexOf("/");
-    const env = id.slice(0, slash), key = id.slice(slash + 1);
-    return !Object.hasOwn(prevSegments, env) || !Object.hasOwn(prevSegments[env], key);
-  });
-}
-
 async function writeSyncManifestFile(incomplete?: SyncManifest["incomplete"]): Promise<void> {
-  const unresolved = flagScopeFiltered || flagsWithErrors.size > 0 || segmentsWithErrors.size > 0 ||
-    hasUnrecordedConflictSkips();
-  const marker = incomplete ?? (unresolved ? previousManifest?.incomplete : undefined);
+  const marker = incomplete ?? retainIncompleteMarker(previousManifest, {
+    flagScopeFiltered,
+    failedWrites: flagsWithErrors.size > 0 || segmentsWithErrors.size > 0,
+    conflictedFlags: [...flagsSkippedByConflict, ...flagsPrefixedByConflict],
+    conflictedSegments: [...segmentsSkippedByConflict, ...segmentsPrefixedByConflict],
+  });
   const manifest: SyncManifest = {
     lastSyncTimestamp: new Date().toISOString(),
     sourceProject: inputArgs.projKeySource,

@@ -45,7 +45,8 @@ export interface SyncManifest {
    * Set when the writing run stopped early (--on-conflict abort): writes that were still in flight
    * have no entry, so the inventory is not exhaustive. Cleared by a later run that completes without
    * flag-scope filters (includeFlags, excludeFlags, --since), without failed writes, and without
-   * conflict-skipping a resource that has no entry (it may be the aborted run's unrecorded write).
+   * skipping or prefix-renaming an existing resource that has no entry (it may be the aborted run's
+   * unrecorded write); see retainIncompleteMarker.
    */
   incomplete?: { reason: string; at: string };
 }
@@ -98,9 +99,48 @@ export function assertManifestComplete(manifest: SyncManifest, path: string): vo
   throw new Error(
     `Sync manifest ${path} is marked incomplete (${manifest.incomplete.reason}, at ${manifest.incomplete.at}): ` +
       `a migrate run stopped before recording all of its writes. Re-run the migration without includeFlags, ` +
-      `excludeFlags or --since and let it complete cleanly (no failed writes, no conflict-skipped resources missing ` +
-      `from the manifest), or revert with --no-use-source-data after checking the flags by hand.`,
+      `excludeFlags or --since and let it complete cleanly (no failed writes, no skipped or prefix-renamed conflicts on ` +
+      `resources missing from the manifest), or revert with --no-use-source-data after checking the flags by hand.`,
   );
+}
+
+/** What a completed run did that bears on whether an earlier abort's inventory gap can be considered closed. */
+export interface RunOutcome {
+  /** includeFlags, excludeFlags or --since left flags unattempted */
+  flagScopeFiltered: boolean;
+  /** Some flag or segment write failed */
+  failedWrites: boolean;
+  /** Source flag keys whose destination copy already existed and was skipped or prefix-renamed */
+  conflictedFlags: Iterable<string>;
+  /** "<sourceEnv>/<segmentKey>" of segments whose destination copy already existed and was skipped or prefix-renamed */
+  conflictedSegments: Iterable<string>;
+}
+
+/**
+ * The `incomplete` marker a run must keep from the previous manifest, or undefined when the run may
+ * clear it. A run clears it only when it could have recorded every write the aborted run made: no
+ * flag-scope filters, no failed writes, and every conflicted resource already had an entry. An
+ * existing resource with no entry that was skipped or prefix-renamed may be the aborted run's
+ * unrecorded write, and stays untracked, so the marker stays too.
+ */
+export function retainIncompleteMarker(
+  previous: SyncManifest | null,
+  run: RunOutcome,
+): SyncManifest["incomplete"] | undefined {
+  const marker = previous?.incomplete;
+  if (!marker) return undefined;
+  if (run.flagScopeFiltered || run.failedWrites) return marker;
+  const flags = previous!.flags ?? {};
+  for (const key of run.conflictedFlags) {
+    if (!Object.hasOwn(flags, key)) return marker;
+  }
+  const segments = previous!.segments ?? {};
+  for (const id of run.conflictedSegments) {
+    const slash = id.indexOf("/");
+    const env = id.slice(0, slash), key = id.slice(slash + 1);
+    if (!Object.hasOwn(segments, env) || !Object.hasOwn(segments[env], key)) return marker;
+  }
+  return undefined;
 }
 
 /** Destination keys of the flags a manifest records: the destKey when the flag was renamed, else the source key. */
