@@ -2812,7 +2812,12 @@ async function writeSyncManifestFile(incomplete?: SyncManifest["incomplete"]): P
     flagScopeFiltered,
     failedWrites: flagsWithErrors.size > 0 || segmentsWithErrors.size > 0,
     conflictedFlags: [...flagsSkippedByConflict, ...flagsPrefixedByConflict],
-    conflictedSegments: [...segmentsSkippedByConflict, ...segmentsPrefixedByConflict],
+    // The existing copy sits in the destination environment the current mapping targets
+    conflictedSegments: [...segmentsSkippedByConflict, ...segmentsPrefixedByConflict].map((id) => {
+      const slash = id.indexOf("/");
+      const sourceEnv = id.slice(0, slash), key = id.slice(slash + 1);
+      return { sourceEnv, key, destEnv: destEnvOfSelected(sourceEnv) ?? sourceEnv };
+    }),
   };
   // --adopt-unresolved: the user verified the untracked resources are the aborted run's writes; record them
   // as this migration's extra copies so the marker can clear and revert removes them too
@@ -2849,9 +2854,11 @@ async function writeSyncManifestFile(incomplete?: SyncManifest["incomplete"]): P
       .flatMap((id) => {
         const [env, key] = splitId(id);
         const prev = ownEntry(ownEntry(previousManifest?.segments, env), key);
+        // Pending segments are identified by the destination environment this run wrote to
+        const destEnv = destEnvOfSelected(env) ?? env;
         return prefix && segmentsPrefixedByConflict.has(id)
-          ? [`${env}/${applyConflictPrefix(key, prefix)}`]
-          : [`${env}/${prev?.destKey ?? key}`];
+          ? [`${destEnv}/${applyConflictPrefix(key, prefix)}`]
+          : [`${destEnv}/${prev?.destKey ?? key}`];
       });
     run.pendingDestKeys = { flags: pendingFlags, segments: pendingSegments };
   }

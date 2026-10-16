@@ -70,10 +70,11 @@ export interface IncompleteMarker {
   reason: string;
   at: string;
   /**
-   * Destination resources that exist but that no entry maps to, found by later runs as conflicts on
-   * keys without an entry (skipped or prefix-renamed): each may be the aborted run's unrecorded write.
-   * Flags by destination key; segments as "<sourceEnv>/<destinationKey>". The marker is cleared only
-   * once an entry maps to every one of them (for example after a run that overwrites them).
+   * Destination resources that may exist but that no entry maps to: writes with an unknown outcome,
+   * and, while recovering, conflicts on keys without an entry (skipped or prefix-renamed), each possibly
+   * the aborted run's unrecorded write. Flags by destination key; segments as
+   * "<destinationEnv>/<destinationKey>", so a gap is only closed by a copy in that environment, whatever
+   * mapping a later run uses. The marker is cleared only once an entry maps to every one of them.
    */
   unresolved?: { flags: string[]; segments: string[] };
 }
@@ -169,11 +170,11 @@ export interface RunOutcome {
   failedWrites: boolean;
   /** Source flag keys whose destination copy already existed and was skipped or prefix-renamed */
   conflictedFlags: Iterable<string>;
-  /** "<sourceEnv>/<segmentKey>" of segments whose destination copy already existed and was skipped or prefix-renamed */
-  conflictedSegments: Iterable<string>;
+  /** Segments whose destination copy already existed and was skipped or prefix-renamed: source environment and key, and the destination environment the copy is in */
+  conflictedSegments: Iterable<{ sourceEnv: string; key: string; destEnv: string }>;
   /**
    * Destination keys of writes whose outcome is unknown: in flight when a run aborted, or failed after
-   * the create may have succeeded (flags by destination key, segments as "<sourceEnv>/<destinationKey>").
+   * the create may have succeeded (flags by destination key, segments as "<destinationEnv>/<destinationKey>").
    * Each may or may not exist and none has an entry, so they stay untracked until an entry maps to them.
    * A create the API definitively rejected (4xx) is not pending: nothing was written.
    */
@@ -210,6 +211,26 @@ export function withExtraDestKeys<T extends DestEntry>(entry: T, previous: DestE
 const mapsTo = (entries: Record<string, DestEntry> | undefined, destKey: string): boolean =>
   Object.entries(entries ?? {}).some(([key, entry]) => ownedKeys(key, entry).includes(destKey));
 
+type SegmentEntryLike = DestEntry & { destEnv?: string };
+
+/** Segment entries (with their source environment and key) whose copy lives in `destEnv`. */
+const segmentEntriesIn = (
+  segments: Record<string, Record<string, SegmentEntryLike>> | undefined,
+  destEnv: string,
+): Array<{ sourceEnv: string; key: string; entry: SegmentEntryLike }> => {
+  const found: Array<{ sourceEnv: string; key: string; entry: SegmentEntryLike }> = [];
+  for (const [sourceEnv, entries] of Object.entries(segments ?? {})) {
+    for (const [key, entry] of Object.entries(entries)) {
+      if ((entry.destEnv ?? sourceEnv) === destEnv) found.push({ sourceEnv, key, entry });
+    }
+  }
+  return found;
+};
+
+/** True when some segment entry owns `destKey` in destination environment `destEnv`. */
+const segmentMappedTo = (next: ManifestEntries, destEnv: string, destKey: string): boolean =>
+  segmentEntriesIn(next.segments, destEnv).some(({ key, entry }) => ownedKeys(key, entry).includes(destKey));
+
 const splitSegmentId = (id: string): [string, string] => {
   const slash = id.indexOf("/");
   return [id.slice(0, slash), id.slice(slash + 1)];
@@ -237,9 +258,9 @@ export function unresolvedAfterRun(
     for (const key of run.conflictedFlags) {
       if (!Object.hasOwn(prevFlags, key)) flags.add(key);
     }
-    for (const id of run.conflictedSegments) {
-      const [env, key] = splitSegmentId(id);
-      if (!Object.hasOwn(prevSegments, env) || !Object.hasOwn(prevSegments[env], key)) segments.add(id);
+    for (const { sourceEnv, key, destEnv } of run.conflictedSegments) {
+      // The existing copy sits under the source key in the destination environment
+      if (!Object.hasOwn(prevSegments, sourceEnv) || !Object.hasOwn(prevSegments[sourceEnv], key)) segments.add(`${destEnv}/${key}`);
     }
   }
   // Writes in flight at an abort have no entry yet, whatever their outcome
@@ -247,8 +268,8 @@ export function unresolvedAfterRun(
   for (const id of run.pendingDestKeys?.segments ?? []) segments.add(id);
   const unresolvedFlags = [...flags].filter((key) => !mapsTo(next.flags, key)).sort();
   const unresolvedSegments = [...segments].filter((id) => {
-    const [env, key] = splitSegmentId(id);
-    return !mapsTo(next.segments?.[env], key);
+    const [destEnv, destKey] = splitSegmentId(id);
+    return !segmentMappedTo(next, destEnv, destKey);
   }).sort();
   return unresolvedFlags.length > 0 || unresolvedSegments.length > 0
     ? { flags: unresolvedFlags, segments: unresolvedSegments }
@@ -385,8 +406,11 @@ export function adoptUnresolved(
     if (adopt(entries.flags, destKey)) adopted.flags.push(destKey);
   }
   for (const id of unresolved.segments) {
-    const [env, destKey] = splitSegmentId(id);
-    if (adopt(ownEntry(entries.segments, env), destKey)) adopted.segments.push(id);
+    // Candidates are the entries whose copy lives in that destination environment, keyed by source key
+    const [destEnv, destKey] = splitSegmentId(id);
+    const candidates: Record<string, SegmentEntryLike> = emptyRecord();
+    for (const { key, entry } of segmentEntriesIn(entries.segments, destEnv)) candidates[key] = entry;
+    if (adopt(candidates, destKey)) adopted.segments.push(id);
   }
   return adopted;
 }

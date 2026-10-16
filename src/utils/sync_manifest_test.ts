@@ -121,9 +121,10 @@ Deno.test("retainIncompleteMarker: an aborted run's marker survives until the un
   assertEquals(retainIncompleteMarker(aborted, { ...clean, flagScopeFiltered: true }, same), incomplete, "filtered run");
   assertEquals(retainIncompleteMarker(aborted, { ...clean, failedWrites: true }, same), incomplete, "failed writes");
   assertEquals(retainIncompleteMarker(aborted, { ...clean, conflictedFlags: ["a"] }, same), undefined, "conflict on a recorded key");
-  assertEquals(retainIncompleteMarker(aborted, { ...clean, conflictedSegments: ["production/seg"] }, same), undefined, "recorded segment");
+  const seg = (sourceEnv: string, key: string, destEnv = sourceEnv) => ({ sourceEnv, key, destEnv });
+  assertEquals(retainIncompleteMarker(aborted, { ...clean, conflictedSegments: [seg("production", "seg")] }, same), undefined, "recorded segment");
   assertEquals(
-    retainIncompleteMarker(aborted, { ...clean, conflictedSegments: ["test/seg"] }, same),
+    retainIncompleteMarker(aborted, { ...clean, conflictedSegments: [seg("test", "seg")] }, same),
     { ...incomplete, unresolved: { flags: [], segments: ["test/seg"] } },
     "same key in an unrecorded environment stays untracked",
   );
@@ -387,7 +388,7 @@ Deno.test("a freshly raised marker does not list ordinary foreign conflicts as a
     flagScopeFiltered: false,
     failedWrites: true,
     conflictedFlags: ["customer-1", "customer-2"],
-    conflictedSegments: ["production/their-seg"],
+    conflictedSegments: [{ sourceEnv: "production", key: "their-seg", destEnv: "production" }],
     pendingDestKeys: { flags: ["b"], segments: [] },
   };
   assertEquals(markerAfterRun(previous, run, next, "x")?.unresolved, { flags: ["b"], segments: [] });
@@ -397,5 +398,35 @@ Deno.test("a freshly raised marker does not list ordinary foreign conflicts as a
   assertEquals(
     retainIncompleteMarker(aborted, { ...run, pendingDestKeys: undefined }, next)?.unresolved,
     { flags: ["customer-1", "customer-2"], segments: ["production/their-seg"] },
+  );
+});
+
+Deno.test("unresolved segments are keyed by destination environment, so a changed mapping cannot close the gap", () => {
+  const previous: SyncManifest = { ...manifest, flags: {} };
+  const clean = { flagScopeFiltered: false, failedWrites: false, conflictedFlags: [], conflictedSegments: [] };
+  // prod -> staging: the create of seg in staging may have succeeded before a later step threw
+  const marker = markerAfterRun(previous, { ...clean, failedWrites: true, pendingDestKeys: { flags: [], segments: ["staging/seg"] } }, { flags: {} }, "x");
+  assertEquals(marker?.unresolved, { flags: [], segments: ["staging/seg"] });
+  const after: SyncManifest = { ...previous, incomplete: marker };
+  // Retrying with prod -> production records seg in production: staging/seg stays untracked
+  const inProduction = { flags: {}, segments: { prod: { seg: { version: 1, destEnv: "production" } } } };
+  assertEquals(retainIncompleteMarker(after, clean, inProduction), marker);
+  assertEquals(adoptUnresolved(after, inProduction), { flags: [], segments: [] }, "no entry in staging to adopt into");
+  // Retrying with the original mapping records seg in staging and closes the gap
+  const inStaging = { flags: {}, segments: { prod: { seg: { version: 1, destEnv: "staging" } } } };
+  assertEquals(retainIncompleteMarker(after, clean, inStaging), undefined);
+  // A prefixed copy in staging adopts the original under its source entry, matched through the environment
+  const prefixed: { flags: SyncManifest["flags"]; segments: NonNullable<SyncManifest["segments"]> } = {
+    flags: {},
+    segments: { prod: { seg: { version: 1, destEnv: "staging", destKey: "imported-seg" } } },
+  };
+  assertEquals(retainIncompleteMarker(after, clean, prefixed), marker);
+  assertEquals(adoptUnresolved(after, prefixed), { flags: [], segments: ["staging/seg"] });
+  assertEquals(prefixed.segments.prod.seg.extraDestKeys, ["seg"]);
+  assertEquals(retainIncompleteMarker(after, clean, prefixed), undefined);
+  // A conflict while recovering is recorded under the environment the copy is in
+  assertEquals(
+    retainIncompleteMarker(after, { ...clean, conflictedSegments: [{ sourceEnv: "prod", key: "other", destEnv: "staging" }] }, inStaging)?.unresolved,
+    { flags: [], segments: ["staging/other"] },
   );
 });
