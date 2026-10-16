@@ -1,8 +1,10 @@
 import {
   assertEquals,
   assertRejects,
+  assertThrows,
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  assertManifestComplete,
   manifestDestinationFlagKeys,
   readSyncManifest,
   type SyncManifest,
@@ -61,6 +63,25 @@ Deno.test("readSyncManifest rejects a manifest that records another project pair
       JSON.stringify({ ...manifest, sourceProject: "a-b", destProject: "c" }),
     );
     await assertRejects(() => readSyncManifest("a", "b-c", dir), Error, "records a-b -> c, not a -> b-c");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("assertManifestComplete rejects a manifest written by an aborted run and keeps a complete one", async () => {
+  assertManifestComplete(manifest, "x.json");
+  const aborted: SyncManifest = {
+    ...manifest,
+    incomplete: { reason: 'aborted: flag "c" already exists (--on-conflict abort)', at: "2026-10-16T09:00:00.000Z" },
+  };
+  assertThrows(() => assertManifestComplete(aborted, "x.json"), Error, "x.json is marked incomplete");
+  // The marker survives a read, so revert sees it
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(syncManifestPath("payroll", "new-project", dir), JSON.stringify(aborted));
+    const read = await readSyncManifest("payroll", "new-project", dir);
+    assertEquals(read?.incomplete, aborted.incomplete);
+    assertThrows(() => assertManifestComplete(read!, "x.json"), Error, "marked incomplete");
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

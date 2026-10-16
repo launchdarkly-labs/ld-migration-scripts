@@ -553,8 +553,15 @@ async function resolveConflictAction(
   return await result;
 }
 
-function abortOnConflict(resourceType: string, key: string): never {
+async function abortOnConflict(resourceType: string, key: string): Promise<never> {
   console.log(Colors.red(`\n❌ Aborting: ${resourceType} "${key}" already exists in the destination (--on-conflict abort).`));
+  // Keep what this and earlier runs wrote, marked incomplete: concurrent flag writes may have finished
+  // without a manifest entry yet, so revert refuses manifest-based attribution until a completed run replaces it
+  carryForwardManifestEntries();
+  await writeSyncManifestFile({
+    reason: `aborted: ${resourceType} "${key}" already exists (--on-conflict abort)`,
+    at: new Date().toISOString(),
+  });
   Deno.exit(1);
 }
 
@@ -677,6 +684,16 @@ try {
   console.log(Colors.red(`\n❌ ${error instanceof Error ? error.message : String(error)}`));
   console.log(Colors.yellow(`   Move or delete ${syncManifestPath} to start a fresh manifest.`));
   Deno.exit(1);
+}
+
+// Flag-scope filters leave flags unattempted, so they cannot complete an inventory an aborted run left incomplete
+const flagScopeFiltered = Boolean(inputArgs.includeFlags || inputArgs.excludeFlags || inputArgs.since);
+if (previousManifest?.incomplete) {
+  console.log(Colors.yellow(
+    `\n⚠ Previous sync manifest is marked incomplete (${previousManifest.incomplete.reason}, at ${previousManifest.incomplete.at}); ` +
+      `revert refuses it until a run without includeFlags, excludeFlags or --since completes` +
+      (flagScopeFiltered ? `. This run is filtered, so the marker is kept.` : `. This run clears it when it completes.`),
+  ));
 }
 
 if (inputArgs.incremental) {
@@ -1240,7 +1257,7 @@ if (inputArgs.migrateSegments) {
             ? await resolveConflictAction('segment', segmentKey)
             : 'overwrite';
           if (action === 'abort') {
-            abortOnConflict('segment', segmentKey);
+            await abortOnConflict('segment', segmentKey);
           } else if (action === 'skip') {
             console.log(Colors.gray(`  → Segment "${segmentKey}" exists, skipping`));
             segmentsSkippedByConflict.add(`${env.key}/${segment.key}`);
@@ -2118,7 +2135,7 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
       // Flag already exists — resolve according to --on-conflict
       const action = await resolveConflictAction('flag', flagKey);
       if (action === 'abort') {
-        abortOnConflict('flag', flagKey);
+        await abortOnConflict('flag', flagKey);
       } else if (action === 'skip') {
         console.log(Colors.gray(`\t→ Flag already exists, skipping (--on-conflict)`));
         flagsSkippedByConflict.add(flag.key);
@@ -2535,27 +2552,30 @@ for (const level of levels) {
 // this run were rewritten above; a failed one stays absent so the next --incremental run retries it.
 // Runs before view linking, so a flag or segment skipped this run (--since, --on-conflict skip) still
 // resolves to the destination key recorded for it (e.g. a conflict prefix) instead of its raw key.
-if (previousManifest) {
-  // Attempted = selected and not skipped before any write (--since, --on-conflict skip)
-  const attempted = new Set(
-    flagList.filter((k: string) => !flagsSkippedByDate.has(k) && !flagsSkippedByConflict.has(k)),
-  );
-  for (const [key, entry] of Object.entries(previousManifest.flags ?? {})) {
-    if (!attempted.has(key) && !Object.hasOwn(updatedManifestFlags, key)) updatedManifestFlags[key] = entry;
-  }
-  // Attempted segments were rewritten above (or failed and stay absent); a selected environment alone
-  // does not mean every recorded segment was attempted, e.g. when it has no extracted segment data
-  for (const [envKey, segments] of Object.entries(previousManifest.segments ?? {})) {
-    for (const [key, entry] of Object.entries(segments)) {
-      const id = `${envKey}/${key}`;
-      if (segmentsAttempted.has(id) && !segmentsSkippedByConflict.has(id)) continue;
-      const envEntries = Object.hasOwn(updatedManifestSegments, envKey)
-        ? updatedManifestSegments[envKey]
-        : (updatedManifestSegments[envKey] = {});
-      if (!Object.hasOwn(envEntries, key)) envEntries[key] = entry;
+function carryForwardManifestEntries(): void {
+  if (!previousManifest) return;
+    // Attempted = selected and not skipped before any write (--since, --on-conflict skip)
+    const attempted = new Set(
+      flagList.filter((k: string) => !flagsSkippedByDate.has(k) && !flagsSkippedByConflict.has(k)),
+    );
+    for (const [key, entry] of Object.entries(previousManifest.flags ?? {})) {
+      if (!attempted.has(key) && !Object.hasOwn(updatedManifestFlags, key)) updatedManifestFlags[key] = entry;
     }
-  }
+    // Attempted segments were rewritten above (or failed and stay absent); a selected environment alone
+    // does not mean every recorded segment was attempted, e.g. when it has no extracted segment data
+    for (const [envKey, segments] of Object.entries(previousManifest.segments ?? {})) {
+      for (const [key, entry] of Object.entries(segments)) {
+        const id = `${envKey}/${key}`;
+        if (segmentsAttempted.has(id) && !segmentsSkippedByConflict.has(id)) continue;
+        const envEntries = Object.hasOwn(updatedManifestSegments, envKey)
+          ? updatedManifestSegments[envKey]
+          : (updatedManifestSegments[envKey] = {});
+        if (!Object.hasOwn(envEntries, key)) envEntries[key] = entry;
+      }
+    }
 }
+
+carryForwardManifestEntries();
 
 // Link migrated flags and segments to their views. Done after migration so it also covers
 // flags and segments that already existed in the destination.
@@ -2606,26 +2626,39 @@ if (usableViews.size > 0) {
 
 
 // Always write sync manifest so --incremental works on next run
-const manifest: SyncManifest = {
-  lastSyncTimestamp: new Date().toISOString(),
-  sourceProject: inputArgs.projKeySource,
-  destProject: inputArgs.projKeyDest,
-  flags: updatedManifestFlags,
-  segments: Object.keys(updatedManifestSegments).length > 0 ? updatedManifestSegments : undefined,
-};
-// A dry run changes nothing, so recording it would make a later --incremental run skip unsynced resources
-if (inputArgs.dryRun) {
-  console.log(Colors.gray(`\n[DRY RUN] Sync manifest not written (${syncManifestPath} left unchanged)`));
-} else try {
-  await Deno.mkdir("./data/launchdarkly-migrations", { recursive: true });
-  await Deno.writeTextFile(syncManifestPath, JSON.stringify(manifest, null, 2));
-  const envCount = Object.values(manifest.flags).reduce((sum, f) => sum + Object.keys(f.environments).length, 0);
-  const segCount = Object.values(updatedManifestSegments).reduce((sum, envSegs) => sum + Object.keys(envSegs).length, 0);
-  const segPart = segCount > 0 ? `, ${segCount} segments` : '';
-  console.log(Colors.green(`\n✓ Sync manifest written to ${syncManifestPath} (${Object.keys(manifest.flags).length} flags, ${envCount} environments${segPart} tracked)`));
-} catch (error) {
-  console.log(Colors.yellow(`\n⚠ Could not write sync manifest: ${error instanceof Error ? error.message : String(error)}`));
+/**
+ * Writes the cumulative manifest. `incomplete` marks a run that stopped early; otherwise an incomplete
+ * marker left by an earlier abort is cleared only when this run had no flag-scope filters.
+ */
+async function writeSyncManifestFile(incomplete?: SyncManifest["incomplete"]): Promise<void> {
+  const marker = incomplete ?? (flagScopeFiltered ? previousManifest?.incomplete : undefined);
+  const manifest: SyncManifest = {
+    lastSyncTimestamp: new Date().toISOString(),
+    sourceProject: inputArgs.projKeySource,
+    destProject: inputArgs.projKeyDest,
+    flags: updatedManifestFlags,
+    segments: Object.keys(updatedManifestSegments).length > 0 ? updatedManifestSegments : undefined,
+    ...(marker ? { incomplete: marker } : {}),
+  };
+  // A dry run changes nothing, so recording it would make a later --incremental run skip unsynced resources
+  if (inputArgs.dryRun) {
+    console.log(Colors.gray(`\n[DRY RUN] Sync manifest not written (${syncManifestPath} left unchanged)`));
+    return;
+  }
+  try {
+    await Deno.mkdir("./data/launchdarkly-migrations", { recursive: true });
+    await Deno.writeTextFile(syncManifestPath, JSON.stringify(manifest, null, 2));
+    const envCount = Object.values(manifest.flags).reduce((sum, f) => sum + Object.keys(f.environments).length, 0);
+    const segCount = Object.values(updatedManifestSegments).reduce((sum, envSegs) => sum + Object.keys(envSegs).length, 0);
+    const segPart = segCount > 0 ? `, ${segCount} segments` : '';
+    const note = marker ? ` — marked incomplete (${marker.reason})` : '';
+    console.log(Colors.green(`\n✓ Sync manifest written to ${syncManifestPath} (${Object.keys(manifest.flags).length} flags, ${envCount} environments${segPart} tracked)${note}`));
+  } catch (error) {
+    console.log(Colors.yellow(`\n⚠ Could not write sync manifest: ${error instanceof Error ? error.message : String(error)}`));
+  }
 }
+
+await writeSyncManifestFile();
 
 if (incrementalSkipCount > 0 || incrementalEnvSkipCount > 0 || incrementalSegmentSkipCount > 0) {
   const parts = [];

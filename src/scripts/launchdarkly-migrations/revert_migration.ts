@@ -16,6 +16,7 @@ import { parse as parseYaml } from "https://deno.land/std@0.224.0/yaml/parse.ts"
 import { ldAPIRequest, ldAPIPostRequest, rateLimitRequest } from "../../utils/utils.ts";
 import { getDestinationApiKey, getSourceApiKey } from "../../utils/api_keys.ts";
 import {
+  assertManifestComplete,
   manifestDestinationFlagKeys,
   readSyncManifest,
   syncManifestPath,
@@ -342,8 +343,8 @@ export interface MigratedFlagKeys {
  * authoritative: it records the destination key of every migrated flag, including conflict-prefixed
  * ones. Only when there is no manifest at all (for example after a dry run only) is the extracted
  * source flag list used.
- * @throws Error when a manifest exists but is unreadable or records another project pair: falling
- *   back to raw keys could select another source's flag
+ * @throws Error when a manifest exists but is unreadable, records another project pair, or is marked
+ *   incomplete by an aborted run: falling back to raw keys could select another source's flag
  */
 const loadMigratedFlagKeys = async (
   sourceProjectKey: string,
@@ -352,6 +353,7 @@ const loadMigratedFlagKeys = async (
   const manifestPath = syncManifestPath(sourceProjectKey, destProjectKey);
   const manifest = await readSyncManifest(sourceProjectKey, destProjectKey);
   if (manifest) {
+    assertManifestComplete(manifest, manifestPath);
     const keys = manifestDestinationFlagKeys(manifest);
     console.log(Colors.gray(`  Using sync manifest ${manifestPath} (${keys.length} flag(s), destination keys)`));
     return { project: sourceProjectKey, keys, source: "manifest" };

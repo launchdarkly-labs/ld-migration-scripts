@@ -41,6 +41,12 @@ export interface SyncManifest {
   flags: Record<string, SyncManifestFlag>;
   /** segments[sourceEnvKey][segmentKey] */
   segments?: Record<string, Record<string, SyncManifestSegment>>;
+  /**
+   * Set when the writing run stopped early (--on-conflict abort): writes that were still in flight
+   * have no entry, so the inventory is not exhaustive. Cleared by a later run that completes without
+   * flag-scope filters (includeFlags, excludeFlags, --since).
+   */
+  incomplete?: { reason: string; at: string };
 }
 
 export function syncManifestPath(
@@ -80,6 +86,19 @@ export async function readSyncManifest(
     );
   }
   return manifest;
+}
+
+/**
+ * Throws when the manifest is marked incomplete: revert must not treat it as the full inventory of what
+ * the migration wrote, since a flag created just before the abort may have no entry.
+ */
+export function assertManifestComplete(manifest: SyncManifest, path: string): void {
+  if (!manifest.incomplete) return;
+  throw new Error(
+    `Sync manifest ${path} is marked incomplete (${manifest.incomplete.reason}, at ${manifest.incomplete.at}): ` +
+      `a migrate run stopped before recording all of its writes. Re-run the migration without includeFlags, ` +
+      `excludeFlags or --since to complete it, or revert with --no-use-source-data after checking the flags by hand.`,
+  );
 }
 
 /** Destination keys of the flags a manifest records: the destKey when the flag was renamed, else the source key. */
