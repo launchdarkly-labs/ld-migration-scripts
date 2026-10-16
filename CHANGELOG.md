@@ -12,6 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Workflow merge check (`destination.projectKeyMapping` merges): only resources the migrate step writes are compared (`includeFlags` / `excludeFlags`, `migrateSegments`, `environments`, `environmentMapping`; segments by destination environment), and the outcome follows the effective `onConflict` policy. `prefix` warns, and stops when a key is shared with two or more earlier sources or the prefixed key already exists (one prefix can only rename once); `skip` warns; `overwrite`, `prompt` and `abort` stop (#21)
 - Same-account guard: also stops when a destination key is another listed source's key (chained mappings such as `a -> b`, `b -> c`), not only a project's own key (#21)
 - `createEnvironments` also copies `requireComments` and `critical` from the source environment (#21)
+- `migration.tags` are now reconciled on flags and segments that an `--incremental` run skips as unchanged (the tags are not part of the source version), with one destination read per skipped resource when tags are set (#22)
+- The incremental fast path patches a flag under its manifest destination key, so a flag renamed by a conflict prefix is updated instead of its unprefixed namesake
+- A dry run looks up each segment in the destination and previews conflict handling and the tag patch for segments that already exist, instead of reporting every segment as created (#22)
+- A failed tag reconciliation on an existing segment (read or patch), and a failed lifecycle/tags reconciliation on a flag the incremental fast path skips, are now counted as errors (exit code `1`), like a failed flag-level update
+
+### Documentation
+
+- README: how existing destination tags are handled with and without `migration.tags`, and that a flag whose create returns 409 is updated in place like one found by the pre-check (#22)
 
 ## [3.3.0] - 2026-10-15
 
