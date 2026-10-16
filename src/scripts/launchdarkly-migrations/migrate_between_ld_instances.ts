@@ -32,10 +32,12 @@ import {
   type SyncManifestSegment,
   abortMarker,
   adoptUnresolved,
+  ownEntry,
   readSyncManifest,
   recordedDestination,
   retainIncompleteMarker,
   type RunOutcome,
+  withExtraDestKeys,
   syncManifestPath as syncManifestPathFor,
 } from "../../utils/sync_manifest.ts";
 import { bigSegmentCsvPath, readExportedKeys } from "../../utils/big_segments.ts";
@@ -570,7 +572,7 @@ async function abortOnConflict(resourceType: string, key: string): Promise<never
   console.log(Colors.red(`\n❌ Aborting: ${resourceType} "${key}" already exists in the destination (--on-conflict abort).`));
   // Keep what this and earlier runs wrote, marked incomplete: concurrent flag writes may have finished
   // without a manifest entry yet, so revert refuses manifest-based attribution until a completed run replaces it
-  carryForwardManifestEntries();
+  carryForwardManifestEntries(true);
   await writeSyncManifestFile({
     reason: `aborted: ${resourceType} "${key}" already exists (--on-conflict abort)`,
     at: new Date().toISOString(),
@@ -1217,7 +1219,7 @@ if (inputArgs.migrateSegments) {
       // Incremental sync: skip segments that haven't changed since last sync.
       // Big segments with exported members are always re-imported: member changes may not bump the version.
       if (inputArgs.incremental && previousManifest && !(isBigSegment && segment._importKeys)) {
-        const prevSegment = previousManifest.segments?.[env.key]?.[segment.key];
+        const prevSegment = ownEntry(ownEntry(previousManifest.segments, env.key), segment.key);
         if (prevSegment && segment.version !== undefined && prevSegment.version === segment.version) {
           // Migration tags are not part of the source version, so reconcile them on the skipped segment too
           const tagNote = await syncExistingSegmentTags(destEnvKey, prevSegment.destKey ?? segment.key, segment.tags);
@@ -1233,7 +1235,7 @@ if (inputArgs.migrateSegments) {
       segmentsAttempted.add(`${env.key}/${segment.key}`);
       // As for flags: a recorded destination key under another name is our own earlier prefixed copy
       const recordedSegment = recordedDestination(
-        previousManifest?.segments?.[env.key]?.[segment.key], segment, inputArgs.conflictPrefix,
+        ownEntry(ownEntry(previousManifest?.segments, env.key), segment.key), segment, inputArgs.conflictPrefix,
       );
       let segmentKey = recordedSegment.key;
       let segmentName = recordedSegment.name;
@@ -1458,11 +1460,11 @@ if (inputArgs.migrateSegments) {
       // Track segment version for sync manifest only if it was actually created/patched
       if (segmentCreated) {
         if (!updatedManifestSegments[env.key]) updatedManifestSegments[env.key] = {};
-        updatedManifestSegments[env.key][segment.key] = {
+        updatedManifestSegments[env.key][segment.key] = withExtraDestKeys({
           version: segment.version ?? 0,
           lastModified: segment.lastModifiedDate,
           ...(segmentKey !== segment.key && { destKey: segmentKey }),
-        };
+        }, ownEntry(ownEntry(previousManifest?.segments, env.key), segment.key), segment.key);
       }
     };
   };
@@ -2048,7 +2050,7 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
   // Incremental sync: check if flag-level AND all environment versions match
   // Flag-level _version alone isn't reliable — LD doesn't always bump it for env-only changes
   if (inputArgs.incremental && previousManifest && flag._version !== undefined) {
-    const prevEntry = previousManifest.flags[flag.key];
+    const prevEntry = ownEntry(previousManifest.flags, flag.key);
     if (prevEntry && prevEntry.version === flag._version) {
       // Flag-level version matches — check if all environment versions also match
       let allEnvsUnchanged = true;
@@ -2151,7 +2153,7 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
 
   // A previous manifest entry under another key names this migration's own earlier copy (conflict
   // prefix): update it instead of creating a second prefixed duplicate
-  const recorded = recordedDestination(previousManifest?.flags?.[flag.key], flag, inputArgs.conflictPrefix);
+  const recorded = recordedDestination(ownEntry(previousManifest?.flags, flag.key), flag, inputArgs.conflictPrefix);
   let flagKey = recorded.key;
   let flagName = recorded.name;
   let attemptCount = 0;
@@ -2437,7 +2439,7 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
 
     // Incremental sync: skip unchanged environments by version comparison
     if (inputArgs.incremental && previousManifest) {
-      const prevFlag = previousManifest.flags[flag.key];
+      const prevFlag = ownEntry(previousManifest.flags, flag.key);
       const prevEnv = prevFlag?.environments?.[env];
       if (prevEnv && envVersion !== undefined && prevEnv.version === envVersion) {
         const ts = envLastModified ? `, updated ${envLastModified}` : '';
@@ -2501,12 +2503,12 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
   // Track flag version for sync manifest (flag-level lastModified comes from creationDate or _version).
   // A flag whose create failed gets no entry, so the next --incremental run retries it.
   if (flagCreated) {
-    updatedManifestFlags[flag.key] = {
+    updatedManifestFlags[flag.key] = withExtraDestKeys({
       version: flag._version ?? 0,
       lastModified: flag.creationDate,
       environments: flagManifestEnvs,
       ...(createdFlagKey !== flag.key && { destKey: createdFlagKey }),
-    };
+    }, ownEntry(previousManifest?.flags, flag.key), flag.key);
   }
 
   return { incrementalSkipCountDelta, incrementalEnvSkipCountDelta };
@@ -2599,11 +2601,16 @@ for (const level of levels) {
 // this run were rewritten above; a failed one stays absent so the next --incremental run retries it.
 // Runs before view linking, so a flag or segment skipped this run (--since, --on-conflict skip) still
 // resolves to the destination key recorded for it (e.g. a conflict prefix) instead of its raw key.
-function carryForwardManifestEntries(): void {
+function carryForwardManifestEntries(aborting = false): void {
   if (!previousManifest) return;
   // Attempted = processing reached the destination and was not skipped by --on-conflict skip; flags
-  // skipped by --since, never loaded, or not reached before an abort keep their previous entry
-  const attempted = new Set([...flagsAttempted].filter((k) => !flagsSkippedByConflict.has(k)));
+  // skipped by --since, never loaded, or not reached before an abort keep their previous entry.
+  // At an abort, an attempted flag without a new entry was still in flight (not a failed write), so
+  // its previous entry is kept as well; the same holds for segments.
+  const inFlight = (hasEntry: boolean) => aborting && !hasEntry;
+  const attempted = new Set(
+    [...flagsAttempted].filter((k) => !flagsSkippedByConflict.has(k) && !inFlight(Object.hasOwn(updatedManifestFlags, k))),
+  );
   for (const [key, entry] of Object.entries(previousManifest.flags ?? {})) {
     if (!attempted.has(key) && !Object.hasOwn(updatedManifestFlags, key)) updatedManifestFlags[key] = entry;
   }
@@ -2612,7 +2619,8 @@ function carryForwardManifestEntries(): void {
   for (const [envKey, segments] of Object.entries(previousManifest.segments ?? {})) {
     for (const [key, entry] of Object.entries(segments)) {
       const id = `${envKey}/${key}`;
-      if (segmentsAttempted.has(id) && !segmentsSkippedByConflict.has(id)) continue;
+      const hasEntry = Object.hasOwn(updatedManifestSegments, envKey) && Object.hasOwn(updatedManifestSegments[envKey], key);
+      if (segmentsAttempted.has(id) && !segmentsSkippedByConflict.has(id) && !inFlight(hasEntry)) continue;
       const envEntries = Object.hasOwn(updatedManifestSegments, envKey)
         ? updatedManifestSegments[envKey]
         : (updatedManifestSegments[envKey] = {});
@@ -2690,13 +2698,43 @@ async function writeSyncManifestFile(incomplete?: SyncManifest["incomplete"]): P
   // --adopt-unresolved: the user verified the untracked resources are the aborted run's writes; record them
   // as this migration's extra copies so the marker can clear and revert removes them too
   if (!incomplete && inputArgs.adoptUnresolved && previousManifest?.incomplete?.unresolved) {
-    const adopted = adoptUnresolved(previousManifest, entries);
+    const adopted = adoptUnresolved(previousManifest, entries, inputArgs.conflictPrefix);
     const list = [...adopted.flags, ...adopted.segments];
     console.log(list.length > 0
       ? Colors.cyan(`\nAdopted ${list.length} untracked destination resource(s) into the sync manifest: ${list.join(", ")}`)
       : Colors.yellow(`\nNo untracked destination resource could be adopted (no matching source resource in this run)`));
   }
   // An abort keeps the gaps found so far (previous marker plus this run's conflicts on unrecorded keys)
+  // and records the destination keys of writes still in flight: the key being written, plus the
+  // prefixed key when the write was a prefix retry, since either copy may exist without an entry
+  if (incomplete) {
+    const prefix = inputArgs.conflictPrefix;
+    const splitId = (id: string): [string, string] => {
+      const slash = id.indexOf("/");
+      return [id.slice(0, slash), id.slice(slash + 1)];
+    };
+    const pendingFlags = [...flagsAttempted]
+      .filter((k) => !flagsSkippedByConflict.has(k) && !Object.hasOwn(updatedManifestFlags, k))
+      .flatMap((k) => [
+        ownEntry(previousManifest?.flags, k)?.destKey ?? k,
+        ...(prefix && flagsPrefixedByConflict.has(k) ? [applyConflictPrefix(k, prefix)] : []),
+      ]);
+    const pendingSegments = [...segmentsAttempted]
+      .filter((id) => {
+        const [env, key] = splitId(id);
+        return !segmentsSkippedByConflict.has(id) &&
+          !(Object.hasOwn(updatedManifestSegments, env) && Object.hasOwn(updatedManifestSegments[env], key));
+      })
+      .flatMap((id) => {
+        const [env, key] = splitId(id);
+        const prev = ownEntry(ownEntry(previousManifest?.segments, env), key);
+        return [
+          `${env}/${prev?.destKey ?? key}`,
+          ...(prefix && segmentsPrefixedByConflict.has(id) ? [`${env}/${applyConflictPrefix(key, prefix)}`] : []),
+        ];
+      });
+    run.pendingDestKeys = { flags: pendingFlags, segments: pendingSegments };
+  }
   const marker = incomplete
     ? abortMarker(previousManifest, incomplete, run, entries)
     : retainIncompleteMarker(previousManifest, run, entries);
@@ -2944,7 +2982,12 @@ async function reconcileDestination(): Promise<void> {
   const resolved = new Map(conflictTracker.getResolutions().filter((r) => r.resourceType === 'flag').map((r) => [r.originalKey, r.resolvedKey]));
   // Scope = every flag in the source data that was attempted (or already present), minus flags
   // --since skipped without attempting. Failed attempts stay in scope so they are reported.
-  const expectedFlags = new Set(flagList.filter((k: string) => !flagsSkippedByDate.has(k)).map((k: string) => resolved.get(k) ?? k));
+  // Destination keys come from the manifest entries written this run (prefix renames from earlier runs
+  // included), then from this run's conflict resolutions, else the source key
+  const expectedFlags = new Set(
+    flagList.filter((k: string) => !flagsSkippedByDate.has(k))
+      .map((k: string) => ownEntry(updatedManifestFlags, k)?.destKey ?? resolved.get(k) ?? k),
+  );
   try {
     const dest = await listDestinationKeys(`flags/${inputArgs.projKeyDest}?summary=true&limit=50&offset=0`);
     const destArchived = await listDestinationKeys(`flags/${inputArgs.projKeyDest}?summary=true&limit=50&offset=0&filter=state:archived`);
@@ -2975,7 +3018,8 @@ async function reconcileDestination(): Promise<void> {
     }
     try {
       const dest = await listDestinationKeys(`segments/${inputArgs.projKeyDest}/${destEnvKey}?limit=50&offset=0`);
-      const missing = sourceKeys.filter((k) => !dest.has(k));
+      const expectedKey = (k: string) => ownEntry(ownEntry(updatedManifestSegments, env), k)?.destKey ?? k;
+      const missing = sourceKeys.map(expectedKey).filter((k) => !dest.has(k));
       console.log(`  segments ${env} → ${destEnvKey}: source ${sourceKeys.length} → destination ${dest.size} (missing ${missing.length})`);
       for (const k of missing) {
         console.log(Colors.red(`    ✗ missing in destination: ${destEnvKey}/${k}`));

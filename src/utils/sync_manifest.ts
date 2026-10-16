@@ -269,29 +269,42 @@ export function recordedDestination(
 
 /**
  * Explicit reconciliation of an incomplete marker (--adopt-unresolved): every destination resource the
- * marker lists as untracked whose key matches a source resource with an entry in `entries` is recorded
- * as a further copy owned by that entry (extraDestKeys), so the marker can clear and revert removes it
- * too. The caller has verified by hand that those resources were created by the aborted run. Returns
- * what was adopted; keys without a matching entry (e.g. filtered out this run) stay unresolved.
+ * marker lists as untracked is recorded as a further copy (extraDestKeys) of the source resource it
+ * belongs to, so the marker can clear and revert removes it too. The owner is the entry with the same
+ * source key, or, with `conflictPrefix`, the entry whose prefixed key it is (an unrecorded prefix retry).
+ * The caller has verified by hand that those resources were created by the aborted run. Returns what
+ * was adopted; keys without a matching entry (e.g. filtered out this run) stay unresolved.
  */
 export function adoptUnresolved(
   previous: SyncManifest | null,
   entries: ManifestEntries,
+  conflictPrefix?: string,
 ): { flags: string[]; segments: string[] } {
   const adopted = { flags: [] as string[], segments: [] as string[] };
   const unresolved = previous?.incomplete?.unresolved;
   if (!unresolved) return adopted;
-  const adopt = (entry: DestEntry | undefined, key: string, destKey: string): boolean => {
-    if (!entry || ownedKeys(key, entry).includes(destKey)) return false;
+  // The source key an untracked destination key belongs to: itself, or itself minus the conflict prefix
+  const ownerKey = <T>(record: Record<string, T> | undefined, destKey: string): string | undefined => {
+    if (ownEntry(record, destKey)) return destKey;
+    if (conflictPrefix && destKey.startsWith(conflictPrefix)) {
+      const unprefixed = destKey.slice(conflictPrefix.length);
+      if (ownEntry(record, unprefixed)) return unprefixed;
+    }
+    return undefined;
+  };
+  const adopt = (record: Record<string, DestEntry> | undefined, destKey: string): boolean => {
+    const key = ownerKey(record, destKey);
+    const entry = key === undefined ? undefined : record![key];
+    if (!entry || ownedKeys(key!, entry).includes(destKey)) return false;
     entry.extraDestKeys = [...(entry.extraDestKeys ?? []), destKey];
     return true;
   };
   for (const destKey of unresolved.flags) {
-    if (adopt(entries.flags[destKey], destKey, destKey)) adopted.flags.push(destKey);
+    if (adopt(entries.flags, destKey)) adopted.flags.push(destKey);
   }
   for (const id of unresolved.segments) {
     const [env, destKey] = splitSegmentId(id);
-    if (adopt(entries.segments?.[env]?.[destKey], destKey, destKey)) adopted.segments.push(id);
+    if (adopt(ownEntry(entries.segments, env), destKey)) adopted.segments.push(id);
   }
   return adopted;
 }

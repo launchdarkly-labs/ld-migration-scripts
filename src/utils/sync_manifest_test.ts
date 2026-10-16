@@ -9,10 +9,12 @@ import {
   assertManifestComplete,
   recordedDestination,
   manifestDestinationFlagKeys,
+  ownEntry,
   readSyncManifest,
   retainIncompleteMarker,
   type SyncManifest,
   syncManifestPath,
+  withExtraDestKeys,
 } from "./sync_manifest.ts";
 
 const manifest: SyncManifest = {
@@ -204,4 +206,51 @@ Deno.test("adoptUnresolved records untracked originals as extra copies, which cl
   const filtered = { flags: { a: entries.flags.a }, segments: {} };
   assertEquals(adoptUnresolved(previous, filtered), { flags: [], segments: [] });
   assertEquals(retainIncompleteMarker(previous, { ...clean, flagScopeFiltered: true }, filtered), incomplete);
+});
+
+Deno.test("ownEntry ignores inherited members of the manifest records", () => {
+  const flags: SyncManifest["flags"] = { a: { version: 1, environments: {} } };
+  assertEquals(ownEntry(flags, "a")?.version, 1);
+  assertEquals(ownEntry(flags, "constructor"), undefined);
+  assertEquals(ownEntry(flags, "toString"), undefined);
+  assertEquals(ownEntry(undefined, "a"), undefined);
+});
+
+Deno.test("withExtraDestKeys keeps adopted copies when an entry is rebuilt by a rerun", () => {
+  const previous = { version: 1, environments: {}, destKey: "imported-b", extraDestKeys: ["b"] };
+  const rebuilt: SyncManifest["flags"][string] = { version: 2, environments: {}, destKey: "imported-b" };
+  assertEquals(withExtraDestKeys(rebuilt, previous, "b"), { ...rebuilt, extraDestKeys: ["b"] });
+  // Dedupes and never lists the entry's own main destination key
+  assertEquals(
+    withExtraDestKeys({ version: 2, environments: {}, extraDestKeys: ["b", "x"] }, { extraDestKeys: ["x", "b", "y"] }, "b"),
+    { version: 2, environments: {}, extraDestKeys: ["x", "y"] },
+  );
+  assertEquals(withExtraDestKeys(rebuilt, undefined, "b"), rebuilt);
+  assertEquals(withExtraDestKeys(rebuilt, { destKey: "imported-b" }, "b"), rebuilt);
+});
+
+Deno.test("abortMarker records the destination keys of writes still in flight", () => {
+  const previous: SyncManifest = { ...manifest, flags: { a: { version: 1, environments: {} } } };
+  // c triggered the abort while b, prefixed to imported-b, was still being written and had no entry yet
+  const run = {
+    flagScopeFiltered: false,
+    failedWrites: false,
+    conflictedFlags: ["b"],
+    conflictedSegments: [],
+    pendingDestKeys: { flags: ["b", "imported-b"], segments: [] },
+  };
+  const marker = abortMarker(previous, { reason: "aborted", at: "2026-10-16T09:00:00.000Z" }, run, { flags: previous.flags });
+  assertEquals(marker.unresolved, { flags: ["b", "imported-b"], segments: [] });
+  // A clean overwrite retry that records b under its own key still leaves imported-b untracked
+  const after: SyncManifest = { ...previous, incomplete: marker };
+  const clean = { ...run, conflictedFlags: [], pendingDestKeys: undefined };
+  const recordedB = { flags: { ...previous.flags, b: { version: 1, environments: {} } } };
+  assertEquals(retainIncompleteMarker(after, clean, recordedB), { ...marker, unresolved: { flags: ["imported-b"], segments: [] } });
+  // Adopting imported-b as b's extra copy closes the gap; the prefix tells which source key it belongs to
+  const entries: { flags: SyncManifest["flags"] } = { flags: { ...previous.flags, b: { version: 1, environments: {} } } };
+  const left = { ...after, incomplete: { ...marker, unresolved: { flags: ["imported-b"], segments: [] } } };
+  assertEquals(adoptUnresolved(left, entries), { flags: [], segments: [] }, "unknown prefix: no owner");
+  assertEquals(adoptUnresolved(left, entries, "imported-"), { flags: ["imported-b"], segments: [] });
+  assertEquals(entries.flags.b.extraDestKeys, ["imported-b"]);
+  assertEquals(retainIncompleteMarker(after, clean, entries), undefined);
 });
