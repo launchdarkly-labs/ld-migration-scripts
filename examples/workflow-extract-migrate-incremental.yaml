@@ -8,11 +8,11 @@ workflow:
     - migrate
 
 source:
-  projectKey: 
+  projectKey:
   domain: app.launchdarkly.com
 
 destination:
-  projectKey:   
+  projectKey:
   domain: app.launchdarkly.com
 
 extraction:
@@ -21,7 +21,6 @@ extraction:
 migration:
   migrateSegments: true
   assignMaintainerIds: false
-  incremental: true  # Only sync flags/segments changed since last run
 
   # Re-export and re-import big segment members (optional). Big segments with exported
   # members are re-imported on every run, since member changes may not bump the version.
@@ -41,3 +40,5 @@ migration:
 
   # Migrate up to N flags in parallel (optional, default: 10)
   # concurrency: 10
+
+  incremental: true # Only sync flags/segments changed since last run

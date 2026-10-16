@@ -11,11 +11,11 @@
 
 source:
   projectKey: us-production
-  domain: app.launchdarkly.com  # Optional: Defaults to app.launchdarkly.com
+  domain: app.launchdarkly.com # Optional: Defaults to app.launchdarkly.com
 
 destination:
   projectKey: eu-production
-  domain: app.launchdarkly.com  # Optional: Use app.eu.launchdarkly.com for EU instance
+  domain: app.launchdarkly.com # Optional: Use app.eu.launchdarkly.com for EU instance
 
 # Optional: Control what data to extract from source
 # extraction:
@@ -29,7 +29,7 @@ memberMapping:
 migration:
   # Use the member mapping we just created
   assignMaintainerIds: true
-  
+
   # Include segments
   migrateSegments: true
 
@@ -42,7 +42,7 @@ migration:
 
   # Preview without writing to the destination (optional, recommended for the first run)
   # dryRun: true
-  
+
   # Handle conflicts
   conflictPrefix: "us-"
 
@@ -53,12 +53,12 @@ migration:
 
   # Organize in view
   targetView: "us-migration-2024"
-  
+
   # Only migrate these environments
   environments:
     - production
     - staging
-  
+
   # Map environment keys if needed
   environmentMapping:
     production: production

@@ -19,8 +19,13 @@ export async function loadApiKeys(): Promise<ApiKeys> {
     cachedApiKeys = keys;
     return keys;
   } catch (error) {
-    console.error("Error loading API keys:", error instanceof Error ? error.message : String(error));
-    console.error("Please ensure config/api_keys.json exists with valid API keys");
+    console.error(
+      "Error loading API keys:",
+      error instanceof Error ? error.message : String(error),
+    );
+    console.error(
+      "Please ensure config/api_keys.json exists with valid API keys",
+    );
     Deno.exit(1);
   }
 }
@@ -49,7 +54,8 @@ export async function getSplitApiKey(): Promise<string> {
   }
 
   console.error("No Split API key found.");
-  console.error("Set the SPLIT_API_KEY environment variable or add split_api_key to config/api_keys.json");
+  console.error(
+    "Set the SPLIT_API_KEY environment variable or add split_api_key to config/api_keys.json",
+  );
   Deno.exit(1);
 }
-

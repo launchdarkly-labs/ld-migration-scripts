@@ -57,4 +57,4 @@ export interface ImportReport {
   results: ImportResult[];
   summary: string;
   timestamp: string;
-} 
+}

@@ -1,11 +1,15 @@
-import { assert, assertEquals, assertExists } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assert,
+  assertEquals,
+  assertExists,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   decideVariations,
   KeyRegistry,
-  type MappingContext,
   mapEnvironment,
   mapFlag,
   mapLargeSegment,
+  type MappingContext,
   mapRuleBasedSegment,
   mapStandardSegment,
   mapTrafficTypes,
@@ -22,7 +26,9 @@ const ctx = (overrides: Partial<MappingContext> = {}): MappingContext => ({
 });
 
 /** Minimal definition builder: boolean on/off flag, off by default. */
-const def = (overrides: Partial<SplitFlagDefinition> = {}): SplitFlagDefinition => ({
+const def = (
+  overrides: Partial<SplitFlagDefinition> = {},
+): SplitFlagDefinition => ({
   name: "my_flag",
   environment: { id: "e1", name: "Production" },
   trafficType: { id: "t1", name: "user" },
@@ -41,7 +47,10 @@ const decisionFor = (d: SplitFlagDefinition) => decideVariations(d.name, [d]);
 
 Deno.test("sanitizeKey preserves case for flags, strips invalid chars", () => {
   assertEquals(sanitizeKey("My Flag (v2)!"), "My-Flag-v2");
-  assertEquals(sanitizeKey("Prod-Default", { lowercase: true }), "prod-default");
+  assertEquals(
+    sanitizeKey("Prod-Default", { lowercase: true }),
+    "prod-default",
+  );
   assertEquals(sanitizeKey("__weird__"), "weird");
 });
 
@@ -89,7 +98,10 @@ Deno.test("decideVariations: any configuration anywhere forces JSON variations",
     }),
   ]);
   assertEquals(d.kind, "multivariate");
-  assertEquals(d.variations[0].value, { treatment: "on", config: { color: "red" } });
+  assertEquals(d.variations[0].value, {
+    treatment: "on",
+    config: { color: "red" },
+  });
   assertEquals(d.variations[1].value, { treatment: "off", config: null });
 });
 
@@ -113,7 +125,11 @@ Deno.test("decideVariations: cross-env config conflicts keep priority env and no
     }),
   ]);
   assertEquals(d.variations[0].value, { treatment: "on", config: { v: 1 } });
-  assert(d.notes.some((n) => n.level === "PARTIAL" && n.message.includes("different configurations")));
+  assert(
+    d.notes.some((n) =>
+      n.level === "PARTIAL" && n.message.includes("different configurations")
+    ),
+  );
 });
 
 // ==================== Environment state ====================
@@ -133,10 +149,15 @@ Deno.test("mapEnvironment: single 100% default bucket becomes fixed fallthrough"
 
 Deno.test("mapEnvironment: split default buckets become a rollout with x1000 weights", () => {
   const d = def({
-    defaultRule: [{ treatment: "on", size: 25 }, { treatment: "off", size: 75 }],
+    defaultRule: [{ treatment: "on", size: 25 }, {
+      treatment: "off",
+      size: 75,
+    }],
   });
   const { envConfig } = mapEnvironment(d, decisionFor(d), ctx(), "production");
-  const fallthrough = envConfig.fallthrough as { rollout: { variations: unknown[]; contextKind: string } };
+  const fallthrough = envConfig.fallthrough as {
+    rollout: { variations: unknown[]; contextKind: string };
+  };
   assertEquals(fallthrough.rollout.variations, [
     { variation: 0, weight: 25_000 },
     { variation: 1, weight: 75_000 },
@@ -146,13 +167,27 @@ Deno.test("mapEnvironment: split default buckets become a rollout with x1000 wei
 
 Deno.test("mapEnvironment: bucket sizes under 100 are normalized onto the default treatment", () => {
   const d = def({
-    defaultRule: [{ treatment: "on", size: 30 }, { treatment: "off", size: 30 }],
+    defaultRule: [{ treatment: "on", size: 30 }, {
+      treatment: "off",
+      size: 30,
+    }],
   });
-  const { envConfig, notes } = mapEnvironment(d, decisionFor(d), ctx(), "production");
-  const fallthrough = envConfig.fallthrough as { rollout: { variations: Array<{ variation: number; weight: number }> } };
-  const total = fallthrough.rollout.variations.reduce((s, v) => s + v.weight, 0);
+  const { envConfig, notes } = mapEnvironment(
+    d,
+    decisionFor(d),
+    ctx(),
+    "production",
+  );
+  const fallthrough = envConfig.fallthrough as {
+    rollout: { variations: Array<{ variation: number; weight: number }> };
+  };
+  const total = fallthrough.rollout.variations.reduce(
+    (s, v) => s + v.weight,
+    0,
+  );
   assertEquals(total, 100_000);
-  const offWeight = fallthrough.rollout.variations.find((v) => v.variation === 1)!.weight;
+  const offWeight =
+    fallthrough.rollout.variations.find((v) => v.variation === 1)!.weight;
   assertEquals(offWeight, 70_000);
   assert(notes.some((n) => n.message.includes("normalized to 100%")));
 });
@@ -165,7 +200,10 @@ Deno.test("mapEnvironment: trafficAllocation under 100 emits a prominent PARTIAL
 
 // ==================== Matchers ====================
 
-const ruleDef = (matchers: unknown[], buckets = [{ treatment: "on", size: 100 }]) =>
+const ruleDef = (
+  matchers: unknown[],
+  buckets = [{ treatment: "on", size: 100 }],
+) =>
   def({
     rules: [{
       condition: { combiner: "AND", matchers: matchers as never },
@@ -183,7 +221,9 @@ Deno.test("string/number/set matchers map to the expected clause ops", () => {
   ]);
   const { envConfig } = mapEnvironment(d, decisionFor(d), ctx(), "production");
   assertEquals(envConfig.rules.length, 1);
-  const ops = envConfig.rules[0].clauses.map((c) => [c.attribute, c.op, c.values]);
+  const ops = envConfig.rules[0].clauses.map((
+    c,
+  ) => [c.attribute, c.op, c.values]);
   assertEquals(ops, [
     ["plan", "in", ["pro", "team"]],
     ["email", "startsWith", ["admin"]],
@@ -201,14 +241,27 @@ Deno.test("matcher without attribute targets the context key", () => {
 });
 
 Deno.test("BETWEEN_NUMBER becomes two AND'd clauses", () => {
-  const d = ruleDef([{ type: "BETWEEN_NUMBER", attribute: "age", between: { from: 18, to: 65 } }]);
+  const d = ruleDef([{
+    type: "BETWEEN_NUMBER",
+    attribute: "age",
+    between: { from: 18, to: 65 },
+  }]);
   const { envConfig } = mapEnvironment(d, decisionFor(d), ctx(), "production");
   const [a, b] = envConfig.rules[0].clauses;
-  assertEquals([a.op, a.values, b.op, b.values], ["greaterThanOrEqual", [18], "lessThanOrEqual", [65]]);
+  assertEquals([a.op, a.values, b.op, b.values], [
+    "greaterThanOrEqual",
+    [18],
+    "lessThanOrEqual",
+    [65],
+  ]);
 });
 
 Deno.test("ALL_OF_SET becomes one in-clause per element", () => {
-  const d = ruleDef([{ type: "ALL_OF_SET", attribute: "roles", strings: ["a", "b", "c"] }]);
+  const d = ruleDef([{
+    type: "ALL_OF_SET",
+    attribute: "roles",
+    strings: ["a", "b", "c"],
+  }]);
   const { envConfig } = mapEnvironment(d, decisionFor(d), ctx(), "production");
   assertEquals(envConfig.rules[0].clauses.length, 3);
   assert(envConfig.rules[0].clauses.every((c) => c.op === "in"));
@@ -217,7 +270,12 @@ Deno.test("ALL_OF_SET becomes one in-clause per element", () => {
 Deno.test("EQUAL_SET and PART_OF_SET are impossible: rule skipped with MANUAL note", () => {
   for (const type of ["EQUAL_SET", "PART_OF_SET"]) {
     const d = ruleDef([{ type, attribute: "roles", strings: ["a"] }]);
-    const { envConfig, notes } = mapEnvironment(d, decisionFor(d), ctx(), "production");
+    const { envConfig, notes } = mapEnvironment(
+      d,
+      decisionFor(d),
+      ctx(),
+      "production",
+    );
     assertEquals(envConfig.rules.length, 0);
     assert(notes.some((n) => n.level === "MANUAL" && n.message.includes(type)));
   }
@@ -225,7 +283,11 @@ Deno.test("EQUAL_SET and PART_OF_SET are impossible: rule skipped with MANUAL no
 
 Deno.test("semver >= uses the semVerLessThan+negate idiom", () => {
   const d = ruleDef([
-    { type: "GREATER_THAN_OR_EQUAL_TO_SEMVER", attribute: "version", string: "2.0.0" },
+    {
+      type: "GREATER_THAN_OR_EQUAL_TO_SEMVER",
+      attribute: "version",
+      string: "2.0.0",
+    },
   ]);
   const { envConfig } = mapEnvironment(d, decisionFor(d), ctx(), "production");
   const c = envConfig.rules[0].clauses[0];
@@ -252,7 +314,12 @@ Deno.test("ON_OR_AFTER_DATE maps to negated before at minute granularity", () =>
 
 Deno.test("negated BETWEEN_NUMBER expands to two adjacent OR rules", () => {
   const d = ruleDef([
-    { type: "BETWEEN_NUMBER", attribute: "age", negate: true, between: { from: 18, to: 65 } },
+    {
+      type: "BETWEEN_NUMBER",
+      attribute: "age",
+      negate: true,
+      between: { from: 18, to: 65 },
+    },
   ]);
   const { envConfig } = mapEnvironment(d, decisionFor(d), ctx(), "production");
   assertEquals(envConfig.rules.length, 2);
@@ -266,12 +333,29 @@ Deno.test("negated BETWEEN_NUMBER expands to two adjacent OR rules", () => {
 Deno.test("oversized OR expansion is skipped with a MANUAL note", () => {
   // 2 negated set matchers of 3 elements each = 9 combinations > 8 cap
   const d = ruleDef([
-    { type: "ALL_OF_SET", attribute: "a", negate: true, strings: ["1", "2", "3"] },
-    { type: "ALL_OF_SET", attribute: "b", negate: true, strings: ["4", "5", "6"] },
+    {
+      type: "ALL_OF_SET",
+      attribute: "a",
+      negate: true,
+      strings: ["1", "2", "3"],
+    },
+    {
+      type: "ALL_OF_SET",
+      attribute: "b",
+      negate: true,
+      strings: ["4", "5", "6"],
+    },
   ]);
-  const { envConfig, notes } = mapEnvironment(d, decisionFor(d), ctx(), "production");
+  const { envConfig, notes } = mapEnvironment(
+    d,
+    decisionFor(d),
+    ctx(),
+    "production",
+  );
   assertEquals(envConfig.rules.length, 0);
-  assert(notes.some((n) => n.level === "MANUAL" && n.message.includes("OR logic")));
+  assert(
+    notes.some((n) => n.level === "MANUAL" && n.message.includes("OR logic")),
+  );
 });
 
 Deno.test("IN_SEGMENT maps to a segmentMatch clause with the mapped key", () => {
@@ -309,7 +393,12 @@ Deno.test("treatment keys become individual targets; duplicates dedupe first-win
       { name: "off", keys: ["u2", "u3"] },
     ],
   });
-  const { envConfig, notes } = mapEnvironment(d, decisionFor(d), ctx(), "production");
+  const { envConfig, notes } = mapEnvironment(
+    d,
+    decisionFor(d),
+    ctx(),
+    "production",
+  );
   assertEquals(envConfig.targets, [
     { values: ["u1", "u2"], variation: 0 },
     { values: ["u3"], variation: 1 },
@@ -323,7 +412,11 @@ Deno.test("non-user traffic types use contextTargets with the mapped kind", () =
     treatments: [{ name: "on", keys: ["acme"] }, { name: "off" }],
   });
   const { envConfig } = mapEnvironment(d, decisionFor(d), ctx(), "production");
-  assertEquals(envConfig.contextTargets, [{ values: ["acme"], variation: 0, contextKind: "account" }]);
+  assertEquals(envConfig.contextTargets, [{
+    values: ["acme"],
+    variation: 0,
+    contextKind: "account",
+  }]);
   assertEquals(envConfig.targets, undefined);
 });
 
@@ -331,7 +424,13 @@ Deno.test("treatment segments become prepended segmentMatch rules serving that t
   const d = def({
     treatments: [{ name: "on", segments: ["Beta Testers"] }, { name: "off" }],
     rules: [{
-      condition: { matchers: [{ type: "IN_LIST_STRING", attribute: "plan", strings: ["pro"] }] },
+      condition: {
+        matchers: [{
+          type: "IN_LIST_STRING",
+          attribute: "plan",
+          strings: ["pro"],
+        }],
+      },
       buckets: [{ treatment: "on", size: 100 }],
     }],
   });
@@ -350,12 +449,19 @@ Deno.test("treatment segment targeting duplicated by an IN_SEGMENT rule collapse
       buckets: [{ treatment: "on", size: 100 }],
     }],
   });
-  const { envConfig, notes } = mapEnvironment(d, decisionFor(d), ctx(), "production");
+  const { envConfig, notes } = mapEnvironment(
+    d,
+    decisionFor(d),
+    ctx(),
+    "production",
+  );
   assertEquals(envConfig.rules.length, 1);
   assertEquals(envConfig.rules[0].clauses[0].op, "segmentMatch");
   assertEquals(envConfig.rules[0].variation, 0);
   assertEquals(
-    notes.some((n) => n.level === "FULL" && n.message.includes("identical clauses and outcome")),
+    notes.some((n) =>
+      n.level === "FULL" && n.message.includes("identical clauses and outcome")
+    ),
     true,
   );
 });
@@ -380,7 +486,10 @@ const prereqDef = () =>
   def({
     rules: [{
       condition: {
-        matchers: [{ type: "IN_SPLIT", depends: { splitName: "new_homepage", treatment: "on" } }],
+        matchers: [{
+          type: "IN_SPLIT",
+          depends: { splitName: "new_homepage", treatment: "on" },
+        }],
       },
       buckets: [{ treatment: "on", size: 100 }],
     }],
@@ -390,14 +499,26 @@ const prereqDef = () =>
 Deno.test("strict IN_SPLIT shape maps to an LD prerequisite", () => {
   const c = ctx({
     resolvePrerequisite: (name, treatment) =>
-      name === "new_homepage" && treatment === "on" ? { key: "new_homepage", variation: 0 } : null,
+      name === "new_homepage" && treatment === "on"
+        ? { key: "new_homepage", variation: 0 }
+        : null,
   });
   const d = prereqDef();
-  const { envConfig, notes } = mapEnvironment(d, decisionFor(d), c, "production");
-  assertEquals(envConfig.prerequisites, [{ key: "new_homepage", variation: 0 }]);
+  const { envConfig, notes } = mapEnvironment(
+    d,
+    decisionFor(d),
+    c,
+    "production",
+  );
+  assertEquals(envConfig.prerequisites, [{
+    key: "new_homepage",
+    variation: 0,
+  }]);
   assertEquals(envConfig.rules, []);
   assertEquals(envConfig.fallthrough, { variation: 0 });
-  assert(notes.some((n) => n.level === "FULL" && n.message.includes("prerequisite")));
+  assert(
+    notes.some((n) => n.level === "FULL" && n.message.includes("prerequisite")),
+  );
 });
 
 Deno.test("IN_SPLIT outside the strict shape is MANUAL and the rule is skipped", () => {
@@ -406,21 +527,39 @@ Deno.test("IN_SPLIT outside the strict shape is MANUAL and the rule is skipped",
     rules: [
       {
         condition: {
-          matchers: [{ type: "IN_SPLIT", depends: { splitName: "new_homepage", treatment: "on" } }],
+          matchers: [{
+            type: "IN_SPLIT",
+            depends: { splitName: "new_homepage", treatment: "on" },
+          }],
         },
         buckets: [{ treatment: "on", size: 100 }],
       },
       {
-        condition: { matchers: [{ type: "IN_LIST_STRING", attribute: "plan", strings: ["pro"] }] },
+        condition: {
+          matchers: [{
+            type: "IN_LIST_STRING",
+            attribute: "plan",
+            strings: ["pro"],
+          }],
+        },
         buckets: [{ treatment: "on", size: 100 }],
       },
     ],
   });
-  const c = ctx({ resolvePrerequisite: () => ({ key: "new_homepage", variation: 0 }) });
-  const { envConfig, notes } = mapEnvironment(d, decisionFor(d), c, "production");
+  const c = ctx({
+    resolvePrerequisite: () => ({ key: "new_homepage", variation: 0 }),
+  });
+  const { envConfig, notes } = mapEnvironment(
+    d,
+    decisionFor(d),
+    c,
+    "production",
+  );
   assertEquals(envConfig.prerequisites, undefined);
   assertEquals(envConfig.rules.length, 1); // only the plan rule survives
-  assert(notes.some((n) => n.level === "MANUAL" && n.message.includes("IN_SPLIT")));
+  assert(
+    notes.some((n) => n.level === "MANUAL" && n.message.includes("IN_SPLIT")),
+  );
 });
 
 // ==================== Whole flag ====================
@@ -460,8 +599,15 @@ Deno.test("mapFlag does not emit a spurious 'verify targeting' note when rules m
   // Guards Fix 5's safety net against false positives: a Split env whose rules
   // map to real LD rules (or that has no rules at all) must NOT get the
   // "had rules but mapped to none" note.
-  const withRule = ruleDef([{ type: "IN_LIST_STRING", attribute: "plan", strings: ["pro"] }]);
-  const ruleless = def({ rules: [], defaultRule: [{ treatment: "on", size: 100 }] });
+  const withRule = ruleDef([{
+    type: "IN_LIST_STRING",
+    attribute: "plan",
+    strings: ["pro"],
+  }]);
+  const ruleless = def({
+    rules: [],
+    defaultRule: [{ treatment: "on", size: 100 }],
+  });
   const hasNote = (d: SplitFlagDefinition) =>
     mapFlag({
       meta: null,
@@ -500,7 +646,10 @@ Deno.test("standard segment with non-user kind uses includedContexts", () => {
     keys: ["acme"],
     ctx: ctx(),
   });
-  assertEquals(segment.includedContexts, [{ contextKind: "account", values: ["acme"] }]);
+  assertEquals(segment.includedContexts, [{
+    contextKind: "account",
+    values: ["acme"],
+  }]);
 });
 
 Deno.test("standard segment over 15k keys upgrades to a big segment with import keys", () => {
@@ -527,7 +676,11 @@ Deno.test("rule-based segment maps the attribute/operator/value dialect", () => 
         condition: {
           combiner: "AND",
           matchers: [
-            { attribute: "email", operator: "ends_with", value: "@beta.example.com" },
+            {
+              attribute: "email",
+              operator: "ends_with",
+              value: "@beta.example.com",
+            },
             { attribute: "age", operator: "greater_than", value: 25 },
           ],
         },
@@ -538,10 +691,13 @@ Deno.test("rule-based segment maps the attribute/operator/value dialect", () => 
     ctx: ctx(),
   });
   assertEquals(segment.rules?.length, 1);
-  assertEquals(segment.rules![0].clauses.map((c) => [c.attribute, c.op, c.values]), [
-    ["email", "endsWith", ["@beta.example.com"]],
-    ["age", "greaterThan", [25]],
-  ]);
+  assertEquals(
+    segment.rules![0].clauses.map((c) => [c.attribute, c.op, c.values]),
+    [
+      ["email", "endsWith", ["@beta.example.com"]],
+      ["age", "greaterThan", [25]],
+    ],
+  );
   assertEquals(segment.excluded, ["u9"]);
   assertEquals(notes.filter((n) => n.level === "MANUAL").length, 0);
 });
@@ -553,7 +709,11 @@ Deno.test("rule-based segment also accepts the flag-matcher dialect", () => {
       trafficType: { id: "t1", name: "user" },
       rules: [{
         condition: {
-          matchers: [{ type: "IN_LIST_STRING", attribute: "plan", strings: ["pro"] }],
+          matchers: [{
+            type: "IN_LIST_STRING",
+            attribute: "plan",
+            strings: ["pro"],
+          }],
         },
       }],
     },
@@ -569,14 +729,20 @@ Deno.test("rule-based segment rejects segment references inside rules (MANUAL)",
       name: "Nested",
       trafficType: { id: "t1", name: "user" },
       rules: [{
-        condition: { matchers: [{ type: "IN_SEGMENT", string: "Beta Testers" }] },
+        condition: {
+          matchers: [{ type: "IN_SEGMENT", string: "Beta Testers" }],
+        },
       }],
     },
     segmentKey: "Nested",
     ctx: ctx(),
   });
   assertEquals(segment.rules, undefined);
-  assert(notes.some((n) => n.level === "MANUAL" && n.message.includes("segmentMatch")));
+  assert(
+    notes.some((n) =>
+      n.level === "MANUAL" && n.message.includes("segmentMatch")
+    ),
+  );
 });
 
 Deno.test("excludedSegments inline as snapshots when keys are resolvable, else MANUAL", () => {
@@ -593,7 +759,11 @@ Deno.test("excludedSegments inline as snapshots when keys are resolvable, else M
     resolveSegmentKeys: () => ["u1", "u2"],
   });
   assertEquals(inlined.segment.excluded, ["u1", "u2"]);
-  assert(inlined.notes.some((n) => n.level === "PARTIAL" && n.message.includes("snapshot")));
+  assert(
+    inlined.notes.some((n) =>
+      n.level === "PARTIAL" && n.message.includes("snapshot")
+    ),
+  );
 
   const manual = mapRuleBasedSegment({ rbs, segmentKey: "k", ctx: ctx() });
   assertEquals(manual.segment.excluded, undefined);

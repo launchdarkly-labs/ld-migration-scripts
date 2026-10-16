@@ -33,7 +33,9 @@ Deno.test("getAccountId reads accountId from caller-identity", async () => {
     accountFetch({ "src-token": "acct-1" }, calls),
   );
   assertEquals(id, "acct-1");
-  assertEquals(calls, ["https://ld-stg.launchdarkly.com/api/v2/caller-identity"]);
+  assertEquals(calls, [
+    "https://ld-stg.launchdarkly.com/api/v2/caller-identity",
+  ]);
 });
 
 Deno.test("same account and same key throws", async () => {

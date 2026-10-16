@@ -7,16 +7,16 @@ workflow:
 
 source:
   projectKey: my-source-project
-  domain: app.launchdarkly.com  # Optional: Defaults to app.launchdarkly.com
+  domain: app.launchdarkly.com # Optional: Defaults to app.launchdarkly.com
 
 destination:
   projectKey: my-dest-project
-  domain: app.launchdarkly.com  # Optional: Use app.eu.launchdarkly.com for EU instance
+  domain: app.launchdarkly.com # Optional: Use app.eu.launchdarkly.com for EU instance
 
 migration:
   # Don't map maintainers (no map-members step)
   assignMaintainerIds: false
-  
+
   migrateSegments: true
   # Import big segment members (optional). Only works if the earlier extract also used
   # migrateBigSegments: true, so the member CSVs exist under data/.../segments/big/.
@@ -41,8 +41,7 @@ migration:
   environments:
     - production
     - staging
-  
+
   environmentMapping:
     prod: production
     stg: staging
-

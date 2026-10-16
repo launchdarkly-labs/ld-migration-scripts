@@ -40,15 +40,15 @@ argument parsing breaks. Write `deno task source-from-split -w ...`, not
 
 Flags:
 
-| Flag | Description |
-|------|-------------|
-| `-w, --workspace` | **Required.** Split workspace (project) ID or name |
-| `-p, --projKey` | **Required.** Source project key to write under `data/launchdarkly-migrations/source/project/` |
-| `-e, --environments` | Comma-separated Split environment names to extract (default: all, production-flagged environments first) |
-| `--env-map` | Split env → LD env key mapping, e.g. `'Prod-Default:production,Staging:test'` (unmapped envs get a sanitized lowercase key) |
-| `-t, --tag` | Only extract Split flags/segments with this tag — **see warning below** |
-| `--split-base-url` | Split API host (default: `https://api.split.io`) |
-| `--ld-tag` | Tag applied to everything imported (default: `imported-from-split`) |
+| Flag                 | Description                                                                                                                 |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `-w, --workspace`    | **Required.** Split workspace (project) ID or name                                                                          |
+| `-p, --projKey`      | **Required.** Source project key to write under `data/launchdarkly-migrations/source/project/`                              |
+| `-e, --environments` | Comma-separated Split environment names to extract (default: all, production-flagged environments first)                    |
+| `--env-map`          | Split env → LD env key mapping, e.g. `'Prod-Default:production,Staging:test'` (unmapped envs get a sanitized lowercase key) |
+| `-t, --tag`          | Only extract Split flags/segments with this tag — **see warning below**                                                     |
+| `--split-base-url`   | Split API host (default: `https://api.split.io`)                                                                            |
+| `--ld-tag`           | Tag applied to everything imported (default: `imported-from-split`)                                                         |
 
 ⚠️ **The `-t` tag filter also filters segments — and segments cannot be
 tagged in Split.** Using `-t` therefore silently drops **all** segments from
@@ -84,21 +84,21 @@ deno task migrate -p split-workspace -d my-ld-project -s --on-conflict prompt
 Segments are included by default (`-s` defaults to `true`; pass `-s false`
 to skip them). Other relevant `migrate` flags:
 
-| Flag | Description |
-|------|-------------|
-| `-p, --projKeySource` | Source project key (the `-p` you used during extract) |
-| `-d, --projKeyDest` | Destination LaunchDarkly project key (must exist) |
-| `--on-conflict` | What to do when a flag/segment key already exists: `prompt` (interactive), `skip`, `overwrite` (default), `prefix` (requires `-c`), `abort` |
-| `-c, --conflictPrefix` | Prefix to use when resolving key conflicts (e.g. `imported-`) |
-| `--dry-run` | Preview migration without making any changes |
-| `-e, --environments` | Comma-separated list of environment keys to migrate |
-| `--env-map` | Environment mapping `'source1:dest1,source2:dest2'` — mapped destination environments must exist |
-| `-m, --assignMaintainerIds` | Assign maintainers (default: `false`) |
-| `-v, --targetView` | View key to link all migrated flags to |
-| `--include-flags` / `--exclude-flags` | Comma-separated flag keys to include/exclude |
-| `--concurrency` | Max flags migrated in parallel (default: 10) |
-| `--domain` | Destination LaunchDarkly domain (default: `app.launchdarkly.com`) |
-| `-f, --config` | Path to YAML config file; CLI arguments override config values |
+| Flag                                  | Description                                                                                                                                 |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-p, --projKeySource`                 | Source project key (the `-p` you used during extract)                                                                                       |
+| `-d, --projKeyDest`                   | Destination LaunchDarkly project key (must exist)                                                                                           |
+| `--on-conflict`                       | What to do when a flag/segment key already exists: `prompt` (interactive), `skip`, `overwrite` (default), `prefix` (requires `-c`), `abort` |
+| `-c, --conflictPrefix`                | Prefix to use when resolving key conflicts (e.g. `imported-`)                                                                               |
+| `--dry-run`                           | Preview migration without making any changes                                                                                                |
+| `-e, --environments`                  | Comma-separated list of environment keys to migrate                                                                                         |
+| `--env-map`                           | Environment mapping `'source1:dest1,source2:dest2'` — mapped destination environments must exist                                            |
+| `-m, --assignMaintainerIds`           | Assign maintainers (default: `false`)                                                                                                       |
+| `-v, --targetView`                    | View key to link all migrated flags to                                                                                                      |
+| `--include-flags` / `--exclude-flags` | Comma-separated flag keys to include/exclude                                                                                                |
+| `--concurrency`                       | Max flags migrated in parallel (default: 10)                                                                                                |
+| `--domain`                            | Destination LaunchDarkly domain (default: `app.launchdarkly.com`)                                                                           |
+| `-f, --config`                        | Path to YAML config file; CLI arguments override config values                                                                              |
 
 ### 5. Optional: run both steps as a workflow
 
@@ -213,32 +213,32 @@ Verified live behaviors you may hit against the Split Admin API:
 
 LaunchDarkly's product Split flag-import integration is deliberately
 minimal: its client hits exactly two endpoints — list splits in a workspace
-and list flag definitions in **one** environment (via Split's *internal*
+and list flag definitions in **one** environment (via Split's _internal_
 API, `api.split.io/internal/api/v2/...`) — and captures only flag
 name/description/tags, treatment names, per-treatment individually-targeted
 keys, and the default rule/default treatment. This tool uses the public
 Admin API and extracts the entire workspace:
 
-| Capability | Product integration | This tool |
-|------|------|------|
-| Flag names, descriptions, tags | ✅ | ✅ |
-| Variations | String treatment names only | Typed boolean/JSON/string variations, incl. per-treatment dynamic configurations |
-| Default rule / default treatment | ✅ | ✅ (off + fallthrough) |
-| Individual targets | Per-treatment `keys` | ✅ |
-| Per-environment targeting rules | ❌ | Full 24-matcher translation, De Morgan OR-expansion of negations, percentage rollouts |
-| Environments per run | One | Any subset (`-e`), with `--env-map` renaming and production-first tie-breaking |
-| Segments | ❌ | Standard (with member keys), rule-based, and large (metadata only) |
-| Traffic types → context kinds | ❌ | ✅ (`contextKinds.json`) |
-| Flag dependencies | ❌ | `IN_SPLIT` → prerequisites (strict shape), topologically ordered at migrate time |
-| Flag sets | ❌ | `flagset.<name>` tags |
-| Key sanitization | Assumes names are valid LD keys | Deterministic `KeyRegistry` sanitization with collision handling |
-| Fidelity accounting | None | FULL/PARTIAL/MANUAL/SKIPPED ledger + `split-fidelity-report.json` |
-| API resilience | Basic pagination | 429/5xx retry with backoff, 60s timeouts, envelope-shape quirks, env-segment-list 500 fallback |
-| Experiment configurations | ❌ *Split API cannot export* | ❌ *Split API cannot export* |
-| Metric definitions | ❌ *Split API cannot export* | ❌ *Split API cannot export* |
-| Experiment results | ❌ *Split API cannot export* | ❌ *Split API cannot export* |
-| Large segment members | ❌ *Split API cannot export* | ❌ *Split API cannot export* — segment created empty (metadata only) |
-| Historical events | ❌ *Split events API is write-only* | ❌ *Split events API is write-only* |
+| Capability                       | Product integration                 | This tool                                                                                      |
+| -------------------------------- | ----------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Flag names, descriptions, tags   | ✅                                  | ✅                                                                                             |
+| Variations                       | String treatment names only         | Typed boolean/JSON/string variations, incl. per-treatment dynamic configurations               |
+| Default rule / default treatment | ✅                                  | ✅ (off + fallthrough)                                                                         |
+| Individual targets               | Per-treatment `keys`                | ✅                                                                                             |
+| Per-environment targeting rules  | ❌                                  | Full 24-matcher translation, De Morgan OR-expansion of negations, percentage rollouts          |
+| Environments per run             | One                                 | Any subset (`-e`), with `--env-map` renaming and production-first tie-breaking                 |
+| Segments                         | ❌                                  | Standard (with member keys), rule-based, and large (metadata only)                             |
+| Traffic types → context kinds    | ❌                                  | ✅ (`contextKinds.json`)                                                                       |
+| Flag dependencies                | ❌                                  | `IN_SPLIT` → prerequisites (strict shape), topologically ordered at migrate time               |
+| Flag sets                        | ❌                                  | `flagset.<name>` tags                                                                          |
+| Key sanitization                 | Assumes names are valid LD keys     | Deterministic `KeyRegistry` sanitization with collision handling                               |
+| Fidelity accounting              | None                                | FULL/PARTIAL/MANUAL/SKIPPED ledger + `split-fidelity-report.json`                              |
+| API resilience                   | Basic pagination                    | 429/5xx retry with backoff, 60s timeouts, envelope-shape quirks, env-segment-list 500 fallback |
+| Experiment configurations        | ❌ _Split API cannot export_        | ❌ _Split API cannot export_                                                                   |
+| Metric definitions               | ❌ _Split API cannot export_        | ❌ _Split API cannot export_                                                                   |
+| Experiment results               | ❌ _Split API cannot export_        | ❌ _Split API cannot export_                                                                   |
+| Large segment members            | ❌ _Split API cannot export_        | ❌ _Split API cannot export_ — segment created empty (metadata only)                           |
+| Historical events                | ❌ _Split events API is write-only_ | ❌ _Split events API is write-only_                                                            |
 
 The last five rows are hard limits of the Split public Admin API — **no**
 migration tooling can export them, regardless of implementation. Re-create

@@ -14,6 +14,7 @@ Split (Harness FME) migration: see [split-readme.md](./split-readme.md).
 ## Data Structure
 
 Data is stored in `data/third-party-migrations/`:
+
 - `import-files/` - Template files and user-provided import files
 - `reports/` - Import operation reports and logs
 
@@ -54,6 +55,7 @@ Place your import files in the designated directory for the best experience.
 ## Template Files
 
 Template files are provided in the `examples/` folder:
+
 - `examples/flags_template.json` - JSON template with examples of different flag types
 - `examples/flags_template.csv` - CSV template with examples of different flag types
 

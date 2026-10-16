@@ -14,6 +14,7 @@ This directory contains scripts for migrating LaunchDarkly projects between diff
 ## Data Structure
 
 Data is stored in `data/launchdarkly-migrations/`:
+
 - `source/` - Downloaded source project data
 - `mappings/` - Member ID mappings between instances
 

@@ -17,10 +17,9 @@ migration:
     dev: development
     qa: test
     stg: staging
-  
+
   # Optional: Add conflict prefix for safety
   conflictPrefix: "legacy-"
-  
+
   # Optional: Organize migrated flags in a view
   targetView: "legacy-migration"
-

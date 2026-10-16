@@ -1,5 +1,10 @@
 import * as Colors from "https://deno.land/std/fmt/colors.ts";
-import type { ImportFlag, LaunchDarklyFlag, ImportResult, ImportReport } from "../types/deno.d.ts";
+import type {
+  ImportFlag,
+  ImportReport,
+  ImportResult,
+  LaunchDarklyFlag,
+} from "../types/deno.d.ts";
 
 const apiVersion = "20240415";
 
@@ -14,13 +19,14 @@ export async function getJson(filePath: string) {
 }
 
 export async function delay(ms: number) {
-  await new Promise(resolve => setTimeout(resolve, ms));
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** Full hex SHA-256 of UTF-8 string (64 chars). For collision-safe flag extract filenames. */
 export async function sha256HexUtf8(s: string): Promise<string> {
   const b = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
-  return Array.from(new Uint8Array(b), (x) => x.toString(16).padStart(2, "0")).join("");
+  return Array.from(new Uint8Array(b), (x) => x.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 // ==================== Smart Rate Limiter ====================
@@ -28,7 +34,7 @@ export async function sha256HexUtf8(s: string): Promise<string> {
 interface RateLimitState {
   globalRemaining: number;
   routeRemaining: number;
-  resetTime: number;  // epoch ms when limit resets
+  resetTime: number; // epoch ms when limit resets
   lastUpdated: number;
 }
 
@@ -47,30 +53,31 @@ const MIN_REQUEST_SPACING = 50;
 function extractRateLimitHeaders(response: Response): Partial<RateLimitState> {
   const headers = response.headers;
   const state: Partial<RateLimitState> = {};
-  
+
   // Check for various rate limit header formats LaunchDarkly uses
-  const globalRemaining = headers.get('x-ratelimit-global-remaining');
-  const routeRemaining = headers.get('x-ratelimit-route-remaining') || headers.get('x-ratelimit-remaining');
-  const resetTime = headers.get('x-ratelimit-reset');
-  const retryAfter = headers.get('retry-after');
-  
+  const globalRemaining = headers.get("x-ratelimit-global-remaining");
+  const routeRemaining = headers.get("x-ratelimit-route-remaining") ||
+    headers.get("x-ratelimit-remaining");
+  const resetTime = headers.get("x-ratelimit-reset");
+  const retryAfter = headers.get("retry-after");
+
   if (globalRemaining) {
     state.globalRemaining = parseInt(globalRemaining, 10);
   }
-  
+
   if (routeRemaining) {
     state.routeRemaining = parseInt(routeRemaining, 10);
   }
-  
+
   if (resetTime) {
     state.resetTime = parseInt(resetTime, 10);
   } else if (retryAfter) {
     // retry-after is in seconds, convert to epoch ms
     state.resetTime = Date.now() + (parseInt(retryAfter, 10) * 1000);
   }
-  
+
   state.lastUpdated = Date.now();
-  
+
   return state;
 }
 
@@ -83,12 +90,12 @@ function updateRateLimitState(routeCategory: string, response: Response): void {
     globalRemaining: 100,
     routeRemaining: 100,
     resetTime: 0,
-    lastUpdated: 0
+    lastUpdated: 0,
   };
-  
+
   rateLimitState.set(routeCategory, {
     ...existing,
-    ...extracted
+    ...extracted,
   });
 }
 
@@ -97,29 +104,31 @@ function updateRateLimitState(routeCategory: string, response: Response): void {
  */
 function calculateProactiveDelay(routeCategory: string): number {
   const state = rateLimitState.get(routeCategory);
-  
+
   if (!state) {
     return MIN_REQUEST_SPACING;
   }
-  
+
   const now = Date.now();
   const remaining = Math.min(state.globalRemaining, state.routeRemaining);
-  
+
   // If we have plenty of requests remaining, just use minimum spacing
   if (remaining > PROACTIVE_THRESHOLD) {
     return MIN_REQUEST_SPACING;
   }
-  
+
   // If we're low on requests, calculate time until reset
   if (state.resetTime > now) {
     const timeUntilReset = state.resetTime - now;
     // Spread remaining requests across the time until reset
-    const delayPerRequest = remaining > 0 ? Math.ceil(timeUntilReset / remaining) : timeUntilReset;
+    const delayPerRequest = remaining > 0
+      ? Math.ceil(timeUntilReset / remaining)
+      : timeUntilReset;
     // Add jitter to avoid thundering herd
     const jitter = Math.floor(Math.random() * 100);
     return Math.max(delayPerRequest + jitter, MIN_REQUEST_SPACING);
   }
-  
+
   return MIN_REQUEST_SPACING;
 }
 
@@ -128,8 +137,8 @@ function calculateProactiveDelay(routeCategory: string): number {
  */
 function calculateRateLimitDelay(response: Response): number {
   const now = Date.now();
-  const retryAfterHeader = response.headers.get('retry-after');
-  const rateLimitResetHeader = response.headers.get('x-ratelimit-reset');
+  const retryAfterHeader = response.headers.get("retry-after");
+  const rateLimitResetHeader = response.headers.get("x-ratelimit-reset");
 
   let retryAfter = 0;
   let rateLimitReset = 0;
@@ -142,7 +151,7 @@ function calculateRateLimitDelay(response: Response): number {
     const resetTime = parseInt(rateLimitResetHeader, 10);
     rateLimitReset = resetTime - now;
   }
-                          
+
   const delayMs = Math.max(retryAfter, rateLimitReset, 1000); // At least 1 second
 
   // Add random jitter
@@ -153,7 +162,9 @@ function calculateRateLimitDelay(response: Response): number {
 /**
  * Gets the current rate limit state for debugging/logging
  */
-export function getRateLimitState(routeCategory: string): RateLimitState | undefined {
+export function getRateLimitState(
+  routeCategory: string,
+): RateLimitState | undefined {
   return rateLimitState.get(routeCategory);
 }
 
@@ -164,10 +175,14 @@ export function logRateLimitStatus(routeCategory: string): void {
   const state = rateLimitState.get(routeCategory);
   if (state) {
     const remaining = Math.min(state.globalRemaining, state.routeRemaining);
-    const resetIn = state.resetTime > Date.now() 
-      ? Math.ceil((state.resetTime - Date.now()) / 1000) 
+    const resetIn = state.resetTime > Date.now()
+      ? Math.ceil((state.resetTime - Date.now()) / 1000)
       : 0;
-    console.log(Colors.gray(`  [Rate Limit] ${routeCategory}: ${remaining} remaining, resets in ${resetIn}s`));
+    console.log(
+      Colors.gray(
+        `  [Rate Limit] ${routeCategory}: ${remaining} remaining, resets in ${resetIn}s`,
+      ),
+    );
   }
 }
 
@@ -196,24 +211,43 @@ function transientBackoff(attempt: number): number {
  * sockets). 429 retries are unbounded (they wait for the reset); transient retries stop
  * after MAX_TRANSIENT_RETRIES and never apply to POST/PATCH.
  */
-export async function rateLimitRequest(req: Request, routeCategory: string, attempt = 0): Promise<Response> {
+export async function rateLimitRequest(
+  req: Request,
+  routeCategory: string,
+  attempt = 0,
+): Promise<Response> {
   // Proactively wait based on current rate limit state
   const proactiveDelay = calculateProactiveDelay(routeCategory);
   if (proactiveDelay > MIN_REQUEST_SPACING) {
-    console.log(Colors.gray(`  Proactive rate limit wait: ${proactiveDelay}ms for ${routeCategory}`));
+    console.log(
+      Colors.gray(
+        `  Proactive rate limit wait: ${proactiveDelay}ms for ${routeCategory}`,
+      ),
+    );
   }
   await delay(proactiveDelay);
 
   const rateLimitReq = req.clone();
   let res: Response;
   try {
-    const timeoutReq = new Request(req, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    const timeoutReq = new Request(req, {
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
     res = await fetch(timeoutReq);
   } catch (err) {
     // DNS/TLS/connection reset/timeout. Retry idempotent requests a few times, then surface the error.
-    if (attempt >= MAX_TRANSIENT_RETRIES || !RETRY_SAFE_METHODS.has(req.method.toUpperCase())) throw err;
+    if (
+      attempt >= MAX_TRANSIENT_RETRIES ||
+      !RETRY_SAFE_METHODS.has(req.method.toUpperCase())
+    ) throw err;
     const wait = transientBackoff(attempt);
-    console.log(Colors.yellow(`Network error for ${req.url} (${err instanceof Error ? err.message : String(err)}); retry ${attempt + 1}/${MAX_TRANSIENT_RETRIES} in ${wait}ms`));
+    console.log(
+      Colors.yellow(
+        `Network error for ${req.url} (${
+          err instanceof Error ? err.message : String(err)
+        }); retry ${attempt + 1}/${MAX_TRANSIENT_RETRIES} in ${wait}ms`,
+      ),
+    );
     await delay(wait);
     return rateLimitRequest(rateLimitReq, routeCategory, attempt + 1);
   }
@@ -222,27 +256,48 @@ export async function rateLimitRequest(req: Request, routeCategory: string, atte
   updateRateLimitState(routeCategory, res);
 
   // Handle special cases
-  if (res.status === 409 && routeCategory === 'projects') {
-    console.warn(Colors.yellow(`It looks like this project has already been created in the destination`));
-    console.warn(Colors.yellow(`To avoid errors and possible overwrite, please either:`));
-    console.warn(Colors.yellow(`Update your name to a new one, or delete the existing project in the destination instance`));
+  if (res.status === 409 && routeCategory === "projects") {
+    console.warn(
+      Colors.yellow(
+        `It looks like this project has already been created in the destination`,
+      ),
+    );
+    console.warn(
+      Colors.yellow(`To avoid errors and possible overwrite, please either:`),
+    );
+    console.warn(
+      Colors.yellow(
+        `Update your name to a new one, or delete the existing project in the destination instance`,
+      ),
+    );
     Deno.exit(1);
   }
 
   // Handle rate limiting (429)
   if (res.status === 429) {
     const waitTime = calculateRateLimitDelay(res);
-    console.log(Colors.yellow(`Rate Limited for ${req.url} - waiting ${waitTime}ms`));
+    console.log(
+      Colors.yellow(`Rate Limited for ${req.url} - waiting ${waitTime}ms`),
+    );
     await delay(waitTime);
     console.log(`Retrying request for ${req.url}`);
     return rateLimitRequest(rateLimitReq, routeCategory, attempt);
   }
 
   // Transient server errors: bounded retry for idempotent requests only (see RETRY_SAFE_METHODS).
-  if (TRANSIENT_STATUSES.has(res.status) && attempt < MAX_TRANSIENT_RETRIES && RETRY_SAFE_METHODS.has(req.method.toUpperCase())) {
+  if (
+    TRANSIENT_STATUSES.has(res.status) && attempt < MAX_TRANSIENT_RETRIES &&
+    RETRY_SAFE_METHODS.has(req.method.toUpperCase())
+  ) {
     await res.body?.cancel();
     const wait = transientBackoff(attempt);
-    console.log(Colors.yellow(`HTTP ${res.status} for ${req.url}; retry ${attempt + 1}/${MAX_TRANSIENT_RETRIES} in ${wait}ms`));
+    console.log(
+      Colors.yellow(
+        `HTTP ${res.status} for ${req.url}; retry ${
+          attempt + 1
+        }/${MAX_TRANSIENT_RETRIES} in ${wait}ms`,
+      ),
+    );
     await delay(wait);
     return rateLimitRequest(rateLimitReq, routeCategory, attempt + 1);
   }
@@ -259,15 +314,15 @@ export function ldAPIPostRequest(
 ) {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    'User-Agent': 'Project-Migrator-Script',
+    "User-Agent": "Project-Migrator-Script",
     "Authorization": apiKey,
   };
-  
+
   // Only add LD-API-Version header when using beta
   if (useBetaVersion) {
     headers["LD-API-Version"] = "beta";
   }
-  
+
   const req = new Request(
     `https://${domain}/api/v2/${path}`,
     {
@@ -291,7 +346,7 @@ export function ldAPIPutRequest(
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
-        'User-Agent': 'Project-Migrator-Script',
+        "User-Agent": "Project-Migrator-Script",
         "Authorization": apiKey,
       },
       body: JSON.stringify(body),
@@ -351,12 +406,14 @@ export function buildRules(
 ): { path: string; op: string; value: unknown }[] {
   const newRules: { path: string; op: string; value: unknown }[] = [];
   const path = env ? `${env}/rules/-` : "rules/-";
-  rules.map(({ clauses, _id, _generation, _deleted, _version, _ref, ...rest }) => {
-    const newRule = rest;
-    const newClauses = { clauses: clauses.map(({ _id, ...rest }) => rest) };
-    Object.assign(newRule, newClauses);
-    newRules.push(buildPatch(path, "add", newRule));
-  });
+  rules.map(
+    ({ clauses, _id, _generation, _deleted, _version, _ref, ...rest }) => {
+      const newRule = rest;
+      const newClauses = { clauses: clauses.map(({ _id, ...rest }) => rest) };
+      Object.assign(newRule, newClauses);
+      newRules.push(buildPatch(path, "add", newRule));
+    },
+  );
 
   return newRules;
 }
@@ -366,7 +423,9 @@ export function buildRulesReplace(
   env?: string,
 ): { path: string; op: string; value: unknown } {
   const path = env ? `${env}/rules` : "rules";
-  const cleaned = rules.map(({ _id, _generation, _deleted, _version, _ref, clauses, ...rest }) => ({
+  const cleaned = rules.map((
+    { _id, _generation, _deleted, _version, _ref, clauses, ...rest },
+  ) => ({
     ...rest,
     clauses: clauses.map(({ _id, ...clauseRest }) => clauseRest),
   }));
@@ -381,17 +440,22 @@ export async function writeSourceData(
   return await writeJson(`${projPath}/${dataType}.json`, data);
 }
 
-export function ldAPIRequest(apiKey: string, domain: string, path: string, useBetaVersion = false) {
+export function ldAPIRequest(
+  apiKey: string,
+  domain: string,
+  path: string,
+  useBetaVersion = false,
+) {
   const headers: Record<string, string> = {
     "Authorization": apiKey,
-    'User-Agent': 'launchdarkly-project-migrator-script',
+    "User-Agent": "launchdarkly-project-migrator-script",
   };
-  
+
   // Only add LD-API-Version header when using beta
   if (useBetaVersion) {
     headers["LD-API-Version"] = "beta";
   }
-  
+
   const req = new Request(
     `https://${domain}/api/v2/${path}`,
     {
@@ -419,78 +483,107 @@ export function consoleLogger(status: number, message: string) {
 }
 
 // Flag Import Utility Functions
-export async function parseFlagImportFile(filePath: string): Promise<ImportFlag[]> {
+export async function parseFlagImportFile(
+  filePath: string,
+): Promise<ImportFlag[]> {
   try {
     const fileContent = await Deno.readTextFile(filePath);
-    const fileExtension = filePath.split('.').pop()?.toLowerCase();
-    
-    if (fileExtension === 'json') {
+    const fileExtension = filePath.split(".").pop()?.toLowerCase();
+
+    if (fileExtension === "json") {
       return JSON.parse(fileContent) as ImportFlag[];
-    } else if (fileExtension === 'csv') {
+    } else if (fileExtension === "csv") {
       return parseCSVFlags(fileContent);
     } else {
-      throw new Error(`Unsupported file format: ${fileExtension}. Only JSON and CSV are supported.`);
+      throw new Error(
+        `Unsupported file format: ${fileExtension}. Only JSON and CSV are supported.`,
+      );
     }
   } catch (error) {
-    throw new Error(`Failed to parse file ${filePath}: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(
+      `Failed to parse file ${filePath}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
   }
 }
 
 function parseCSVFlags(csvContent: string): ImportFlag[] {
-  const lines = csvContent.trim().split('\n');
-  const headers = lines[0].split(',').map(h => h.trim());
-  
+  const lines = csvContent.trim().split("\n");
+  const headers = lines[0].split(",").map((h) => h.trim());
+
   // Validate required headers
-  const requiredHeaders = ['key', 'name', 'kind', 'variations', 'defaultOnVariation', 'defaultOffVariation'];
+  const requiredHeaders = [
+    "key",
+    "name",
+    "kind",
+    "variations",
+    "defaultOnVariation",
+    "defaultOffVariation",
+  ];
   for (const header of requiredHeaders) {
     if (!headers.includes(header)) {
       throw new Error(`Missing required header: ${header}`);
     }
   }
-  
+
   const flags: ImportFlag[] = [];
-  
+
   for (let i = 1; i < lines.length; i++) {
     const line = lines[i].trim();
     if (!line) continue;
-    
+
     const values = parseCSVLine(line);
     if (values.length !== headers.length) {
-      throw new Error(`Line ${i + 1}: Expected ${headers.length} columns, got ${values.length}`);
+      throw new Error(
+        `Line ${
+          i + 1
+        }: Expected ${headers.length} columns, got ${values.length}`,
+      );
     }
-    
+
     const rawFlag: Record<string, string> = {};
     headers.forEach((header, index) => {
       rawFlag[header] = values[index];
     });
-    
+
     // Parse variations and build the ImportFlag
     const parsedFlag: ImportFlag = {
       key: rawFlag.key,
       name: rawFlag.name,
       description: rawFlag.description,
-      kind: rawFlag.kind as ImportFlag['kind'],
+      kind: rawFlag.kind as ImportFlag["kind"],
       variations: parseCSVVariations(rawFlag.variations, rawFlag.kind),
-      defaultOnVariation: parseCSVValue(rawFlag.defaultOnVariation, rawFlag.kind),
-      defaultOffVariation: parseCSVValue(rawFlag.defaultOffVariation, rawFlag.kind),
-      tags: rawFlag.tags ? rawFlag.tags.split(',').map((tag: string) => tag.trim()).filter((tag: string) => tag) : undefined,
+      defaultOnVariation: parseCSVValue(
+        rawFlag.defaultOnVariation,
+        rawFlag.kind,
+      ),
+      defaultOffVariation: parseCSVValue(
+        rawFlag.defaultOffVariation,
+        rawFlag.kind,
+      ),
+      tags: rawFlag.tags
+        ? rawFlag.tags.split(",").map((tag: string) => tag.trim()).filter((
+          tag: string,
+        ) => tag)
+        : undefined,
     };
-    
+
     flags.push(parsedFlag);
   }
-  
+
   return flags;
 }
 
 function parseCSVLine(line: string): string[] {
   const result: string[] = [];
-  let current = '';
+  let current = "";
   let inQuotes = false;
   let i = 0;
-  
+
   while (i < line.length) {
     const char = line[i];
-    
+
     if (char === '"') {
       if (inQuotes && i + 1 < line.length && line[i + 1] === '"') {
         // Handle escaped quotes (double quotes)
@@ -500,85 +593,97 @@ function parseCSVLine(line: string): string[] {
         inQuotes = !inQuotes;
         i++;
       }
-    } else if (char === ',' && !inQuotes) {
+    } else if (char === "," && !inQuotes) {
       result.push(current.trim());
-      current = '';
+      current = "";
       i++;
     } else {
       current += char;
       i++;
     }
   }
-  
+
   result.push(current.trim());
   return result;
 }
 
-function parseCSVVariations(variationsStr: string, kind: string): (boolean | string | number | Record<string, unknown>)[] {
+function parseCSVVariations(
+  variationsStr: string,
+  kind: string,
+): (boolean | string | number | Record<string, unknown>)[] {
   switch (kind) {
-    case 'boolean':
-    case 'number':
-    case 'string': {
-      const variations = variationsStr.split(',').map((v: string) => v.trim());
-      if (kind === 'boolean') {
-        return variations.map((v: string) => v === 'true');
-      } else if (kind === 'number') {
+    case "boolean":
+    case "number":
+    case "string": {
+      const variations = variationsStr.split(",").map((v: string) => v.trim());
+      if (kind === "boolean") {
+        return variations.map((v: string) => v === "true");
+      } else if (kind === "number") {
         return variations.map((v: string) => parseFloat(v));
       } else {
         return variations;
       }
     }
-    case 'json':
+    case "json":
       // For JSON, we need to handle the case where variations contain multiple JSON objects
       // The variationsStr should be in format: {"obj1"},{"obj2"},{"obj3"}
       try {
         // First, let's try to parse it as a single JSON object
-        if (variationsStr.startsWith('{') && variationsStr.endsWith('}')) {
+        if (variationsStr.startsWith("{") && variationsStr.endsWith("}")) {
           return [JSON.parse(variationsStr)];
         }
-        
+
         // If that fails, try to split by "},{ and reconstruct as individual JSON objects
-        const parts = variationsStr.split('},{');
+        const parts = variationsStr.split("},{");
         const jsonVariations = parts.map((part, index) => {
           let jsonStr = part;
-          if (index === 0 && !jsonStr.startsWith('{')) {
-            jsonStr = '{' + jsonStr;
+          if (index === 0 && !jsonStr.startsWith("{")) {
+            jsonStr = "{" + jsonStr;
           }
-          if (index === parts.length - 1 && !jsonStr.endsWith('}')) {
-            jsonStr = jsonStr + '}';
+          if (index === parts.length - 1 && !jsonStr.endsWith("}")) {
+            jsonStr = jsonStr + "}";
           }
-          if (!jsonStr.startsWith('{') || !jsonStr.endsWith('}')) {
-            jsonStr = '{' + jsonStr + '}';
+          if (!jsonStr.startsWith("{") || !jsonStr.endsWith("}")) {
+            jsonStr = "{" + jsonStr + "}";
           }
           return JSON.parse(jsonStr);
         });
         return jsonVariations;
       } catch (error) {
-        throw new Error(`Failed to parse JSON variations: ${variationsStr}. Error: ${error instanceof Error ? error.message : String(error)}`);
+        throw new Error(
+          `Failed to parse JSON variations: ${variationsStr}. Error: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
       }
     default:
       throw new Error(`Unsupported flag kind: ${kind}`);
   }
 }
 
-function parseCSVValue(value: string, kind: string): boolean | string | number | Record<string, unknown> {
+function parseCSVValue(
+  value: string,
+  kind: string,
+): boolean | string | number | Record<string, unknown> {
   switch (kind) {
-    case 'boolean':
-      return value === 'true';
-    case 'number':
+    case "boolean":
+      return value === "true";
+    case "number":
       return parseFloat(value);
-    case 'string':
+    case "string":
       return value;
-    case 'json':
+    case "json":
       return JSON.parse(value);
     default:
       throw new Error(`Unsupported flag kind: ${kind}`);
   }
 }
 
-export function validateFlagData(flags: ImportFlag[]): { valid: boolean; errors: string[] } {
+export function validateFlagData(
+  flags: ImportFlag[],
+): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
-  
+
   // Check for duplicate keys
   const keys = new Set<string>();
   for (const flag of flags) {
@@ -587,68 +692,94 @@ export function validateFlagData(flags: ImportFlag[]): { valid: boolean; errors:
     }
     keys.add(flag.key);
   }
-  
+
   // Validate each flag
   for (let i = 0; i < flags.length; i++) {
     const flag = flags[i];
     const lineNum = i + 1;
-    
+
     // Required fields
-    if (!flag.key || flag.key.trim() === '') {
+    if (!flag.key || flag.key.trim() === "") {
       errors.push(`Line ${lineNum}: Missing or empty key`);
     }
-    
-    if (!flag.kind || !['boolean', 'string', 'number', 'json'].includes(flag.kind)) {
-      errors.push(`Line ${lineNum}: Invalid kind '${flag.kind}'. Must be one of: boolean, string, number, json`);
+
+    if (
+      !flag.kind || !["boolean", "string", "number", "json"].includes(flag.kind)
+    ) {
+      errors.push(
+        `Line ${lineNum}: Invalid kind '${flag.kind}'. Must be one of: boolean, string, number, json`,
+      );
     }
-    
+
     if (!flag.variations || flag.variations.length === 0) {
       errors.push(`Line ${lineNum}: Missing or empty variations`);
     }
-    
+
     // Validate default variations exist in variations array
-    const onVariationExists = flag.variations.some(v => 
-      flag.kind === 'json' ? JSON.stringify(v) === JSON.stringify(flag.defaultOnVariation) : v === flag.defaultOnVariation
+    const onVariationExists = flag.variations.some((v) =>
+      flag.kind === "json"
+        ? JSON.stringify(v) === JSON.stringify(flag.defaultOnVariation)
+        : v === flag.defaultOnVariation
     );
-    const offVariationExists = flag.variations.some(v => 
-      flag.kind === 'json' ? JSON.stringify(v) === JSON.stringify(flag.defaultOffVariation) : v === flag.defaultOffVariation
+    const offVariationExists = flag.variations.some((v) =>
+      flag.kind === "json"
+        ? JSON.stringify(v) === JSON.stringify(flag.defaultOffVariation)
+        : v === flag.defaultOffVariation
     );
-    
+
     if (!onVariationExists) {
-      errors.push(`Line ${lineNum}: defaultOnVariation '${JSON.stringify(flag.defaultOnVariation)}' not found in variations`);
+      errors.push(
+        `Line ${lineNum}: defaultOnVariation '${
+          JSON.stringify(flag.defaultOnVariation)
+        }' not found in variations`,
+      );
     }
-    
+
     if (!offVariationExists) {
-      errors.push(`Line ${lineNum}: defaultOffVariation '${JSON.stringify(flag.defaultOffVariation)}' not found in variations`);
+      errors.push(
+        `Line ${lineNum}: defaultOffVariation '${
+          JSON.stringify(flag.defaultOffVariation)
+        }' not found in variations`,
+      );
     }
-    
+
     // Type-specific validation
-    if (flag.kind === 'boolean' && flag.variations.length !== 2) {
-      errors.push(`Line ${lineNum}: Boolean flags must have exactly 2 variations`);
+    if (flag.kind === "boolean" && flag.variations.length !== 2) {
+      errors.push(
+        `Line ${lineNum}: Boolean flags must have exactly 2 variations`,
+      );
     }
   }
-  
+
   return {
     valid: errors.length === 0,
-    errors
+    errors,
   };
 }
 
-export function convertToLaunchDarklyFlag(importFlag: ImportFlag): LaunchDarklyFlag {
+export function convertToLaunchDarklyFlag(
+  importFlag: ImportFlag,
+): LaunchDarklyFlag {
   const variations = importFlag.variations.map((v) => ({ value: v }));
-  
+
   // Find indices for default variations
-  const onIndex = importFlag.variations.findIndex((v) => 
-    importFlag.kind === 'json' ? JSON.stringify(v) === JSON.stringify(importFlag.defaultOnVariation) : v === importFlag.defaultOnVariation
+  const onIndex = importFlag.variations.findIndex((v) =>
+    importFlag.kind === "json"
+      ? JSON.stringify(v) === JSON.stringify(importFlag.defaultOnVariation)
+      : v === importFlag.defaultOnVariation
   );
-  const offIndex = importFlag.variations.findIndex((v) => 
-    importFlag.kind === 'json' ? JSON.stringify(v) === JSON.stringify(importFlag.defaultOffVariation) : v === importFlag.defaultOffVariation
+  const offIndex = importFlag.variations.findIndex((v) =>
+    importFlag.kind === "json"
+      ? JSON.stringify(v) === JSON.stringify(importFlag.defaultOffVariation)
+      : v === importFlag.defaultOffVariation
   );
-  
+
   if (onIndex === -1 || offIndex === -1) {
-    throw new Error(`Default variations not found in variations array for flag ${importFlag.key}`);
+    throw new Error(
+      `Default variations not found in variations array for flag ${importFlag.key}`,
+    );
   }
-  
+
   return {
     key: importFlag.key,
     name: importFlag.name || importFlag.key, // Ensure name is always present
@@ -657,9 +788,9 @@ export function convertToLaunchDarklyFlag(importFlag: ImportFlag): LaunchDarklyF
     variations,
     defaults: {
       onVariation: onIndex,
-      offVariation: offIndex
+      offVariation: offIndex,
     },
-    tags: importFlag.tags || []
+    tags: importFlag.tags || [],
   };
 }
 
@@ -667,33 +798,38 @@ export async function createFlagViaAPI(
   apiKey: string,
   domain: string,
   projectKey: string,
-  flag: LaunchDarklyFlag
+  flag: LaunchDarklyFlag,
 ): Promise<ImportResult> {
   const startTime = Date.now();
-  
+
   try {
-    const request = ldAPIPostRequest(apiKey, domain, `flags/${projectKey}`, flag as unknown as Record<string, unknown>);
+    const request = ldAPIPostRequest(
+      apiKey,
+      domain,
+      `flags/${projectKey}`,
+      flag as unknown as Record<string, unknown>,
+    );
     const response = await rateLimitRequest(request, "flags");
-    
+
     if (response.ok) {
       return {
         key: flag.key,
         success: true,
-        timing: Date.now() - startTime
+        timing: Date.now() - startTime,
       };
     } else {
       const errorText = await response.text();
       return {
         key: flag.key,
         success: false,
-        error: `HTTP ${response.status}: ${errorText}`
+        error: `HTTP ${response.status}: ${errorText}`,
       };
     }
   } catch (error) {
     return {
       key: flag.key,
       success: false,
-      error: error instanceof Error ? error.message : String(error)
+      error: error instanceof Error ? error.message : String(error),
     };
   }
 }
@@ -702,7 +838,7 @@ export async function upsertFlagViaAPI(
   apiKey: string,
   domain: string,
   projectKey: string,
-  flag: LaunchDarklyFlag
+  flag: LaunchDarklyFlag,
 ): Promise<ImportResult> {
   const startTime = Date.now();
 
@@ -724,28 +860,35 @@ export async function upsertFlagViaAPI(
         patches.push({ op: "replace", path: "/tags", value: flag.tags });
       }
 
-      const request = ldAPIPatchRequest(apiKey, domain, `flags/${projectKey}/${flag.key}`, patches);
+      const request = ldAPIPatchRequest(
+        apiKey,
+        domain,
+        `flags/${projectKey}/${flag.key}`,
+        patches,
+      );
       const response = await rateLimitRequest(request, "flags");
 
       if (response.ok) {
         return {
           key: flag.key,
           success: true,
-          timing: Date.now() - startTime
+          timing: Date.now() - startTime,
         };
       } else {
         const errorText = await response.text();
         return {
           key: flag.key,
           success: false,
-          error: `Upsert PATCH failed — HTTP ${response.status}: ${errorText}`
+          error: `Upsert PATCH failed — HTTP ${response.status}: ${errorText}`,
         };
       }
     } catch (error) {
       return {
         key: flag.key,
         success: false,
-        error: `Upsert PATCH error: ${error instanceof Error ? error.message : String(error)}`
+        error: `Upsert PATCH error: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
       };
     }
   }
@@ -755,19 +898,20 @@ export async function upsertFlagViaAPI(
 }
 
 export function generateImportReport(results: ImportResult[]): ImportReport {
-  const successful = results.filter(r => r.success).length;
-  const failed = results.filter(r => !r.success).length;
+  const successful = results.filter((r) => r.success).length;
+  const failed = results.filter((r) => !r.success).length;
   const total = results.length;
-  
-  const summary = `Import completed: ${successful} successful, ${failed} failed out of ${total} total flags`;
-  
+
+  const summary =
+    `Import completed: ${successful} successful, ${failed} failed out of ${total} total flags`;
+
   return {
     totalFlags: total,
     successful,
     failed,
     results,
     summary,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   };
 }
 
@@ -791,11 +935,16 @@ export const checkViewExists = async (
   apiKey: string,
   domain: string,
   projectKey: string,
-  viewKey: string
+  viewKey: string,
 ): Promise<boolean> => {
   try {
-    const req = ldAPIRequest(apiKey, domain, `projects/${projectKey}/views/${viewKey}`, true);
-    const response = await rateLimitRequest(req, 'views');
+    const req = ldAPIRequest(
+      apiKey,
+      domain,
+      `projects/${projectKey}/views/${viewKey}`,
+      true,
+    );
+    const response = await rateLimitRequest(req, "views");
     return response.status === 200;
   } catch {
     return false;
@@ -805,17 +954,19 @@ export const checkViewExists = async (
 /**
  * Determines if a view creation response is successful
  */
-const isViewCreationSuccess = (status: number): boolean => 
+const isViewCreationSuccess = (status: number): boolean =>
   status === 200 || status === 201 || status === 409;
 
 /**
  * Creates an error result from a response
  */
-const createErrorResult = async (response: Response): Promise<ViewOperationResult> => {
+const createErrorResult = async (
+  response: Response,
+): Promise<ViewOperationResult> => {
   const errorText = await response.text();
   return {
     success: false,
-    error: `HTTP ${response.status}: ${errorText}`
+    error: `HTTP ${response.status}: ${errorText}`,
   };
 };
 
@@ -824,7 +975,7 @@ const createErrorResult = async (response: Response): Promise<ViewOperationResul
  */
 const createExceptionResult = (error: unknown): ViewOperationResult => ({
   success: false,
-  error: error instanceof Error ? error.message : String(error)
+  error: error instanceof Error ? error.message : String(error),
 });
 
 /**
@@ -834,12 +985,18 @@ export const createView = async (
   apiKey: string,
   domain: string,
   projectKey: string,
-  view: View
+  view: View,
 ): Promise<ViewOperationResult> => {
   try {
-    const req = ldAPIPostRequest(apiKey, domain, `projects/${projectKey}/views`, view as unknown as Record<string, unknown>, true);
-    const response = await rateLimitRequest(req, 'views');
-    
+    const req = ldAPIPostRequest(
+      apiKey,
+      domain,
+      `projects/${projectKey}/views`,
+      view as unknown as Record<string, unknown>,
+      true,
+    );
+    const response = await rateLimitRequest(req, "views");
+
     return isViewCreationSuccess(response.status)
       ? { success: true }
       : await createErrorResult(response);
@@ -851,7 +1008,7 @@ export const createView = async (
 /**
  * Extracts views from API response data
  */
-const extractViewsFromResponse = (data: { items?: View[] }): View[] => 
+const extractViewsFromResponse = (data: { items?: View[] }): View[] =>
   data.items || [];
 
 /**
@@ -860,12 +1017,17 @@ const extractViewsFromResponse = (data: { items?: View[] }): View[] =>
 export const getViewsFromProject = async (
   apiKey: string,
   domain: string,
-  projectKey: string
+  projectKey: string,
 ): Promise<View[]> => {
   try {
-    const req = ldAPIRequest(apiKey, domain, `projects/${projectKey}/views`, true);
-    const response = await rateLimitRequest(req, 'views');
-    
+    const req = ldAPIRequest(
+      apiKey,
+      domain,
+      `projects/${projectKey}/views`,
+      true,
+    );
+    const response = await rateLimitRequest(req, "views");
+
     if (response.status === 200) {
       const data = await response.json();
       return extractViewsFromResponse(data);
@@ -873,7 +1035,7 @@ export const getViewsFromProject = async (
     return [];
   } catch (error) {
     console.log(Colors.yellow(
-      `Warning: Could not fetch views from project ${projectKey}: ${error}`
+      `Warning: Could not fetch views from project ${projectKey}: ${error}`,
     ));
     return [];
   }
@@ -884,7 +1046,7 @@ export const getViewsFromProject = async (
 export interface ConflictResolution {
   originalKey: string;
   resolvedKey: string;
-  resourceType: 'flag' | 'segment' | 'project';
+  resourceType: "flag" | "segment" | "project";
   conflictPrefix: string;
 }
 
@@ -893,13 +1055,17 @@ type ConflictsByType = Record<string, number>;
 /**
  * Applies a prefix to a resource key
  */
-export const applyConflictPrefix = (originalKey: string, prefix: string): string =>
-  `${prefix}${originalKey}`;
+export const applyConflictPrefix = (
+  originalKey: string,
+  prefix: string,
+): string => `${prefix}${originalKey}`;
 
 /**
  * Groups conflicts by resource type
  */
-const groupConflictsByType = (resolutions: ConflictResolution[]): ConflictsByType =>
+const groupConflictsByType = (
+  resolutions: ConflictResolution[],
+): ConflictsByType =>
   resolutions.reduce((acc, r) => {
     acc[r.resourceType] = (acc[r.resourceType] || 0) + 1;
     return acc;
@@ -921,11 +1087,11 @@ const formatResolutionLine = (r: ConflictResolution): string =>
  * Creates the header section of the conflict report
  */
 const createReportHeader = (totalCount: number): string[] => [
-  `\n${'='.repeat(60)}`,
+  `\n${"=".repeat(60)}`,
   `CONFLICT RESOLUTION REPORT`,
-  `${'='.repeat(60)}`,
+  `${"=".repeat(60)}`,
   `Total conflicts resolved: ${totalCount}`,
-  ``
+  ``,
 ];
 
 /**
@@ -934,15 +1100,17 @@ const createReportHeader = (totalCount: number): string[] => [
 const createByTypeSection = (byType: ConflictsByType): string[] => [
   `Conflicts by resource type:`,
   ...Object.entries(byType).map(formatTypeCountLine),
-  ``
+  ``,
 ];
 
 /**
  * Creates the resolutions list section
  */
-const createResolutionsSection = (resolutions: ConflictResolution[]): string[] => [
+const createResolutionsSection = (
+  resolutions: ConflictResolution[],
+): string[] => [
   `Conflict resolutions:`,
-  ...resolutions.map(formatResolutionLine)
+  ...resolutions.map(formatResolutionLine),
 ];
 
 /**
@@ -954,15 +1122,15 @@ const generateConflictReport = (resolutions: ConflictResolution[]): string => {
   }
 
   const byType = groupConflictsByType(resolutions);
-  
+
   const reportLines = [
     ...createReportHeader(resolutions.length),
     ...createByTypeSection(byType),
     ...createResolutionsSection(resolutions),
-    `${'='.repeat(60)}\n`
+    `${"=".repeat(60)}\n`,
   ];
 
-  return reportLines.join('\n');
+  return reportLines.join("\n");
 };
 
 /**
@@ -1002,19 +1170,30 @@ export function stripRulesReferencingSegment(
   patches: Array<{ op: string; path: string; value?: unknown }>,
   envKey: string,
   segmentKey: string,
-): { patches: Array<{ op: string; path: string; value?: unknown }>; removed: string[]; unsafe: string[] } {
+): {
+  patches: Array<{ op: string; path: string; value?: unknown }>;
+  removed: string[];
+  unsafe: string[];
+} {
   const rulesPath = `environments/${envKey}/rules`;
   const removed: string[] = [];
   const unsafe: string[] = [];
-  const label = (rule: any, i: number) => rule?.description ? `rule "${rule.description}"` : `rule #${i + 1}`;
+  const label = (rule: any, i: number) =>
+    rule?.description ? `rule "${rule.description}"` : `rule #${i + 1}`;
   const out = patches.map((p) => {
-    if (p.path.replace(/^\//, "") !== rulesPath || !Array.isArray(p.value)) return p;
+    if (p.path.replace(/^\//, "") !== rulesPath || !Array.isArray(p.value)) {
+      return p;
+    }
     const kept = (p.value as any[]).filter((rule, i) => {
       const clauses: any[] = rule?.clauses ?? [];
-      const referencing = clauses.filter((c) => c?.op === "segmentMatch" && Array.isArray(c.values) && c.values.includes(segmentKey));
+      const referencing = clauses.filter((c) =>
+        c?.op === "segmentMatch" && Array.isArray(c.values) &&
+        c.values.includes(segmentKey)
+      );
       if (referencing.length === 0) return true;
       const safe = referencing.every((c) => !c.negate && c.values.length === 1);
-      if (safe) removed.push(label(rule, i)); else unsafe.push(label(rule, i));
+      if (safe) removed.push(label(rule, i));
+      else unsafe.push(label(rule, i));
       return !safe;
     });
     return { ...p, value: kept };

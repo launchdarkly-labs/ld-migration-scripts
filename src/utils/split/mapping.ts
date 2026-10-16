@@ -21,7 +21,6 @@ import type {
   SplitRuleBasedSegment,
   SplitSegment,
   SplitTrafficType,
-  SplitTreatment,
 } from "./types.ts";
 
 // ==================== Fidelity Notes ====================
@@ -45,7 +44,13 @@ const note = (
   item: string,
   message: string,
   splitFragment?: unknown,
-): Note => ({ level, area, item, message, ...(splitFragment !== undefined && { splitFragment }) });
+): Note => ({
+  level,
+  area,
+  item,
+  message,
+  ...(splitFragment !== undefined && { splitFragment }),
+});
 
 // ==================== LD payload shapes ====================
 
@@ -151,9 +156,15 @@ export const USER_CONTEXT_KIND = "user";
  * Case is preserved by default because Split flag names are case-sensitive
  * code identifiers; pass lowercase=true for env/context-kind keys.
  */
-export function sanitizeKey(name: string, opts: { lowercase?: boolean } = {}): string {
+export function sanitizeKey(
+  name: string,
+  opts: { lowercase?: boolean } = {},
+): string {
   let key = opts.lowercase ? name.toLowerCase() : name;
-  key = key.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-{2,}/g, "-").replace(/^[-._]+|[-._]+$/g, "");
+  key = key.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-{2,}/g, "-").replace(
+    /^[-._]+|[-._]+$/g,
+    "",
+  );
   if (key.length === 0) key = "unnamed";
   return key.slice(0, 256);
 }
@@ -183,7 +194,10 @@ export class KeyRegistry {
 
 /** LD tag names may include only letters, numbers, '.', '_', and '-'. */
 export function sanitizeTag(tag: string): string {
-  return tag.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-{2,}/g, "-").replace(/^-+|-+$/g, "");
+  return tag.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/-{2,}/g, "-").replace(
+    /^-+|-+$/g,
+    "",
+  );
 }
 
 // ==================== Context kinds ====================
@@ -193,7 +207,11 @@ const RESERVED_CONTEXT_KINDS = new Set(["kind", "multi"]);
 
 export function mapTrafficTypes(
   trafficTypes: SplitTrafficType[],
-): { contextKinds: LDContextKind[]; kindByTrafficType: Map<string, string>; notes: Note[] } {
+): {
+  contextKinds: LDContextKind[];
+  kindByTrafficType: Map<string, string>;
+  notes: Note[];
+} {
   const notes: Note[] = [];
   const contextKinds: LDContextKind[] = [];
   const kindByTrafficType = new Map<string, string>();
@@ -202,7 +220,14 @@ export function mapTrafficTypes(
   for (const tt of trafficTypes) {
     if (tt.name.toLowerCase() === USER_CONTEXT_KIND) {
       kindByTrafficType.set(tt.name, USER_CONTEXT_KIND);
-      notes.push(note("FULL", "context-kind", tt.name, `Mapped to LD's built-in "user" context kind`));
+      notes.push(
+        note(
+          "FULL",
+          "context-kind",
+          tt.name,
+          `Mapped to LD's built-in "user" context kind`,
+        ),
+      );
       continue;
     }
     let key = registry.keyFor(tt.name);
@@ -221,7 +246,14 @@ export function mapTrafficTypes(
       name: tt.name,
       description: `Migrated from Split traffic type "${tt.name}"`,
     });
-    notes.push(note("FULL", "context-kind", tt.name, `Mapped to LD context kind "${key}"`));
+    notes.push(
+      note(
+        "FULL",
+        "context-kind",
+        tt.name,
+        `Mapped to LD context kind "${key}"`,
+      ),
+    );
   }
 
   return { contextKinds, kindByTrafficType, notes };
@@ -260,14 +292,20 @@ export function decideVariations(
 ): VariationDecision {
   const notes: Note[] = [];
   const treatmentOrder: string[] = [];
-  const configByTreatment = new Map<string, { value: unknown; envName: string }>();
+  const configByTreatment = new Map<
+    string,
+    { value: unknown; envName: string }
+  >();
   let hasAnyConfig = false;
 
   for (const def of defsInPriorityOrder) {
     const envName = def.environment?.name ?? "?";
     for (const t of def.treatments ?? []) {
       if (!treatmentOrder.includes(t.name)) treatmentOrder.push(t.name);
-      if (t.configurations !== undefined && t.configurations !== null && t.configurations !== "") {
+      if (
+        t.configurations !== undefined && t.configurations !== null &&
+        t.configurations !== ""
+      ) {
         hasAnyConfig = true;
         const parsed = parseConfiguration(t.configurations);
         const existing = configByTreatment.get(t.name);
@@ -299,7 +337,10 @@ export function decideVariations(
   if (isPlainOnOff) {
     return {
       kind: "boolean",
-      variations: treatmentOrder.map((name) => ({ value: name === "on", name })),
+      variations: treatmentOrder.map((name) => ({
+        value: name === "on",
+        name,
+      })),
       indexByTreatment,
       notes,
     };
@@ -316,7 +357,10 @@ export function decideVariations(
     return {
       kind: "multivariate",
       variations: treatmentOrder.map((name) => ({
-        value: { treatment: name, config: configByTreatment.get(name)?.value ?? null },
+        value: {
+          treatment: name,
+          config: configByTreatment.get(name)?.value ?? null,
+        },
         name,
       })),
       indexByTreatment,
@@ -383,7 +427,11 @@ function mapMatcherPositive(
   // Split matches against the customer key when no attribute is set.
   const attr = m.attribute && m.attribute.length > 0 ? m.attribute : "key";
   const notes: Note[] = [];
-  const ok = (clauses: LDClause[]): MatcherResult => ({ ok: true, clauses, notes });
+  const ok = (clauses: LDClause[]): MatcherResult => ({
+    ok: true,
+    clauses,
+    notes,
+  });
 
   switch (m.type) {
     // ---- Everyone ----
@@ -431,7 +479,9 @@ function mapMatcherPositive(
     case "ANY_OF_SET":
       return ok([clause(attr, "in", m.strings ?? [], contextKind)]);
     case "ALL_OF_SET":
-      return ok((m.strings ?? []).map((s) => clause(attr, "in", [s], contextKind)));
+      return ok(
+        (m.strings ?? []).map((s) => clause(attr, "in", [s], contextKind)),
+      );
     case "EQUAL_SET":
       return {
         ok: false,
@@ -487,23 +537,35 @@ function mapMatcherPositive(
     case "EQUAL_TO_SEMVER":
       return ok([clause(attr, "semVerEqual", [m.string], contextKind)]);
     case "GREATER_THAN_OR_EQUAL_TO_SEMVER":
-      return ok([clause(attr, "semVerLessThan", [m.string], contextKind, true)]);
+      return ok([
+        clause(attr, "semVerLessThan", [m.string], contextKind, true),
+      ]);
     case "LESS_THAN_OR_EQUAL_TO_SEMVER":
-      return ok([clause(attr, "semVerGreaterThan", [m.string], contextKind, true)]);
+      return ok([
+        clause(attr, "semVerGreaterThan", [m.string], contextKind, true),
+      ]);
     case "BETWEEN_SEMVER":
       return ok([
         clause(attr, "semVerLessThan", [m.between?.from], contextKind, true),
         clause(attr, "semVerGreaterThan", [m.between?.to], contextKind, true),
       ]);
     case "IN_LIST_SEMVER":
-      return ok([clause(attr, "semVerEqual", m.strings ?? (m.string ? [m.string] : []), contextKind)]);
+      return ok([
+        clause(
+          attr,
+          "semVerEqual",
+          m.strings ?? (m.string ? [m.string] : []),
+          contextKind,
+        ),
+      ]);
 
     // ---- Segments ----
     case "IN_SEGMENT":
     case "IN_LARGE_SEGMENT":
     case "IN_RULE_BASED_SEGMENT": {
       const segmentName = m.string ?? "";
-      const segmentKey = ctx.segmentKeyByName.get(segmentName) ?? sanitizeKey(segmentName);
+      const segmentKey = ctx.segmentKeyByName.get(segmentName) ??
+        sanitizeKey(segmentName);
       if (!ctx.segmentKeyByName.has(segmentName)) {
         notes.push(note(
           "PARTIAL",
@@ -523,8 +585,7 @@ function mapMatcherPositive(
       return {
         ok: false,
         level: "MANUAL",
-        reason:
-          `IN_SPLIT (depends on flag "${m.depends?.splitName}" serving ` +
+        reason: `IN_SPLIT (depends on flag "${m.depends?.splitName}" serving ` +
           `"${m.depends?.treatment}") cannot be expressed as an LD clause in this rule shape; ` +
           `recreate as a prerequisite or restructure the flag`,
       };
@@ -538,7 +599,10 @@ function mapMatcherPositive(
   }
 }
 
-export const segmentMatchClause = (segmentKey: string, negate = false): LDClause => ({
+export const segmentMatchClause = (
+  segmentKey: string,
+  negate = false,
+): LDClause => ({
   attribute: "segmentMatch",
   op: "segmentMatch",
   values: [segmentKey],
@@ -556,7 +620,10 @@ function mapMatcherToGroups(
   contextKind: string,
   ctx: MappingContext,
   item: string,
-): { groups: LDClause[][]; notes: Note[] } | { error: string; level: NoteLevel } {
+): { groups: LDClause[][]; notes: Note[] } | {
+  error: string;
+  level: NoteLevel;
+} {
   const result = mapMatcherPositive(m, contextKind, ctx, item);
   if (!result.ok) return { error: result.reason, level: result.level };
 
@@ -607,20 +674,30 @@ function bucketsToOutcome(
   if (sum !== 100_000) {
     // Prefer assigning the remainder to the default treatment (Split serves
     // it to unallocated traffic), else adjust the largest bucket.
-    const defaultIdx = defaultTreatment !== undefined ? indexByTreatment.get(defaultTreatment) : undefined;
-    let target = defaultIdx !== undefined ? weights.find((w) => w.variation === defaultIdx) : undefined;
+    const defaultIdx = defaultTreatment !== undefined
+      ? indexByTreatment.get(defaultTreatment)
+      : undefined;
+    let target = defaultIdx !== undefined
+      ? weights.find((w) => w.variation === defaultIdx)
+      : undefined;
     if (!target && defaultIdx !== undefined && sum < 100_000) {
       target = { variation: defaultIdx, weight: 0 };
       weights.push(target);
     }
-    if (!target) target = weights.reduce((a, b) => (a.weight >= b.weight ? a : b));
+    if (!target) {
+      target = weights.reduce((a, b) => (a.weight >= b.weight ? a : b));
+    }
     target.weight = Math.max(0, target.weight + (100_000 - sum));
     notes.push(note(
       "PARTIAL",
       "rule",
       item,
-      `Bucket sizes summed to ${sum / 1000}% in Split; normalized to 100% by adjusting ` +
-        `the ${defaultIdx !== undefined ? "default treatment" : "largest"} bucket`,
+      `Bucket sizes summed to ${
+        sum / 1000
+      }% in Split; normalized to 100% by adjusting ` +
+        `the ${
+          defaultIdx !== undefined ? "default treatment" : "largest"
+        } bucket`,
     ));
   }
 
@@ -639,7 +716,15 @@ interface RuleMappingInput {
 
 /** Maps one Split rule to 1..N adjacent LD rules (N > 1 when OR-expansion applies). */
 function mapRule(input: RuleMappingInput): { rules: LDRule[]; notes: Note[] } {
-  const { rule, ruleIndex, contextKind, indexByTreatment, defaultTreatment, ctx, item } = input;
+  const {
+    rule,
+    ruleIndex,
+    contextKind,
+    indexByTreatment,
+    defaultTreatment,
+    ctx,
+    item,
+  } = input;
   const notes: Note[] = [];
 
   // Cross-product of per-matcher OR-groups → one LD rule per combination.
@@ -665,7 +750,9 @@ function mapRule(input: RuleMappingInput): { rules: LDRule[]; notes: Note[] } {
         "MANUAL",
         "rule",
         item,
-        `Rule #${ruleIndex + 1} skipped: negated matchers require OR logic that expands to ` +
+        `Rule #${
+          ruleIndex + 1
+        } skipped: negated matchers require OR logic that expands to ` +
           `more than ${MAX_RULE_EXPANSION} LD rules — restructure manually`,
         rule,
       ));
@@ -705,7 +792,9 @@ function mapRule(input: RuleMappingInput): { rules: LDRule[]; notes: Note[] } {
   const expanded = combinations.length > 1;
   const rules = combinations.map((clauses, i) => ({
     ...(expanded && {
-      description: `Split rule #${ruleIndex + 1} (OR expansion ${i + 1}/${combinations.length})`,
+      description: `Split rule #${ruleIndex + 1} (OR expansion ${
+        i + 1
+      }/${combinations.length})`,
     }),
     clauses,
     ...outcome,
@@ -728,17 +817,25 @@ export interface EnvMappingResult {
  */
 function tryPrerequisiteShape(
   def: SplitFlagDefinition,
-): { depends: { splitName: string; treatment: string }; buckets: SplitBucket[] } | null {
+):
+  | {
+    depends: { splitName: string; treatment: string };
+    buckets: SplitBucket[];
+  }
+  | null {
   const rules = def.rules ?? [];
   if (rules.length !== 1) return null;
   const matchers = rules[0].condition?.matchers ?? [];
   if (matchers.length !== 1) return null;
   const m = matchers[0];
-  if (m.type !== "IN_SPLIT" || m.negate || (m.attribute && m.attribute.length > 0)) return null;
+  if (
+    m.type !== "IN_SPLIT" || m.negate || (m.attribute && m.attribute.length > 0)
+  ) return null;
   if (!m.depends?.splitName || !m.depends?.treatment) return null;
   const dr = def.defaultRule ?? [];
   const servesDefault = dr.length === 0 ||
-    (dr.length === 1 && dr[0].treatment === def.defaultTreatment && dr[0].size === 100);
+    (dr.length === 1 && dr[0].treatment === def.defaultTreatment &&
+      dr[0].size === 100);
   if (!servesDefault) return null;
   return { depends: m.depends, buckets: rules[0].buckets ?? [] };
 }
@@ -753,7 +850,8 @@ export function mapEnvironment(
   const notes: Note[] = [];
   const item = `${def.name} (${envLabel})`;
   const trafficTypeName = def.trafficType?.name ?? USER_CONTEXT_KIND;
-  const contextKind = ctx.kindByTrafficType.get(trafficTypeName) ?? USER_CONTEXT_KIND;
+  const contextKind = ctx.kindByTrafficType.get(trafficTypeName) ??
+    USER_CONTEXT_KIND;
   const { indexByTreatment } = decision;
 
   const offVariation = indexByTreatment.get(def.defaultTreatment) ?? 0;
@@ -847,9 +945,11 @@ export function mapEnvironment(
     const variation = indexByTreatment.get(treatment.name);
     if (variation === undefined) continue;
     for (const segmentName of treatment.segments ?? []) {
-      const segmentKey = ctx.segmentKeyByName.get(segmentName) ?? sanitizeKey(segmentName);
+      const segmentKey = ctx.segmentKeyByName.get(segmentName) ??
+        sanitizeKey(segmentName);
       segmentRules.push({
-        description: `Split treatment "${treatment.name}" segment targeting: ${segmentName}`,
+        description:
+          `Split treatment "${treatment.name}" segment targeting: ${segmentName}`,
         clauses: [segmentMatchClause(segmentKey)],
         variation,
         trackEvents: false,
@@ -947,7 +1047,10 @@ function buildTargets(
   }
 
   if (byVariation.size === 0) return {};
-  const entries = [...byVariation.entries()].map(([variation, values]) => ({ values, variation }));
+  const entries = [...byVariation.entries()].map(([variation, values]) => ({
+    values,
+    variation,
+  }));
   if (contextKind === USER_CONTEXT_KIND) {
     return { targets: entries };
   }
@@ -973,8 +1076,11 @@ export interface FlagMappingInput {
   flagSetNames?: string[];
 }
 
-export function mapFlag(input: FlagMappingInput): { flag: LDFlagPayload; notes: Note[] } {
-  const { meta, splitName, flagKey, defsByLdEnv, envPriority, decision, ctx } = input;
+export function mapFlag(
+  input: FlagMappingInput,
+): { flag: LDFlagPayload; notes: Note[] } {
+  const { meta, splitName, flagKey, defsByLdEnv, envPriority, decision, ctx } =
+    input;
   const notes: Note[] = [...decision.notes];
 
   // Tags: Split tags + flag sets (LD tags forbid ':') + extra tags.
@@ -989,11 +1095,14 @@ export function mapFlag(input: FlagMappingInput): { flag: LDFlagPayload; notes: 
 
   // Defaults for environments created later: off = priority env's default
   // treatment; on = its fallthrough treatment when fixed, else variation 0.
-  const priorityDef = envPriority.map((e) => defsByLdEnv[e]).find((d) => d !== undefined);
+  const priorityDef = envPriority.map((e) => defsByLdEnv[e]).find((d) =>
+    d !== undefined
+  );
   let defaultOff = 0;
   let defaultOn = 0;
   if (priorityDef) {
-    defaultOff = decision.indexByTreatment.get(priorityDef.defaultTreatment) ?? 0;
+    defaultOff = decision.indexByTreatment.get(priorityDef.defaultTreatment) ??
+      0;
     const dr = priorityDef.defaultRule ?? [];
     if (dr.length === 1 && dr[0].size === 100) {
       defaultOn = decision.indexByTreatment.get(dr[0].treatment) ?? 0;
@@ -1011,7 +1120,10 @@ export function mapFlag(input: FlagMappingInput): { flag: LDFlagPayload; notes: 
     // record. (A genuinely rule-less Split env produces nothing here, as it
     // should.)
     const srcRuleCount = def.rules?.length ?? 0;
-    if (srcRuleCount > 0 && mapped.envConfig.rules.length === 0 && mapped.notes.length === 0) {
+    if (
+      srcRuleCount > 0 && mapped.envConfig.rules.length === 0 &&
+      mapped.notes.length === 0
+    ) {
       notes.push({
         level: "PARTIAL",
         area: "flag",
@@ -1060,7 +1172,8 @@ export function mapStandardSegment(
   const { meta, splitName, segmentKey, keys, ctx } = input;
   const notes: Note[] = [];
   const trafficTypeName = meta?.trafficType?.name ?? USER_CONTEXT_KIND;
-  const contextKind = ctx.kindByTrafficType.get(trafficTypeName) ?? USER_CONTEXT_KIND;
+  const contextKind = ctx.kindByTrafficType.get(trafficTypeName) ??
+    USER_CONTEXT_KIND;
 
   const tags = new Set<string>((input.extraTags ?? []).map(sanitizeTag));
   for (const t of meta?.tags ?? []) {
@@ -1083,16 +1196,31 @@ export function mapStandardSegment(
         `for standard segments; upgraded to a big (unbounded) segment with CSV member import`,
     ));
     return {
-      segment: { ...base, unbounded: true, unboundedContextKind: contextKind, _importKeys: keys },
+      segment: {
+        ...base,
+        unbounded: true,
+        unboundedContextKind: contextKind,
+        _importKeys: keys,
+      },
       notes,
     };
   }
 
-  notes.push(note("FULL", "segment", splitName, `Mapped with ${keys.length} included key(s)`));
+  notes.push(
+    note(
+      "FULL",
+      "segment",
+      splitName,
+      `Mapped with ${keys.length} included key(s)`,
+    ),
+  );
   if (contextKind === USER_CONTEXT_KIND) {
     return { segment: { ...base, included: keys }, notes };
   }
-  return { segment: { ...base, includedContexts: [{ contextKind, values: keys }] }, notes };
+  return {
+    segment: { ...base, includedContexts: [{ contextKind, values: keys }] },
+    notes,
+  };
 }
 
 // ---- Rule-based segments ----
@@ -1136,12 +1264,15 @@ export function mapRuleBasedSegment(
   const notes: Note[] = [];
   const item = rbs.name;
   const trafficTypeName = rbs.trafficType?.name ?? USER_CONTEXT_KIND;
-  const contextKind = ctx.kindByTrafficType.get(trafficTypeName) ?? USER_CONTEXT_KIND;
+  const contextKind = ctx.kindByTrafficType.get(trafficTypeName) ??
+    USER_CONTEXT_KIND;
 
   const rules: Array<{ clauses: LDClause[] }> = [];
   for (const [i, rule] of (rbs.rules ?? []).entries()) {
     const matchers: SplitRbsMatcher[] = rule.condition?.matchers ??
-      (rule.attribute !== undefined || rule.operator !== undefined ? [rule] : []);
+      (rule.attribute !== undefined || rule.operator !== undefined
+        ? [rule]
+        : []);
     const clauses: LDClause[] = [];
     let failed = false;
 
@@ -1149,9 +1280,22 @@ export function mapRuleBasedSegment(
       if (typeof m.type === "string") {
         // Flag-matcher dialect: reuse the flag matcher table, but reject
         // segmentMatch results (not allowed inside LD segment rules).
-        const mapped = mapMatcherToGroups(m as SplitMatcher, contextKind, ctx, item);
+        const mapped = mapMatcherToGroups(
+          m as SplitMatcher,
+          contextKind,
+          ctx,
+          item,
+        );
         if ("error" in mapped) {
-          notes.push(note(mapped.level, "segment", item, `Rule #${i + 1} skipped: ${mapped.error}`, rule));
+          notes.push(
+            note(
+              mapped.level,
+              "segment",
+              item,
+              `Rule #${i + 1} skipped: ${mapped.error}`,
+              rule,
+            ),
+          );
           failed = true;
           break;
         }
@@ -1160,7 +1304,9 @@ export function mapRuleBasedSegment(
             "MANUAL",
             "segment",
             item,
-            `Rule #${i + 1} skipped: negated multi-clause matcher needs OR expansion, ` +
+            `Rule #${
+              i + 1
+            } skipped: negated multi-clause matcher needs OR expansion, ` +
               `which LD segment rules cannot express`,
             rule,
           ));
@@ -1172,7 +1318,9 @@ export function mapRuleBasedSegment(
             "MANUAL",
             "segment",
             item,
-            `Rule #${i + 1} skipped: LD segment rules cannot reference other segments (segmentMatch)`,
+            `Rule #${
+              i + 1
+            } skipped: LD segment rules cannot reference other segments (segmentMatch)`,
             rule,
           ));
           failed = true;
@@ -1183,21 +1331,33 @@ export function mapRuleBasedSegment(
         continue;
       }
 
-      const operator = typeof m.operator === "string" ? m.operator.toLowerCase() : "";
+      const operator = typeof m.operator === "string"
+        ? m.operator.toLowerCase()
+        : "";
       const mapping = RBS_OPERATOR_MAP[operator];
       if (!mapping) {
         notes.push(note(
           "MANUAL",
           "segment",
           item,
-          `Rule #${i + 1} skipped: unmapped rule-based segment operator "${m.operator}"`,
+          `Rule #${
+            i + 1
+          } skipped: unmapped rule-based segment operator "${m.operator}"`,
           rule,
         ));
         failed = true;
         break;
       }
       const values = Array.isArray(m.value) ? m.value : [m.value];
-      clauses.push(clause(m.attribute ?? "key", mapping.op, values, contextKind, mapping.negate ?? false));
+      clauses.push(
+        clause(
+          m.attribute ?? "key",
+          mapping.op,
+          values,
+          contextKind,
+          mapping.negate ?? false,
+        ),
+      );
     }
 
     if (!failed && clauses.length > 0) rules.push({ clauses });
@@ -1267,7 +1427,9 @@ export interface LargeSegmentInput {
 export function mapLargeSegment(
   input: LargeSegmentInput,
 ): { segment: LDSegmentPayload; notes: Note[] } {
-  const contextKind = input.ctx.kindByTrafficType.get(input.trafficTypeName ?? USER_CONTEXT_KIND) ??
+  const contextKind = input.ctx.kindByTrafficType.get(
+    input.trafficTypeName ?? USER_CONTEXT_KIND,
+  ) ??
     USER_CONTEXT_KIND;
   const notes: Note[] = [
     note(
@@ -1284,7 +1446,8 @@ export function mapLargeSegment(
       key: input.segmentKey,
       name: input.name,
       description: input.description ?? "",
-      ...(input.extraTags?.length && { tags: input.extraTags.map(sanitizeTag) }),
+      ...(input.extraTags?.length &&
+        { tags: input.extraTags.map(sanitizeTag) }),
       unbounded: true,
       unboundedContextKind: contextKind,
     },

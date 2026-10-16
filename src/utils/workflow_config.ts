@@ -314,7 +314,9 @@ export interface MergeSelection {
 }
 
 /** The migrate step's resource selection; the workflow passes the same one to every project. */
-export function mergeSelectionFromConfig(config: WorkflowConfig): MergeSelection {
+export function mergeSelectionFromConfig(
+  config: WorkflowConfig,
+): MergeSelection {
   const m = config.migration ?? {};
   // Same normalization as the migrate step applies to the comma-joined CLI values: trimmed, blanks dropped
   const list = (values?: unknown[]): string[] | undefined => {
@@ -335,7 +337,12 @@ export function mergeSelectionFromConfig(config: WorkflowConfig): MergeSelection
   };
 }
 
-export type ConflictPolicy = "prompt" | "skip" | "overwrite" | "prefix" | "abort";
+export type ConflictPolicy =
+  | "prompt"
+  | "skip"
+  | "overwrite"
+  | "prefix"
+  | "abort";
 
 /**
  * The conflict policy the migrate step will apply for this config: migration.onConflict,
@@ -403,7 +410,9 @@ const listSegmentEnvs = async (
 ): Promise<string[]> => {
   const envs: string[] = [];
   try {
-    for await (const entry of Deno.readDir(`${baseDir}/${projectKey}/segments`)) {
+    for await (
+      const entry of Deno.readDir(`${baseDir}/${projectKey}/segments`)
+    ) {
       if (entry.isFile && entry.name.endsWith(".json")) {
         envs.push(entry.name.slice(0, -".json".length));
       }
@@ -431,12 +440,26 @@ const ownList = (record: Record<string, string[]>, key: string): string[] =>
   Object.hasOwn(record, key) ? record[key] : [];
 
 /** Own-property write: an environment key such as "__proto__" must become a data property, not set the prototype. */
-const setOwn = (record: Record<string, string[]>, key: string, value: string[]): void => {
-  Object.defineProperty(record, key, { value, enumerable: true, writable: true, configurable: true });
+const setOwn = (
+  record: Record<string, string[]>,
+  key: string,
+  value: string[],
+): void => {
+  Object.defineProperty(record, key, {
+    value,
+    enumerable: true,
+    writable: true,
+    configurable: true,
+  });
 };
 
-const selectFlagKeys = (keys: string[], selection: MergeSelection): string[] => {
-  const include = selection.includeFlags ? new Set(selection.includeFlags) : undefined;
+const selectFlagKeys = (
+  keys: string[],
+  selection: MergeSelection,
+): string[] => {
+  const include = selection.includeFlags
+    ? new Set(selection.includeFlags)
+    : undefined;
   const exclude = new Set(selection.excludeFlags ?? []);
   return keys.filter((k) => (!include || include.has(k)) && !exclude.has(k));
 };
@@ -552,11 +575,22 @@ export function simulatePrefixedMerge(
         taken.add(prefix + k);
       }
     }
-    return { collisions: [...collisions].sort(), unresolvable: [...unresolvable].sort() };
+    return {
+      collisions: [...collisions].sort(),
+      unresolvable: [...unresolvable].sort(),
+    };
   };
   return {
-    collisions: perEnvironment(current, earlier, (k, o) => replay(k, o).collisions),
-    unresolvable: perEnvironment(current, earlier, (k, o) => replay(k, o).unresolvable),
+    collisions: perEnvironment(
+      current,
+      earlier,
+      (k, o) => replay(k, o).collisions,
+    ),
+    unresolvable: perEnvironment(
+      current,
+      earlier,
+      (k, o) => replay(k, o).unresolvable,
+    ),
   };
 }
 

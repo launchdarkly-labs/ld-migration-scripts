@@ -1,7 +1,7 @@
 // deno-lint-ignore-file no-explicit-any
 /**
  * LaunchDarkly Migration Revert Tool
- * 
+ *
  * Safely reverts a failed or unwanted migration by:
  * 1. Finding flags created by the migration script
  * 2. Deleting any outstanding approval requests
@@ -13,8 +13,8 @@
 import yargs from "https://deno.land/x/yargs@v17.7.2-deno/deno.ts";
 import * as Colors from "https://deno.land/std@0.149.0/fmt/colors.ts";
 import { parse as parseYaml } from "https://deno.land/std@0.224.0/yaml/parse.ts";
-import { ldAPIRequest, ldAPIPostRequest, rateLimitRequest } from "../../utils/utils.ts";
-import { getDestinationApiKey, getSourceApiKey } from "../../utils/api_keys.ts";
+import { ldAPIRequest, rateLimitRequest } from "../../utils/utils.ts";
+import { getDestinationApiKey } from "../../utils/api_keys.ts";
 import { getAccountId } from "../../utils/account_guard.ts";
 import {
   assertManifestComplete,
@@ -98,13 +98,17 @@ const MIGRATION_DESCRIPTION_MARKER = "Migration of flag";
 /**
  * Loads migration config YAML file
  */
-const loadMigrationConfig = async (configPath: string): Promise<WorkflowConfig> => {
+const loadMigrationConfig = async (
+  configPath: string,
+): Promise<WorkflowConfig> => {
   try {
     const configContent = await Deno.readTextFile(configPath);
     return parseYaml(configContent) as WorkflowConfig;
   } catch (error) {
     console.log(Colors.red(
-      `Error loading config file: ${error instanceof Error ? error.message : String(error)}`
+      `Error loading config file: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
     ));
     Deno.exit(1);
   }
@@ -119,7 +123,7 @@ const loadMigrationConfig = async (configPath: string): Promise<WorkflowConfig> 
 export const buildRevertConfigs = (
   workflowConfig: WorkflowConfig,
   cliArgs: Arguments,
-  configPath: string
+  configPath: string,
 ): RevertConfig[] => {
   const cliProject = coerceProjectKey(cliArgs.project);
   const cliSourceProject = coerceProjectKey(cliArgs.sourceProject);
@@ -128,18 +132,19 @@ export const buildRevertConfigs = (
 
   // CLI flags win; unset flags (undefined) fall back to the revert: block
   const shared = {
-    domain: cliArgs.domain || workflowConfig.destination?.domain || "app.launchdarkly.com",
+    domain: cliArgs.domain || workflowConfig.destination?.domain ||
+      "app.launchdarkly.com",
     dryRun: cliArgs.dryRun ?? revert.dryRun ?? false,
     deleteViews: cliArgs.deleteViews ?? revert.deleteViews ?? false,
     viewKeys: cliArgs.views
       ? cliArgs.views.split(",")
       : revert.viewKeys?.length
-        ? revert.viewKeys
-        : workflowConfig.migration?.targetView
-          ? [workflowConfig.migration.targetView]
-          : undefined,
+      ? revert.viewKeys
+      : workflowConfig.migration?.targetView
+      ? [workflowConfig.migration.targetView]
+      : undefined,
     configFile: configPath,
-    useSourceData: cliArgs.useSourceData !== false // Default to true when config is provided
+    useSourceData: cliArgs.useSourceData !== false, // Default to true when config is provided
   };
 
   const multi = usesProjectKeysList(workflowConfig);
@@ -147,14 +152,25 @@ export const buildRevertConfigs = (
   const multiPairs = multi ? resolveProjectPairs(workflowConfig) : [];
   const withSiblings = (config: RevertConfig): RevertConfig => {
     const siblingSourceKeys = multiPairs
-      .filter(p => p.destination === config.projectKey && p.source !== config.sourceProjectKey)
-      .map(p => p.source);
-    return siblingSourceKeys.length > 0 ? { ...config, siblingSourceKeys } : config;
+      .filter((p) =>
+        p.destination === config.projectKey &&
+        p.source !== config.sourceProjectKey
+      )
+      .map((p) => p.source);
+    return siblingSourceKeys.length > 0
+      ? { ...config, siblingSourceKeys }
+      : config;
   };
 
   if (cliProject) {
     if (cliSourceProject) {
-      return [withSiblings({ ...shared, projectKey: cliProject, sourceProjectKey: cliSourceProject })];
+      return [
+        withSiblings({
+          ...shared,
+          projectKey: cliProject,
+          sourceProjectKey: cliSourceProject,
+        }),
+      ];
     }
     if (!multi) {
       return [{
@@ -164,23 +180,35 @@ export const buildRevertConfigs = (
       }];
     }
     // Every source mapped into this destination (several when projects were merged)
-    const mapped = multiPairs.filter(({ destination }) => destination === cliProject);
+    const mapped = multiPairs.filter(({ destination }) =>
+      destination === cliProject
+    );
     if (mapped.length > 0) {
       return mapped.map(({ source }) =>
-        withSiblings({ ...shared, projectKey: cliProject, sourceProjectKey: source })
+        withSiblings({
+          ...shared,
+          projectKey: cliProject,
+          sourceProjectKey: source,
+        })
       );
     }
-    return [{ ...shared, projectKey: cliProject, sourceProjectKey: cliProject }];
+    return [{
+      ...shared,
+      projectKey: cliProject,
+      sourceProjectKey: cliProject,
+    }];
   }
 
   const pairs = multi ? multiPairs : resolveProjectPairs(workflowConfig);
 
-  return pairs.map(({ source, destination }) => withSiblings({
-    ...shared,
-    projectKey: destination,
-    // -s without -p only makes sense for a single project
-    sourceProjectKey: (pairs.length === 1 && cliSourceProject) || source,
-  }));
+  return pairs.map(({ source, destination }) =>
+    withSiblings({
+      ...shared,
+      projectKey: destination,
+      // -s without -p only makes sense for a single project
+      sourceProjectKey: (pairs.length === 1 && cliSourceProject) || source,
+    })
+  );
 };
 
 /**
@@ -188,13 +216,17 @@ export const buildRevertConfigs = (
  */
 const extractRevertConfigFromWorkflow = async (
   configPath: string,
-  cliArgs: Arguments
+  cliArgs: Arguments,
 ): Promise<RevertConfig[]> => {
   const workflowConfig = await loadMigrationConfig(configPath);
   try {
     return buildRevertConfigs(workflowConfig, cliArgs, configPath);
   } catch (error) {
-    console.log(Colors.red(`Error: ${error instanceof Error ? error.message : String(error)}`));
+    console.log(
+      Colors.red(
+        `Error: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    );
     Deno.exit(1);
   }
 };
@@ -216,12 +248,27 @@ const parseArguments = async (): Promise<RevertConfig[]> => {
     .boolean("use-source-data")
     .describe("p", "Destination project key")
     .describe("s", "Source project key (used to identify migrated flags)")
-    .describe("f", "Path to migration workflow YAML config (auto-detects settings)")
+    .describe(
+      "f",
+      "Path to migration workflow YAML config (auto-detects settings)",
+    )
     .describe("d", "LaunchDarkly domain (default: app.launchdarkly.com)")
-    .describe("dry-run", "Preview actions without making changes (overrides revert.dryRun; --no-dry-run forces a real run)")
-    .describe("delete-views", "Delete views after unlinking flags (overrides revert.deleteViews)")
-    .describe("v", "Comma-separated list of view keys to process (overrides revert.viewKeys and migration.targetView)")
-    .describe("use-source-data", "Identify migrated flags from the sync manifest or extracted source data (default: true; --no-use-source-data scans the destination for description markers instead)")
+    .describe(
+      "dry-run",
+      "Preview actions without making changes (overrides revert.dryRun; --no-dry-run forces a real run)",
+    )
+    .describe(
+      "delete-views",
+      "Delete views after unlinking flags (overrides revert.deleteViews)",
+    )
+    .describe(
+      "v",
+      "Comma-separated list of view keys to process (overrides revert.viewKeys and migration.targetView)",
+    )
+    .describe(
+      "use-source-data",
+      "Identify migrated flags from the sync manifest or extracted source data (default: true; --no-use-source-data scans the destination for description markers instead)",
+    )
     .parse() as Arguments;
 
   // If config file provided, extract settings from it
@@ -244,7 +291,7 @@ const parseArguments = async (): Promise<RevertConfig[]> => {
     deleteViews: args.deleteViews || false,
     viewKeys: args.views ? args.views.split(",") : undefined,
     // Smart mode (sync manifest, else extracted data) applies without a config file too; it needs -s
-    useSourceData: args.useSourceData !== false
+    useSourceData: args.useSourceData !== false,
   }];
 };
 
@@ -275,14 +322,14 @@ const ldAPIPatchRequest = (
   domain: string,
   path: string,
   body: any,
-  useBetaVersion = false
+  useBetaVersion = false,
 ) => {
   const headers: Record<string, string> = {
     "Content-Type": "application/json; domain-model=launchdarkly.semanticpatch",
     "Authorization": apiKey,
     "User-Agent": "launchdarkly-migration-revert-script",
   };
-  
+
   if (useBetaVersion) {
     headers["LD-API-Version"] = "beta";
   }
@@ -303,28 +350,31 @@ const ldAPIPatchRequest = (
 /**
  * Loads flag list from extracted source data
  */
-const loadFlagListFromSourceData = async (sourceProjectKey: string): Promise<string[] | null> => {
-  const flagsPath = `./data/launchdarkly-migrations/source/project/${sourceProjectKey}/flags.json`;
-  
+const loadFlagListFromSourceData = async (
+  sourceProjectKey: string,
+): Promise<string[] | null> => {
+  const flagsPath =
+    `./data/launchdarkly-migrations/source/project/${sourceProjectKey}/flags.json`;
+
   try {
     const fileContent = await Deno.readTextFile(flagsPath);
     const flagsData = JSON.parse(fileContent);
-    
+
     // Extract flag keys from the items array
     if (flagsData.items && Array.isArray(flagsData.items)) {
       return flagsData.items.map((item: any) => item.key);
     }
-    
+
     // Fallback: if it's a direct array of keys
     if (Array.isArray(flagsData)) {
       return flagsData;
     }
-    
+
     console.log(Colors.yellow(`Warning: Unexpected format in ${flagsPath}`));
     return null;
   } catch (error) {
     console.log(Colors.yellow(
-      `Warning: Could not load source data from ${flagsPath}: ${error}`
+      `Warning: Could not load source data from ${flagsPath}: ${error}`,
     ));
     return null;
   }
@@ -355,23 +405,38 @@ let manifestIdentity: DestinationIdentity | undefined;
  */
 const loadMigratedFlagKeys = async (
   sourceProjectKey: string,
-  destProjectKey: string
+  destProjectKey: string,
 ): Promise<MigratedFlagKeys> => {
   const manifestPath = syncManifestPath(sourceProjectKey, destProjectKey);
-  const manifest = await readSyncManifest(sourceProjectKey, destProjectKey, undefined, manifestIdentity);
+  const manifest = await readSyncManifest(
+    sourceProjectKey,
+    destProjectKey,
+    undefined,
+    manifestIdentity,
+  );
   if (manifest) {
     assertManifestComplete(manifest, manifestPath);
     if (!manifest.destDomain) {
       console.log(Colors.yellow(
         `  Warning: ${manifestPath} comes from an older version and does not record which destination it was written for; ` +
-        `make sure this working directory was only ever used for ${manifestIdentity?.domain ?? "this destination"}`
+          `make sure this working directory was only ever used for ${
+            manifestIdentity?.domain ?? "this destination"
+          }`,
       ));
     }
     const keys = manifestDestinationFlagKeys(manifest);
-    console.log(Colors.gray(`  Using sync manifest ${manifestPath} (${keys.length} flag(s), destination keys)`));
+    console.log(
+      Colors.gray(
+        `  Using sync manifest ${manifestPath} (${keys.length} flag(s), destination keys)`,
+      ),
+    );
     return { project: sourceProjectKey, keys, source: "manifest" };
   }
-  console.log(Colors.gray(`  No sync manifest at ${manifestPath}; using the extracted source flag list`));
+  console.log(
+    Colors.gray(
+      `  No sync manifest at ${manifestPath}; using the extracted source flag list`,
+    ),
+  );
   const extracted = await loadFlagListFromSourceData(sourceProjectKey);
   return extracted
     ? { project: sourceProjectKey, keys: extracted, source: "extract" }
@@ -389,22 +454,26 @@ const loadMigratedFlagKeys = async (
  */
 export const selectRevertFlagKeys = (
   own: MigratedFlagKeys,
-  siblings: MigratedFlagKeys[]
+  siblings: MigratedFlagKeys[],
 ): { keys: string[]; ambiguous: string[] } => {
   const unique = [...new Set(own.keys)];
   if (own.source === "manifest" || siblings.length === 0) {
     return { keys: unique, ambiguous: [] };
   }
-  const unverifiable = siblings.filter(s => s.source !== "manifest").map(s => s.project);
+  const unverifiable = siblings.filter((s) => s.source !== "manifest").map(
+    (s) => s.project,
+  );
   if (unverifiable.length > 0) {
     throw new Error(
-      `Cannot attribute ${own.project}'s flags: no sync manifest for ${own.project}, and ${unverifiable.join(", ")} ` +
-      `migrated into the same destination without a sync manifest of their own (extracted keys are not destination ` +
-      `keys: a conflict prefix may have renamed them). Re-run those migrations to write their manifests, or revert ` +
-      `with --no-use-source-data after checking the flags by hand.`
+      `Cannot attribute ${own.project}'s flags: no sync manifest for ${own.project}, and ${
+        unverifiable.join(", ")
+      } ` +
+        `migrated into the same destination without a sync manifest of their own (extracted keys are not destination ` +
+        `keys: a conflict prefix may have renamed them). Re-run those migrations to write their manifests, or revert ` +
+        `with --no-use-source-data after checking the flags by hand.`,
     );
   }
-  const siblingKeys = new Set(siblings.flatMap(s => s.keys));
+  const siblingKeys = new Set(siblings.flatMap((s) => s.keys));
   const keys: string[] = [];
   const ambiguous: string[] = [];
   for (const key of unique) {
@@ -423,18 +492,25 @@ const fetchFlagByKey = async (
   apiKey: string,
   domain: string,
   projectKey: string,
-  flagKey: string
+  flagKey: string,
 ): Promise<Flag | "absent"> => {
   // Use beta API to get viewKeys field
-  const req = ldAPIRequest(apiKey, domain, `flags/${projectKey}/${flagKey}`, true);
-  const response = await rateLimitRequest(req, 'flags');
+  const req = ldAPIRequest(
+    apiKey,
+    domain,
+    `flags/${projectKey}/${flagKey}`,
+    true,
+  );
+  const response = await rateLimitRequest(req, "flags");
   if (response.status === 200) {
     return await response.json();
   }
   if (response.status === 404) {
     return "absent";
   }
-  throw new Error(`Could not read flag ${flagKey} in ${projectKey} (HTTP ${response.status}); stopping, nothing was changed for it`);
+  throw new Error(
+    `Could not read flag ${flagKey} in ${projectKey} (HTTP ${response.status}); stopping, nothing was changed for it`,
+  );
 };
 
 /**
@@ -445,12 +521,14 @@ const fetchFlagsByKeys = async (
   apiKey: string,
   domain: string,
   projectKey: string,
-  flagKeys: string[]
+  flagKeys: string[],
 ): Promise<{ flags: Flag[]; absent: string[] }> => {
-  console.log(Colors.gray(`  Fetching ${flagKeys.length} flag(s) from destination...`));
+  console.log(
+    Colors.gray(`  Fetching ${flagKeys.length} flag(s) from destination...`),
+  );
   const flags: Flag[] = [];
   const absent: string[] = [];
-  
+
   for (const flagKey of flagKeys) {
     const flag = await fetchFlagByKey(apiKey, domain, projectKey, flagKey);
     if (flag === "absent") {
@@ -459,7 +537,7 @@ const fetchFlagsByKeys = async (
       flags.push(flag);
     }
   }
-  
+
   return { flags, absent };
 };
 
@@ -468,13 +546,14 @@ const fetchFlagsByKeys = async (
  */
 const isMigrationFlag = (flag: Flag, sourceProjectKey?: string): boolean => {
   if (!flag.description) return false;
-  
+
   const hasMarker = flag.description.includes(MIGRATION_DESCRIPTION_MARKER);
-  
+
   if (sourceProjectKey) {
-    return hasMarker && flag.description.includes(`from project "${sourceProjectKey}"`);
+    return hasMarker &&
+      flag.description.includes(`from project "${sourceProjectKey}"`);
   }
-  
+
   return hasMarker;
 };
 
@@ -484,9 +563,9 @@ const isMigrationFlag = (flag: Flag, sourceProjectKey?: string): boolean => {
  */
 export const findRemainingSiblingFlagKeys = (
   siblingFlagKeys: string[],
-  revertingFlagKeys: Set<string>
+  revertingFlagKeys: Set<string>,
 ): string[] =>
-  [...new Set(siblingFlagKeys)].filter(key => !revertingFlagKeys.has(key));
+  [...new Set(siblingFlagKeys)].filter((key) => !revertingFlagKeys.has(key));
 
 /**
  * Fetches all flags from a project
@@ -494,15 +573,15 @@ export const findRemainingSiblingFlagKeys = (
 const fetchAllFlags = async (
   apiKey: string,
   domain: string,
-  projectKey: string
+  projectKey: string,
 ): Promise<Flag[]> => {
   const req = ldAPIRequest(apiKey, domain, `flags/${projectKey}?limit=1000`);
-  const response = await rateLimitRequest(req, 'flags');
-  
+  const response = await rateLimitRequest(req, "flags");
+
   if (response.status !== 200) {
     throw new Error(`Failed to fetch flags: HTTP ${response.status}`);
   }
-  
+
   const data = await response.json();
   return data.items || [];
 };
@@ -510,8 +589,10 @@ const fetchAllFlags = async (
 /**
  * Filters flags to only those created by migration
  */
-const identifyMigrationFlags = (flags: Flag[], sourceProjectKey?: string): Flag[] =>
-  flags.filter(flag => isMigrationFlag(flag, sourceProjectKey));
+const identifyMigrationFlags = (
+  flags: Flag[],
+  sourceProjectKey?: string,
+): Flag[] => flags.filter((flag) => isMigrationFlag(flag, sourceProjectKey));
 
 /**
  * Smart flag discovery - uses source data when available
@@ -519,14 +600,27 @@ const identifyMigrationFlags = (flags: Flag[], sourceProjectKey?: string): Flag[
 const discoverMigrationFlags = async (
   apiKey: string,
   domain: string,
-  config: RevertConfig
-): Promise<{ flags: Flag[], stats: { checked: number, identified: number }, absent: string[] }> => {
+  config: RevertConfig,
+): Promise<
+  {
+    flags: Flag[];
+    stats: { checked: number; identified: number };
+    absent: string[];
+  }
+> => {
   // `absent`: manifest-recorded destination keys the destination confirmed are gone (e.g. a DELETE whose
   // response was lost on an earlier revert), so their entries can be retired like deleted ones
   // Strategy 1: Use the sync manifest or source data for a precise flag list (much faster!)
   if (config.useSourceData && config.sourceProjectKey) {
-    console.log(Colors.cyan("  Using the sync manifest / extracted source data for the flag list (smart mode)"));
-    const own = await loadMigratedFlagKeys(config.sourceProjectKey, config.projectKey);
+    console.log(
+      Colors.cyan(
+        "  Using the sync manifest / extracted source data for the flag list (smart mode)",
+      ),
+    );
+    const own = await loadMigratedFlagKeys(
+      config.sourceProjectKey,
+      config.projectKey,
+    );
     // Siblings only matter for raw source keys; manifest keys already are the destination keys
     const siblings: MigratedFlagKeys[] = [];
     if (own.source !== "manifest") {
@@ -534,36 +628,59 @@ const discoverMigrationFlags = async (
         siblings.push(await loadMigratedFlagKeys(sibling, config.projectKey));
       }
     }
-    const { keys: sourceFlags, ambiguous } = selectRevertFlagKeys(own, siblings);
+    const { keys: sourceFlags, ambiguous } = selectRevertFlagKeys(
+      own,
+      siblings,
+    );
     if (ambiguous.length > 0) {
       console.log(Colors.yellow(
-        `  ⚠ Leaving ${ambiguous.length} flag(s) in place: the sync manifests of ${config.siblingSourceKeys!.join(", ")} hold the same key(s), ` +
-        `and without a sync manifest for ${config.sourceProjectKey} they cannot be attributed to one source: ${ambiguous.join(", ")}`
+        `  ⚠ Leaving ${ambiguous.length} flag(s) in place: the sync manifests of ${
+          config.siblingSourceKeys!.join(", ")
+        } hold the same key(s), ` +
+          `and without a sync manifest for ${config.sourceProjectKey} they cannot be attributed to one source: ${
+            ambiguous.join(", ")
+          }`,
       ));
-      console.log(Colors.gray(`    Revert them by hand, or re-run after a migration has written ${syncManifestPath(config.sourceProjectKey, config.projectKey)}`));
+      console.log(
+        Colors.gray(
+          `    Revert them by hand, or re-run after a migration has written ${
+            syncManifestPath(config.sourceProjectKey, config.projectKey)
+          }`,
+        ),
+      );
     }
     if (own.source === "extract" && siblings.length > 0) {
       console.log(Colors.gray(
-        `  Note: flags ${config.sourceProjectKey} migrated under a conflict prefix are not detected without its sync manifest`
+        `  Note: flags ${config.sourceProjectKey} migrated under a conflict prefix are not detected without its sync manifest`,
       ));
     }
-    
+
     if (sourceFlags.length > 0) {
-      console.log(Colors.gray(`  Found ${sourceFlags.length} flag(s) in source data`));
+      console.log(
+        Colors.gray(`  Found ${sourceFlags.length} flag(s) in source data`),
+      );
       console.log(Colors.gray(`  Checking which exist in destination...`));
-      
+
       const { flags: destinationFlags, absent } = await fetchFlagsByKeys(
         apiKey,
         domain,
         config.projectKey,
-        sourceFlags
+        sourceFlags,
       );
-      
-      console.log(Colors.gray(`  Found ${destinationFlags.length} matching flag(s) in destination`));
+
+      console.log(
+        Colors.gray(
+          `  Found ${destinationFlags.length} matching flag(s) in destination`,
+        ),
+      );
       if (own.source === "manifest" && absent.length > 0) {
-        console.log(Colors.gray(`  ${absent.length} recorded flag(s) no longer exist in the destination; their manifest entries are retired`));
+        console.log(
+          Colors.gray(
+            `  ${absent.length} recorded flag(s) no longer exist in the destination; their manifest entries are retired`,
+          ),
+        );
       }
-      
+
       let migrationFlags: Flag[];
       if (own.source === "manifest") {
         // Manifest keys are the destination keys this migration wrote: every fetched flag is one of its
@@ -571,50 +688,72 @@ const discoverMigrationFlags = async (
         migrationFlags = destinationFlags;
       } else {
         // Raw source keys: prefer flags carrying the migration marker in their description
-        migrationFlags = identifyMigrationFlags(destinationFlags, config.sourceProjectKey);
+        migrationFlags = identifyMigrationFlags(
+          destinationFlags,
+          config.sourceProjectKey,
+        );
         // If no flags found with description marker, assume all flags from source list are migration flags
         // This handles the case where the migration script doesn't add description markers
         if (migrationFlags.length === 0 && destinationFlags.length > 0) {
-          console.log(Colors.yellow(`  Note: No migration markers found in descriptions`));
-          console.log(Colors.cyan(`  Assuming all ${destinationFlags.length} flag(s) from source are migration flags`));
+          console.log(
+            Colors.yellow(`  Note: No migration markers found in descriptions`),
+          );
+          console.log(
+            Colors.cyan(
+              `  Assuming all ${destinationFlags.length} flag(s) from source are migration flags`,
+            ),
+          );
           migrationFlags = destinationFlags;
         }
       }
-      
+
       return {
         flags: migrationFlags,
         stats: {
           checked: sourceFlags.length,
-          identified: migrationFlags.length
+          identified: migrationFlags.length,
         },
         absent: own.source === "manifest" ? absent : [],
       };
     }
-    
+
     if (own.source === "manifest") {
       // An empty manifest is authoritative too (e.g. every flag was conflict-skipped): a destination-wide
       // scan could select marker-matching flags that this migration never wrote
-      console.log(Colors.yellow("  The sync manifest lists no flags for this source; nothing to revert"));
+      console.log(
+        Colors.yellow(
+          "  The sync manifest lists no flags for this source; nothing to revert",
+        ),
+      );
       return { flags: [], stats: { checked: 0, identified: 0 }, absent: [] };
     }
     if (ambiguous.length > 0) {
       // Every key was ambiguous: a full scan would only find marker-less flags, which could be the siblings'
       console.log(Colors.yellow("  No unambiguous flags to revert"));
-      return { flags: [], stats: { checked: own.keys.length, identified: 0 }, absent: [] };
+      return {
+        flags: [],
+        stats: { checked: own.keys.length, identified: 0 },
+        absent: [],
+      };
     }
-    console.log(Colors.yellow("  No source data found, falling back to full scan"));
+    console.log(
+      Colors.yellow("  No source data found, falling back to full scan"),
+    );
   }
-  
+
   // Strategy 2: Fetch all flags and filter (slower but works without source data)
   console.log(Colors.gray("  Fetching all flags from destination project..."));
   const allFlags = await fetchAllFlags(apiKey, domain, config.projectKey);
-  const migrationFlags = identifyMigrationFlags(allFlags, config.sourceProjectKey);
-  
+  const migrationFlags = identifyMigrationFlags(
+    allFlags,
+    config.sourceProjectKey,
+  );
+
   return {
     flags: migrationFlags,
     stats: {
       checked: allFlags.length,
-      identified: migrationFlags.length
+      identified: migrationFlags.length,
     },
     absent: [],
   };
@@ -630,33 +769,35 @@ const fetchFlagApprovalRequests = async (
   domain: string,
   projectKey: string,
   flagKey: string,
-  environments: string[]
+  environments: string[],
 ): Promise<ApprovalRequest[]> => {
   const allRequests: ApprovalRequest[] = [];
-  
+
   for (const env of environments) {
     try {
       const req = ldAPIRequest(
         apiKey,
         domain,
-        `projects/${projectKey}/flags/${flagKey}/environments/${env}/approval-requests`
+        `projects/${projectKey}/flags/${flagKey}/environments/${env}/approval-requests`,
       );
-      const response = await rateLimitRequest(req, 'approval-requests');
-      
+      const response = await rateLimitRequest(req, "approval-requests");
+
       if (response.status === 200) {
         const data = await response.json();
         const envRequests = (data.items || []).map((r: any) => ({
           ...r,
-          environment: env
+          environment: env,
         }));
         allRequests.push(...envRequests);
       }
-    } catch (error) {
+    } catch {
       // Environment might not exist or no permissions, continue
-      console.log(Colors.gray(`  Warning: Could not fetch approvals for ${env}`));
+      console.log(
+        Colors.gray(`  Warning: Could not fetch approvals for ${env}`),
+      );
     }
   }
-  
+
   return allRequests;
 };
 
@@ -670,20 +811,24 @@ const deleteApprovalRequest = async (
   flagKey: string,
   environment: string,
   approvalId: string,
-  dryRun: boolean
+  dryRun: boolean,
 ): Promise<boolean> => {
   if (dryRun) {
-    console.log(Colors.gray(`  [DRY RUN] Would delete approval ${approvalId} for ${environment}`));
+    console.log(
+      Colors.gray(
+        `  [DRY RUN] Would delete approval ${approvalId} for ${environment}`,
+      ),
+    );
     return true;
   }
-  
+
   const req = ldAPIDeleteRequest(
     apiKey,
     domain,
-    `projects/${projectKey}/flags/${flagKey}/environments/${environment}/approval-requests/${approvalId}`
+    `projects/${projectKey}/flags/${flagKey}/environments/${environment}/approval-requests/${approvalId}`,
   );
-  
-  const response = await rateLimitRequest(req, 'approval-requests');
+
+  const response = await rateLimitRequest(req, "approval-requests");
   return response.status === 204 || response.status === 200;
 };
 
@@ -696,10 +841,10 @@ const deleteAllApprovalRequests = async (
   projectKey: string,
   flagKey: string,
   approvals: ApprovalRequest[],
-  dryRun: boolean
+  dryRun: boolean,
 ): Promise<number> => {
   let deletedCount = 0;
-  
+
   for (const approval of approvals) {
     const success = await deleteApprovalRequest(
       apiKey,
@@ -708,14 +853,14 @@ const deleteAllApprovalRequests = async (
       flagKey,
       (approval as any).environment,
       approval._id,
-      dryRun
+      dryRun,
     );
-    
+
     if (success) {
       deletedCount++;
     }
   }
-  
+
   return deletedCount;
 };
 
@@ -727,12 +872,17 @@ const deleteAllApprovalRequests = async (
 const fetchProjectViews = async (
   apiKey: string,
   domain: string,
-  projectKey: string
+  projectKey: string,
 ): Promise<any[]> => {
   try {
-    const req = ldAPIRequest(apiKey, domain, `projects/${projectKey}/views`, true);
-    const response = await rateLimitRequest(req, 'views');
-    
+    const req = ldAPIRequest(
+      apiKey,
+      domain,
+      `projects/${projectKey}/views`,
+      true,
+    );
+    const response = await rateLimitRequest(req, "views");
+
     if (response.status === 200) {
       const data = await response.json();
       return data.items || [];
@@ -740,78 +890,8 @@ const fetchProjectViews = async (
   } catch (error) {
     console.log(Colors.yellow(`Warning: Could not fetch views: ${error}`));
   }
-  
-  return [];
-};
 
-/**
- * Fetches views linked to a flag
- */
-const fetchFlagViews = async (
-  apiKey: string,
-  domain: string,
-  projectKey: string,
-  flagKey: string,
-  debug: boolean = false
-): Promise<string[]> => {
-  try {
-    const req = ldAPIRequest(
-      apiKey,
-      domain,
-      `projects/${projectKey}/flags/${flagKey}/views`,
-      true  // Use beta API version
-    );
-    const response = await rateLimitRequest(req, 'flags');
-    
-    if (debug) {
-      console.log(Colors.gray(`      DEBUG: GET /api/v2/projects/${projectKey}/flags/${flagKey}/views -> ${response.status}`));
-    }
-    
-    if (response.status === 200) {
-      const data = await response.json();
-      if (debug) {
-        console.log(Colors.gray(`      DEBUG: Response has ${data.items?.length || 0} view(s): ${(data.items || []).map((v: any) => v.key).join(', ') || 'none'}`));
-      }
-      // Extract view keys from the response
-      return (data.items || []).map((item: any) => item.key);
-    } else if (debug) {
-      const errorText = await response.text();
-      console.log(Colors.yellow(`      DEBUG: Error - ${errorText}`));
-    }
-  } catch (error) {
-    if (debug) {
-      console.log(Colors.yellow(`      DEBUG: Exception - ${error}`));
-    }
-  }
-  
   return [];
-};
-
-/**
- * Finds flags linked to a view by checking each flag individually
- * This is a fallback when the /views/{viewKey}/linked/flags endpoint fails
- */
-const findFlagsLinkedToView = async (
-  apiKey: string,
-  domain: string,
-  projectKey: string,
-  viewKey: string,
-  flagKeys: string[]
-): Promise<string[]> => {
-  console.log(Colors.gray(`    Checking ${flagKeys.length} flag(s) for view links...`));
-  const linkedFlags: string[] = [];
-  
-  for (let i = 0; i < flagKeys.length; i++) {
-    const flagKey = flagKeys[i];
-    // Debug first 3 flags
-    const debug = i < 3;
-    const views = await fetchFlagViews(apiKey, domain, projectKey, flagKey, debug);
-    if (views.includes(viewKey)) {
-      linkedFlags.push(flagKey);
-    }
-  }
-  
-  return linkedFlags;
 };
 
 /**
@@ -823,21 +903,23 @@ const unlinkFlagFromView = async (
   projectKey: string,
   viewKey: string,
   flagKey: string,
-  dryRun: boolean
+  dryRun: boolean,
 ): Promise<boolean> => {
   if (dryRun) {
-    console.log(Colors.gray(`  [DRY RUN] Would unlink ${flagKey} from view ${viewKey}`));
+    console.log(
+      Colors.gray(`  [DRY RUN] Would unlink ${flagKey} from view ${viewKey}`),
+    );
     return true;
   }
-  
+
   try {
     const req = ldAPIDeleteRequest(
       apiKey,
       domain,
-      `projects/${projectKey}/views/${viewKey}/links/flag/${flagKey}`
+      `projects/${projectKey}/views/${viewKey}/links/flag/${flagKey}`,
     );
-    
-    const response = await rateLimitRequest(req, 'views');
+
+    const response = await rateLimitRequest(req, "views");
     return response.status === 204 || response.status === 200;
   } catch (error) {
     console.log(Colors.red(`  Error unlinking ${flagKey} from view: ${error}`));
@@ -854,10 +936,10 @@ const unlinkFlagsFromView = async (
   projectKey: string,
   viewKey: string,
   flagKeys: string[],
-  dryRun: boolean
+  dryRun: boolean,
 ): Promise<number> => {
   let unlinkedCount = 0;
-  
+
   for (const flagKey of flagKeys) {
     const success = await unlinkFlagFromView(
       apiKey,
@@ -865,14 +947,14 @@ const unlinkFlagsFromView = async (
       projectKey,
       viewKey,
       flagKey,
-      dryRun
+      dryRun,
     );
-    
+
     if (success) {
       unlinkedCount++;
     }
   }
-  
+
   return unlinkedCount;
 };
 
@@ -884,21 +966,21 @@ const deleteView = async (
   domain: string,
   projectKey: string,
   viewKey: string,
-  dryRun: boolean
+  dryRun: boolean,
 ): Promise<boolean> => {
   if (dryRun) {
     console.log(Colors.gray(`  [DRY RUN] Would delete view ${viewKey}`));
     return true;
   }
-  
+
   try {
     const req = ldAPIDeleteRequest(
       apiKey,
       domain,
-      `projects/${projectKey}/views/${viewKey}`
+      `projects/${projectKey}/views/${viewKey}`,
     );
-    
-    const response = await rateLimitRequest(req, 'views');
+
+    const response = await rateLimitRequest(req, "views");
     return response.status === 204 || response.status === 200;
   } catch (error) {
     console.log(Colors.red(`  Error deleting view ${viewKey}: ${error}`));
@@ -914,20 +996,26 @@ const deleteView = async (
 const fetchProjectEnvironments = async (
   apiKey: string,
   domain: string,
-  projectKey: string
+  projectKey: string,
 ): Promise<string[]> => {
   try {
-    const req = ldAPIRequest(apiKey, domain, `projects/${projectKey}/environments`);
-    const response = await rateLimitRequest(req, 'environments');
-    
+    const req = ldAPIRequest(
+      apiKey,
+      domain,
+      `projects/${projectKey}/environments`,
+    );
+    const response = await rateLimitRequest(req, "environments");
+
     if (response.status === 200) {
       const data = await response.json();
       return (data.items || []).map((env: any) => env.key);
     }
   } catch (error) {
-    console.log(Colors.yellow(`Warning: Could not fetch environments: ${error}`));
+    console.log(
+      Colors.yellow(`Warning: Could not fetch environments: ${error}`),
+    );
   }
-  
+
   return [];
 };
 
@@ -939,18 +1027,23 @@ const archiveFlag = async (
   domain: string,
   projectKey: string,
   flagKey: string,
-  dryRun: boolean
+  dryRun: boolean,
 ): Promise<boolean> => {
   if (dryRun) {
     console.log(Colors.gray(`  [DRY RUN] Would archive flag ${flagKey}`));
     return true;
   }
-  
+
   // ldAPIPatchRequest sends the semantic patch content type, so the body must use instructions
   const patch = { instructions: [{ kind: "archiveFlag" }] };
-  const req = ldAPIPatchRequest(apiKey, domain, `flags/${projectKey}/${flagKey}`, patch);
-  
-  const response = await rateLimitRequest(req, 'flags');
+  const req = ldAPIPatchRequest(
+    apiKey,
+    domain,
+    `flags/${projectKey}/${flagKey}`,
+    patch,
+  );
+
+  const response = await rateLimitRequest(req, "flags");
   return response.status >= 200 && response.status < 300;
 };
 
@@ -962,15 +1055,19 @@ const deleteFlag = async (
   domain: string,
   projectKey: string,
   flagKey: string,
-  dryRun: boolean
+  dryRun: boolean,
 ): Promise<boolean> => {
   if (dryRun) {
     console.log(Colors.gray(`  [DRY RUN] Would delete flag ${flagKey}`));
     return true;
   }
-  
-  const req = ldAPIDeleteRequest(apiKey, domain, `flags/${projectKey}/${flagKey}`);
-  const response = await rateLimitRequest(req, 'flags');
+
+  const req = ldAPIDeleteRequest(
+    apiKey,
+    domain,
+    `flags/${projectKey}/${flagKey}`,
+  );
+  const response = await rateLimitRequest(req, "flags");
   return response.status === 204 || response.status === 200;
 };
 
@@ -985,10 +1082,10 @@ const revertFlag = async (
   config: RevertConfig,
   flag: Flag,
   environments: string[],
-  stats: RevertStats
+  stats: RevertStats,
 ): Promise<boolean> => {
   console.log(Colors.cyan(`\n Processing flag: ${flag.key}`));
-  
+
   try {
     // 1. Delete approval requests
     const approvals = await fetchFlagApprovalRequests(
@@ -996,48 +1093,50 @@ const revertFlag = async (
       domain,
       config.projectKey,
       flag.key,
-      environments
+      environments,
     );
-    
+
     if (approvals.length > 0) {
-      console.log(Colors.gray(`  Found ${approvals.length} approval request(s)`));
+      console.log(
+        Colors.gray(`  Found ${approvals.length} approval request(s)`),
+      );
       const deleted = await deleteAllApprovalRequests(
         apiKey,
         domain,
         config.projectKey,
         flag.key,
         approvals,
-        config.dryRun || false
+        config.dryRun || false,
       );
       stats.approvalsDeleted += deleted;
       console.log(Colors.green(`  ✓ Deleted ${deleted} approval request(s)`));
     }
-    
+
     // 2. Archive flag
     const archived = await archiveFlag(
       apiKey,
       domain,
       config.projectKey,
       flag.key,
-      config.dryRun || false
+      config.dryRun || false,
     );
-    
+
     if (archived) {
       stats.flagsArchived++;
       console.log(Colors.green(`  ✓ Archived flag`));
     } else {
       console.log(Colors.yellow(`  ⚠ Could not archive flag`));
     }
-    
+
     // 3. Delete flag
     const deleted = await deleteFlag(
       apiKey,
       domain,
       config.projectKey,
       flag.key,
-      config.dryRun || false
+      config.dryRun || false,
     );
-    
+
     if (deleted) {
       stats.flagsDeleted++;
       console.log(Colors.green(`  ✓ Deleted flag`));
@@ -1067,21 +1166,38 @@ const revertFlag = async (
 const retireRevertedManifestEntries = async (
   config: RevertConfig,
   deletedKeys: Set<string>,
-  stats: RevertStats
+  stats: RevertStats,
 ): Promise<void> => {
-  if (config.dryRun || !config.sourceProjectKey || deletedKeys.size === 0) return;
+  if (config.dryRun || !config.sourceProjectKey || deletedKeys.size === 0) {
+    return;
+  }
   const path = syncManifestPath(config.sourceProjectKey, config.projectKey);
   try {
-    const manifest = await readSyncManifest(config.sourceProjectKey, config.projectKey, undefined, manifestIdentity);
+    const manifest = await readSyncManifest(
+      config.sourceProjectKey,
+      config.projectKey,
+      undefined,
+      manifestIdentity,
+    );
     if (!manifest) return;
     const updated = retireDeletedFlags(manifest, deletedKeys);
-    const retired = Object.keys(manifest.flags).length - Object.keys(updated.flags).length;
+    const retired = Object.keys(manifest.flags).length -
+      Object.keys(updated.flags).length;
     await Deno.writeTextFile(path, JSON.stringify(updated, null, 2));
-    console.log(Colors.gray(`  Sync manifest ${path}: ${retired} flag entr${retired === 1 ? "y" : "ies"} retired, ${Object.keys(updated.flags).length} kept`));
+    console.log(
+      Colors.gray(
+        `  Sync manifest ${path}: ${retired} flag entr${
+          retired === 1 ? "y" : "ies"
+        } retired, ${Object.keys(updated.flags).length} kept`,
+      ),
+    );
   } catch (error) {
     // Recorded as an error: a manifest that still lists deleted flags would let the next migration treat a
     // flag another source creates under one of those keys as its own, so the revert must not report success
-    const errorMsg = `Could not update ${path} after deleting flags (${error instanceof Error ? error.message : String(error)}); ` +
+    const errorMsg =
+      `Could not update ${path} after deleting flags (${
+        error instanceof Error ? error.message : String(error)
+      }); ` +
       `remove its entries for the deleted flags by hand before rerunning the migration`;
     stats.errors.push(errorMsg);
     console.log(Colors.red(`  ✗ ${errorMsg}`));
@@ -1096,23 +1212,25 @@ const revertViews = async (
   domain: string,
   config: RevertConfig,
   migrationFlags: Flag[],
-  stats: RevertStats
+  stats: RevertStats,
 ): Promise<void> => {
   console.log(Colors.cyan("\n🔷 Processing Views"));
-  
+
   if (!config.viewKeys || config.viewKeys.length === 0) {
-    console.log(Colors.gray("  No target views specified, skipping view processing"));
+    console.log(
+      Colors.gray("  No target views specified, skipping view processing"),
+    );
     return;
   }
-  
+
   const views = await fetchProjectViews(apiKey, domain, config.projectKey);
-  const targetViews = views.filter(v => config.viewKeys!.includes(v.key));
-  
+  const targetViews = views.filter((v) => config.viewKeys!.includes(v.key));
+
   if (targetViews.length === 0) {
     console.log(Colors.gray("  Target views not found in project"));
     return;
   }
-  
+
   console.log(Colors.gray(`  Found ${targetViews.length} view(s) to process`));
 
   // The view-link endpoints are unreliable, so a merged destination's view is kept while flags from
@@ -1133,51 +1251,67 @@ const revertViews = async (
     }
     const remaining = findRemainingSiblingFlagKeys(
       siblingKeys,
-      new Set(migrationFlags.map(f => f.key))
+      new Set(migrationFlags.map((f) => f.key)),
     );
-    otherSourceFlags = (await fetchFlagsByKeys(apiKey, domain, config.projectKey, remaining)).flags;
+    otherSourceFlags =
+      (await fetchFlagsByKeys(apiKey, domain, config.projectKey, remaining))
+        .flags;
   }
-  
+
   for (const view of targetViews) {
     console.log(Colors.cyan(`\n  Processing view: ${view.key}`));
-    
+
     // NOTE: LaunchDarkly's beta Views API has issues:
     // - GET /projects/{proj}/views/{view}/linked/flags returns 500
     // - GET /projects/{proj}/flags/{flag}/views returns 404
     // So we'll attempt to unlink ALL migration flags from this view
     // The API will ignore unlink requests for flags that aren't actually linked
-    
-    const migrationFlagKeys = migrationFlags.map(f => f.key);
-    console.log(Colors.gray(`    Attempting to unlink ${migrationFlagKeys.length} migration flag(s)...`));
-    console.log(Colors.gray(`    (Note: API will ignore flags that aren't actually linked)`));
-    
+
+    const migrationFlagKeys = migrationFlags.map((f) => f.key);
+    console.log(
+      Colors.gray(
+        `    Attempting to unlink ${migrationFlagKeys.length} migration flag(s)...`,
+      ),
+    );
+    console.log(
+      Colors.gray(
+        `    (Note: API will ignore flags that aren't actually linked)`,
+      ),
+    );
+
     const unlinked = await unlinkFlagsFromView(
       apiKey,
       domain,
       config.projectKey,
       view.key,
       migrationFlagKeys,
-      config.dryRun || false
+      config.dryRun || false,
     );
     stats.viewLinksRemoved += unlinked;
-    
+
     if (unlinked > 0) {
       console.log(Colors.green(`    ✓ Unlinked ${unlinked} flag(s) from view`));
     } else {
-      console.log(Colors.gray(`    No flags were unlinked (they may not have been linked)`));
+      console.log(
+        Colors.gray(
+          `    No flags were unlinked (they may not have been linked)`,
+        ),
+      );
     }
-    
+
     // Delete view if requested
     if (config.deleteViews && unverifiableSiblings.length > 0) {
       // Without an inventory the sibling's flags cannot be checked, so the view has to stay
       console.log(Colors.yellow(
-        `    ⚠ Keeping view: no sync manifest for ${unverifiableSiblings.join(", ")}, so their flags in this ` +
-        `destination cannot be checked (extracted keys are not destination keys)`
+        `    ⚠ Keeping view: no sync manifest for ${
+          unverifiableSiblings.join(", ")
+        }, so their flags in this ` +
+          `destination cannot be checked (extracted keys are not destination keys)`,
       ));
     } else if (config.deleteViews && otherSourceFlags.length > 0) {
       console.log(Colors.yellow(
         `    ⚠ Keeping view: ${otherSourceFlags.length} flag(s) migrated from other source project(s) remain ` +
-        `(e.g. ${otherSourceFlags.slice(0, 3).map(f => f.key).join(", ")})`
+          `(e.g. ${otherSourceFlags.slice(0, 3).map((f) => f.key).join(", ")})`,
       ));
     } else if (config.deleteViews) {
       const deleted = await deleteView(
@@ -1185,9 +1319,9 @@ const revertViews = async (
         domain,
         config.projectKey,
         view.key,
-        config.dryRun || false
+        config.dryRun || false,
       );
-      
+
       if (deleted) {
         stats.viewsDeleted++;
         console.log(Colors.green(`    ✓ Deleted view`));
@@ -1203,33 +1337,39 @@ const revertViews = async (
  */
 const printRevertSummary = (config: RevertConfig, stats: RevertStats): void => {
   const divider = "=".repeat(70);
-  
+
   console.log(Colors.blue(`\n\n${divider}`));
   console.log(Colors.blue("📊 REVERT SUMMARY"));
   console.log(Colors.blue(divider));
-  
+
   if (config.dryRun) {
-    console.log(Colors.yellow("\n⚠️  DRY RUN MODE - No actual changes were made\n"));
+    console.log(
+      Colors.yellow("\n⚠️  DRY RUN MODE - No actual changes were made\n"),
+    );
   }
-  
+
   console.log(Colors.cyan("\nStatistics:"));
   console.log(Colors.gray(`  Flags checked: ${stats.flagsChecked}`));
-  console.log(Colors.cyan(`  Migration flags identified: ${stats.flagsIdentified}`));
-  console.log(Colors.green(`  Approval requests deleted: ${stats.approvalsDeleted}`));
+  console.log(
+    Colors.cyan(`  Migration flags identified: ${stats.flagsIdentified}`),
+  );
+  console.log(
+    Colors.green(`  Approval requests deleted: ${stats.approvalsDeleted}`),
+  );
   console.log(Colors.green(`  View links removed: ${stats.viewLinksRemoved}`));
   console.log(Colors.green(`  Flags archived: ${stats.flagsArchived}`));
   console.log(Colors.green(`  Flags deleted: ${stats.flagsDeleted}`));
   console.log(Colors.green(`  Views deleted: ${stats.viewsDeleted}`));
-  
+
   if (stats.errors.length > 0) {
     console.log(Colors.red(`\n❌ Errors encountered: ${stats.errors.length}`));
-    stats.errors.forEach(err => {
+    stats.errors.forEach((err) => {
       console.log(Colors.red(`  • ${err}`));
     });
   }
-  
+
   console.log(Colors.blue(`\n${divider}`));
-  
+
   if (config.dryRun) {
     console.log(Colors.cyan("ℹ️  Run without --dry-run to execute the revert"));
   } else if (stats.errors.length === 0) {
@@ -1237,13 +1377,17 @@ const printRevertSummary = (config: RevertConfig, stats: RevertStats): void => {
   } else {
     console.log(Colors.yellow("⚠ Revert completed with errors"));
   }
-  
+
   console.log(Colors.blue(`${divider}\n`));
 };
 
 // ==================== Main Entry Point ====================
 
-const printProjectBanner = (index: number, total: number, projectKey: string): void => {
+const printProjectBanner = (
+  index: number,
+  total: number,
+  projectKey: string,
+): void => {
   const divider = "=".repeat(60);
   console.log(Colors.magenta(`\n${divider}`));
   console.log(Colors.magenta(`Project ${index + 1}/${total}: ${projectKey}`));
@@ -1254,7 +1398,10 @@ const printProjectBanner = (index: number, total: number, projectKey: string): v
  * Reverts a single destination project
  */
 /** Reverts one destination project; false when the revert finished with errors. */
-const revertProject = async (apiKey: string, config: RevertConfig): Promise<boolean> => {
+const revertProject = async (
+  apiKey: string,
+  config: RevertConfig,
+): Promise<boolean> => {
   console.log(Colors.cyan("Configuration:"));
   console.log(Colors.gray(`  Project: ${config.projectKey}`));
   if (config.sourceProjectKey) {
@@ -1264,21 +1411,31 @@ const revertProject = async (apiKey: string, config: RevertConfig): Promise<bool
     console.log(Colors.gray(`  Config File: ${config.configFile}`));
   }
   console.log(Colors.gray(`  Domain: ${config.domain}`));
-  console.log(Colors.gray(`  Smart Mode: ${config.useSourceData ? "enabled" : "disabled"}`));
+  console.log(
+    Colors.gray(
+      `  Smart Mode: ${config.useSourceData ? "enabled" : "disabled"}`,
+    ),
+  );
   console.log(Colors.gray(`  Dry Run: ${config.dryRun}`));
   console.log(Colors.gray(`  Delete Views: ${config.deleteViews}`));
   if (config.viewKeys) {
     console.log(Colors.gray(`  Target Views: ${config.viewKeys.join(", ")}`));
   }
-  
+
   if (config.dryRun) {
-    console.log(Colors.yellow("\n⚠️  DRY RUN MODE - No changes will be made\n"));
+    console.log(
+      Colors.yellow("\n⚠️  DRY RUN MODE - No changes will be made\n"),
+    );
   }
-  
+
   if (config.useSourceData) {
-    console.log(Colors.cyan("\n💡 Smart Mode enabled - using source data for faster execution"));
+    console.log(
+      Colors.cyan(
+        "\n💡 Smart Mode enabled - using source data for faster execution",
+      ),
+    );
   }
-  
+
   const stats: RevertStats = {
     flagsChecked: 0,
     flagsIdentified: 0,
@@ -1287,58 +1444,83 @@ const revertProject = async (apiKey: string, config: RevertConfig): Promise<bool
     flagsArchived: 0,
     flagsDeleted: 0,
     viewsDeleted: 0,
-    errors: []
+    errors: [],
   };
-  
+
   try {
     const domain = config.domain || "app.launchdarkly.com";
-    manifestIdentity = { domain, accountId: await getAccountId(apiKey, domain).catch(() => undefined) };
-    
+    manifestIdentity = {
+      domain,
+      accountId: await getAccountId(apiKey, domain).catch(() => undefined),
+    };
+
     // 1. Discover migration flags (smart or full scan)
     console.log(Colors.cyan("\n🚩 Step 1: Identifying migration flags"));
-    const { flags: migrationFlags, stats: discoveryStats, absent } = await discoverMigrationFlags(
-      apiKey,
-      domain,
-      config
-    );
-    
+    const { flags: migrationFlags, stats: discoveryStats, absent } =
+      await discoverMigrationFlags(
+        apiKey,
+        domain,
+        config,
+      );
+
     stats.flagsChecked = discoveryStats.checked;
     stats.flagsIdentified = discoveryStats.identified;
-    
-    console.log(Colors.cyan(`  Identified ${migrationFlags.length} migration flag(s) to revert`));
-    
+
+    console.log(
+      Colors.cyan(
+        `  Identified ${migrationFlags.length} migration flag(s) to revert`,
+      ),
+    );
+
     if (migrationFlags.length === 0) {
-      console.log(Colors.yellow("\nNo migration flags found. Nothing to revert."));
+      console.log(
+        Colors.yellow("\nNo migration flags found. Nothing to revert."),
+      );
       // Entries of recorded flags that are confirmed gone are still retired
       await retireRevertedManifestEntries(config, new Set(absent), stats);
       return stats.errors.length === 0;
     }
-    
+
     // 3. Fetch environments
     console.log(Colors.cyan("\n🌍 Step 2: Fetching environments"));
-    const environments = await fetchProjectEnvironments(apiKey, domain, config.projectKey);
+    const environments = await fetchProjectEnvironments(
+      apiKey,
+      domain,
+      config.projectKey,
+    );
     console.log(Colors.gray(`  Found ${environments.length} environment(s)`));
-    
+
     // 4. Process views first (remove flag links)
     console.log(Colors.cyan("\n👁️  Step 3: Processing views"));
     await revertViews(apiKey, domain, config, migrationFlags, stats);
-    
+
     // 5. Process each flag
     console.log(Colors.cyan("\n🗑️  Step 4: Reverting flags"));
     const deletedKeys = new Set<string>();
     for (const flag of migrationFlags) {
-      if (await revertFlag(apiKey, domain, config, flag, environments, stats)) deletedKeys.add(flag.key);
+      if (await revertFlag(apiKey, domain, config, flag, environments, stats)) {
+        deletedKeys.add(flag.key);
+      }
     }
 
     // 5b. Retire the manifest entries of deleted and confirmed-absent flags so a rerun does not claim another source's flag
-    await retireRevertedManifestEntries(config, new Set([...deletedKeys, ...absent]), stats);
-    
+    await retireRevertedManifestEntries(
+      config,
+      new Set([...deletedKeys, ...absent]),
+      stats,
+    );
+
     // 6. Print summary
     printRevertSummary(config, stats);
     return stats.errors.length === 0;
-    
   } catch (error) {
-    console.log(Colors.red(`\n❌ Fatal error: ${error instanceof Error ? error.message : String(error)}`));
+    console.log(
+      Colors.red(
+        `\n❌ Fatal error: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      ),
+    );
     Deno.exit(1);
   }
 };
@@ -1363,7 +1545,11 @@ const main = async (): Promise<void> => {
   // A revert that finished with errors (a flag that could not be removed, a manifest that could not be
   // updated) exits non-zero so the workflow stops instead of continuing on a partial revert
   if (failed > 0) {
-    console.log(Colors.red(`\n${failed} of ${configs.length} project revert(s) finished with errors`));
+    console.log(
+      Colors.red(
+        `\n${failed} of ${configs.length} project revert(s) finished with errors`,
+      ),
+    );
     Deno.exit(1);
   }
 };
@@ -1371,4 +1557,3 @@ const main = async (): Promise<void> => {
 if (import.meta.main) {
   main();
 }
-

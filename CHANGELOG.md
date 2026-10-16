@@ -7,12 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Every pull request that changes behaviour now bumps the version (`deno task version:bump:<type>`) and dates its changelog section; CI (`release-gate`) refuses the merge otherwise, unless the PR carries the `no-release` label. Merging into `main` creates the tag `vX.Y.Z` and a GitHub Release from the changelog automatically; tags are no longer created by hand. `deno task release:check` runs the same gate locally
+- CI runs `deno fmt --check`, `deno lint`, `deno check` and the unit tests on every PR, with a frozen lockfile. `deno fmt` was applied to the whole repository (`fmt.proseWrap: preserve` keeps changelog bullets on one line); two lint rules (`no-import-prefix`, `no-explicit-any`) are excluded until their cleanups land
+- `deno.json`: new tasks `check`, `lint`, `fmt`, `fmt:check`, `release:check`; the `update-maintainers` task, whose script did not exist, is removed. `deno task version:show` reports whether the version is tagged and only mentions unreleased entries when there are some
+- `revert_migration.ts`: removed the unused `findFlagsLinkedToView`/`fetchFlagViews` fallback (nothing called it); `diff_payload`'s `jsr:`/`npm:` imports are pinned to the versions in `deno.lock`
+
 ### Fixed
 
 - `migrate`: a flag created from an archived or deprecated source flag now receives the flag-level patch right after creation. The create endpoint ignores `archived`/`deprecated` in the POST body, so until now such flags went live in the destination (and were served to SDKs); only flags that already existed were patched. Found in a rehearsal run with 230 archived flags
 - `migrate`: `deprecatedDate` is no longer patched. The API stamps it when `deprecated` changes and rejects a stand-alone `replace /deprecatedDate` as an unsupported operation, which made every re-run of an already-deprecated flag fail its flag-level update
 - `source_from_ld.ts` writes `extraction.json` (timestamp, whether segments/big segments/archived flags were extracted, environments, flag count). `migrate` only treats a segment as absent in the source when the segment files come from an extraction that included segments
 - `migrate`: an environment patch rejected with `unknown segment "<key>"` (a source rule references a segment that does not exist in that destination environment) is retried without the rules that reference the segment, and those rules are listed under the flag's non-migrated settings. Only rules whose clause is a plain, non-negated match on that one segment are dropped, and only when the segment is absent in the source environment too; the environment's version is left out of the sync manifest so `--incremental` reconsiders it. Such a rule can never match, so the retry is evaluation-neutral; previously the whole environment configuration for that flag failed
+
+### Documentation
+
+- `CONTRIBUTING.md`: setup, PR flow, changelog style, versioning and release rules, what the release gate checks and how to recover from a version race; PR template with the checklist. README: `Contributing and Releases` replaces `Version Management`; the Deno tasks section lists every task in `deno.json` (the `-- -f` form was stale, `-f` goes straight to the script) and `deno task source` is corrected to `source-from-ld`
 
 ## [3.4.0] - 2026-10-16
 
@@ -108,12 +119,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [3.0.2] - 2025-12-09
 
 ### Fixed
+
 - **Segment Pagination**: Fixed segment extraction being limited to 50 segments per environment
   - Previously relied on `_links.next` which wasn't consistently returned by the API
   - Now uses `totalCount` from API response to properly paginate through all segments
   - Improved progress logging to show actual fetched range (e.g., "Fetched segments 1 to 50 of 500")
 
 ### Changed
+
 - **Smart Rate Limiting**: Enhanced rate limit handling using HTTP response headers
   - Reads `x-ratelimit-global-remaining`, `x-ratelimit-route-remaining`, and `x-ratelimit-reset` headers
   - Proactive throttling when remaining requests fall below threshold (avoids hitting 429s)
@@ -122,9 +135,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Per-route rate limit tracking for more accurate throttling
   - Added jitter to prevent thundering herd issues
 
-## [3.0.1] - 2025-01-14
+## [3.0.1] - 2025-10-14
 
 ### Changed
+
 - **License**: Migrated from MIT License to Apache 2.0 License for LaunchDarkly Labs compliance
 - **README**: Updated license badge and added LaunchDarkly Labs disclaimer
 - **Repository**: Added comprehensive topics including migrations, migration-tools, and LaunchDarkly Labs tags
@@ -132,6 +146,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [3.0.0] - 2025-10-13
 
 ### Added
+
 - **Workflow Orchestrator**: Complete end-to-end migration automation from a single YAML config file
   - Runs full workflow (extract → map → migrate) by default when no steps specified
   - Selective step execution for custom workflows
@@ -178,6 +193,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Prevents duplicate approval requests
 
 ### Changed
+
 - **Major refactoring** of migration script for improved maintainability and modularity
 - Enhanced logging throughout workflow and migration processes
 - Improved error handling and user feedback
@@ -185,15 +201,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Segments are now only extracted when explicitly needed (via `extraction.includeSegments` or `migration.migrateSegments`)
 
 ### Fixed
+
 - Dry-run mode now correctly validates without making changes
 - Fixed handling of environments with approval requirements
 
 ## [2.1.0] - 2025-08-29
 
 ### Added
+
 - Flag import from external sources (JSON/CSV) for thirt-party migrations
 
 ### Changed
+
 - Script renaming for clarity (`source` → `source_from_ld`, etc.)
 - Project reorganization into logical folders
 - Enhanced environment pagination support
@@ -201,12 +220,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [2.0.0] - 2025-08-05
 
 ### Added
+
 - Core migration functionality between LaunchDarkly instances
 - Member mapping between accounts
 - Migration time estimation
 - Project structure and documentation
 
 ### Features
+
 - Source project data extraction
 - Flag, segment, and environment migration
 - Maintainer mapping and assignment
@@ -215,4 +236,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.0.0] - Forgotten date
 
 ### Added
+
 - Initial version of this project

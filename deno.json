@@ -20,7 +20,6 @@
     "workflow:incremental": "deno task workflow -f examples/workflow-extract-migrate-incremental.yaml",
     "source-from-ld": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/source_from_ld.ts",
     "map-members": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/map_members_between_ld_instances.ts",
-    "update-maintainers": "deno run --allow-read --allow-write src/scripts/update_maintainers.ts",
     "migrate": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/migrate_between_ld_instances.ts",
     "revert": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/revert_migration.ts",
     "estimate-migration-time": "deno run --allow-net --allow-read --allow-write src/scripts/launchdarkly-migrations/estimate_migration_time.ts",
@@ -31,6 +30,22 @@
     "version:bump:patch": "./scripts/bump-version.sh patch",
     "version:bump:minor": "./scripts/bump-version.sh minor",
     "version:bump:major": "./scripts/bump-version.sh major",
-    "diff": "deno run --allow-net --allow-env --allow-read src/scripts/diff-payload/diff_payload.ts"
+    "diff": "deno run --allow-net --allow-env --allow-read src/scripts/diff-payload/diff_payload.ts",
+    "check": "deno check src/ scripts/",
+    "lint": "deno lint",
+    "fmt": "deno fmt",
+    "fmt:check": "deno fmt --check",
+    "release:check": "./scripts/release-check.sh"
+  },
+  "fmt": {
+    "proseWrap": "preserve"
+  },
+  "lint": {
+    "rules": {
+      "exclude": [
+        "no-import-prefix",
+        "no-explicit-any"
+      ]
+    }
   }
 }

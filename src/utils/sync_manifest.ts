@@ -120,22 +120,32 @@ export async function readSyncManifest(
       return null;
     }
     throw new Error(
-      `Could not read sync manifest ${path}: ${error instanceof Error ? error.message : String(error)}`,
+      `Could not read sync manifest ${path}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
     );
   }
-  if (manifest.sourceProject !== sourceProject || manifest.destProject !== destProject) {
+  if (
+    manifest.sourceProject !== sourceProject ||
+    manifest.destProject !== destProject
+  ) {
     throw new Error(
       `Sync manifest ${path} records ${manifest.sourceProject} -> ${manifest.destProject}, ` +
         `not ${sourceProject} -> ${destProject}; refusing to use its keys`,
     );
   }
-  if (identity && manifest.destDomain && manifest.destDomain !== identity.domain) {
+  if (
+    identity && manifest.destDomain && manifest.destDomain !== identity.domain
+  ) {
     throw new Error(
       `Sync manifest ${path} was written for destination domain ${manifest.destDomain}, not ${identity.domain}; ` +
         `refusing to use its keys (migrating the same projects to another destination needs its own working directory)`,
     );
   }
-  if (identity?.accountId && manifest.destAccountId && manifest.destAccountId !== identity.accountId) {
+  if (
+    identity?.accountId && manifest.destAccountId &&
+    manifest.destAccountId !== identity.accountId
+  ) {
     throw new Error(
       `Sync manifest ${path} was written for destination account ${manifest.destAccountId}, not ${identity.accountId}; ` +
         `refusing to use its keys (migrating the same projects to another destination needs its own working directory)`,
@@ -148,14 +158,22 @@ export async function readSyncManifest(
  * Throws when the manifest is marked incomplete: revert must not treat it as the full inventory of what
  * the migration wrote, since a flag created just before the abort may have no entry.
  */
-export function assertManifestComplete(manifest: SyncManifest, path: string): void {
+export function assertManifestComplete(
+  manifest: SyncManifest,
+  path: string,
+): void {
   const marker = manifest.incomplete;
   if (!marker) return;
-  const untracked = [...(marker.unresolved?.flags ?? []), ...(marker.unresolved?.segments ?? [])];
+  const untracked = [
+    ...(marker.unresolved?.flags ?? []),
+    ...(marker.unresolved?.segments ?? []),
+  ];
   throw new Error(
     `Sync manifest ${path} is marked incomplete (${marker.reason}, at ${marker.at}): ` +
       `a migrate run stopped before recording all of its writes` +
-      (untracked.length > 0 ? `; untracked destination resources: ${untracked.join(", ")}` : "") +
+      (untracked.length > 0
+        ? `; untracked destination resources: ${untracked.join(", ")}`
+        : "") +
       `. Re-run the migration without includeFlags, excludeFlags or --since and let it complete cleanly (no failed ` +
       `writes); if untracked resources remain, verify they were created by the aborted run and re-run with ` +
       `--adopt-unresolved to record them, or revert with --no-use-source-data after checking the flags by hand.`,
@@ -171,7 +189,9 @@ export interface RunOutcome {
   /** Source flag keys whose destination copy already existed and was skipped or prefix-renamed */
   conflictedFlags: Iterable<string>;
   /** Segments whose destination copy already existed and was skipped or prefix-renamed: source environment and key, and the destination environment the copy is in */
-  conflictedSegments: Iterable<{ sourceEnv: string; key: string; destEnv: string }>;
+  conflictedSegments: Iterable<
+    { sourceEnv: string; key: string; destEnv: string }
+  >;
   /**
    * Destination keys of writes whose outcome is unknown: in flight when a run aborted, or failed after
    * the create may have succeeded (flags by destination key, segments as "<destinationEnv>/<destinationKey>").
@@ -187,20 +207,37 @@ export type ManifestEntries = Pick<SyncManifest, "flags" | "segments">;
 type DestEntry = { destKey?: string; extraDestKeys?: string[] };
 
 /** Every destination key an entry owns: its main copy and any adopted extra copies. */
-const ownedKeys = (key: string, entry: DestEntry): string[] => [entry.destKey ?? key, ...(entry.extraDestKeys ?? [])];
+const ownedKeys = (
+  key: string,
+  entry: DestEntry,
+): string[] => [entry.destKey ?? key, ...(entry.extraDestKeys ?? [])];
 
 /** Own-property lookup: a resource named like an Object.prototype member must not resolve to an inherited value. */
-export function ownEntry<T>(record: Record<string, T> | undefined, key: string): T | undefined {
-  return record !== undefined && Object.hasOwn(record, key) ? record[key] : undefined;
+export function ownEntry<T>(
+  record: Record<string, T> | undefined,
+  key: string,
+): T | undefined {
+  return record !== undefined && Object.hasOwn(record, key)
+    ? record[key]
+    : undefined;
 }
 
 /**
  * A rebuilt manifest entry with the extra destination copies its previous entry owned (adopted with
  * --adopt-unresolved) merged in, so a successful rerun does not drop them from the inventory.
  */
-export function withExtraDestKeys<T extends DestEntry>(entry: T, previous: DestEntry | undefined, key: string): T {
+export function withExtraDestKeys<T extends DestEntry>(
+  entry: T,
+  previous: DestEntry | undefined,
+  key: string,
+): T {
   const main = entry.destKey ?? key;
-  const extras = [...new Set([...(entry.extraDestKeys ?? []), ...(previous?.extraDestKeys ?? [])])].filter((k) => k !== main);
+  const extras = [
+    ...new Set([
+      ...(entry.extraDestKeys ?? []),
+      ...(previous?.extraDestKeys ?? []),
+    ]),
+  ].filter((k) => k !== main);
   if (extras.length === 0) {
     const { extraDestKeys: _none, ...rest } = entry;
     return rest as T;
@@ -208,8 +245,13 @@ export function withExtraDestKeys<T extends DestEntry>(entry: T, previous: DestE
   return { ...entry, extraDestKeys: extras };
 }
 
-const mapsTo = (entries: Record<string, DestEntry> | undefined, destKey: string): boolean =>
-  Object.entries(entries ?? {}).some(([key, entry]) => ownedKeys(key, entry).includes(destKey));
+const mapsTo = (
+  entries: Record<string, DestEntry> | undefined,
+  destKey: string,
+): boolean =>
+  Object.entries(entries ?? {}).some(([key, entry]) =>
+    ownedKeys(key, entry).includes(destKey)
+  );
 
 type SegmentEntryLike = DestEntry & { destEnv?: string };
 
@@ -222,7 +264,9 @@ const segmentEntriesIn = (
   segments: Record<string, Record<string, SegmentEntryLike>> | undefined,
   destEnv: string,
 ): Array<{ sourceEnv: string; key: string; entry: SegmentEntryLike }> => {
-  const found: Array<{ sourceEnv: string; key: string; entry: SegmentEntryLike }> = [];
+  const found: Array<
+    { sourceEnv: string; key: string; entry: SegmentEntryLike }
+  > = [];
   for (const [sourceEnv, entries] of Object.entries(segments ?? {})) {
     for (const [key, entry] of Object.entries(entries)) {
       if (entry.destEnv === destEnv) found.push({ sourceEnv, key, entry });
@@ -232,8 +276,14 @@ const segmentEntriesIn = (
 };
 
 /** True when some segment entry owns `destKey` in destination environment `destEnv`. */
-const segmentMappedTo = (next: ManifestEntries, destEnv: string, destKey: string): boolean =>
-  segmentEntriesIn(next.segments, destEnv).some(({ key, entry }) => ownedKeys(key, entry).includes(destKey));
+const segmentMappedTo = (
+  next: ManifestEntries,
+  destEnv: string,
+  destKey: string,
+): boolean =>
+  segmentEntriesIn(next.segments, destEnv).some(({ key, entry }) =>
+    ownedKeys(key, entry).includes(destKey)
+  );
 
 const splitSegmentId = (id: string): [string, string] => {
   const slash = id.indexOf("/");
@@ -264,13 +314,17 @@ export function unresolvedAfterRun(
     }
     for (const { sourceEnv, key, destEnv } of run.conflictedSegments) {
       // The existing copy sits under the source key in the destination environment
-      if (!Object.hasOwn(prevSegments, sourceEnv) || !Object.hasOwn(prevSegments[sourceEnv], key)) segments.add(`${destEnv}/${key}`);
+      if (
+        !Object.hasOwn(prevSegments, sourceEnv) ||
+        !Object.hasOwn(prevSegments[sourceEnv], key)
+      ) segments.add(`${destEnv}/${key}`);
     }
   }
   // Writes in flight at an abort have no entry yet, whatever their outcome
   for (const key of run.pendingDestKeys?.flags ?? []) flags.add(key);
   for (const id of run.pendingDestKeys?.segments ?? []) segments.add(id);
-  const unresolvedFlags = [...flags].filter((key) => !mapsTo(next.flags, key)).sort();
+  const unresolvedFlags = [...flags].filter((key) => !mapsTo(next.flags, key))
+    .sort();
   const unresolvedSegments = [...segments].filter((id) => {
     const [destEnv, destKey] = splitSegmentId(id);
     return !segmentMappedTo(next, destEnv, destKey);
@@ -296,7 +350,9 @@ export function retainIncompleteMarker(
   const marker = previous?.incomplete;
   if (!marker) return undefined;
   const unresolved = unresolvedAfterRun(previous, run, next);
-  if (!run.flagScopeFiltered && !run.failedWrites && !unresolved) return undefined;
+  if (!run.flagScopeFiltered && !run.failedWrites && !unresolved) {
+    return undefined;
+  }
   const { unresolved: _previous, ...rest } = marker;
   return unresolved ? { ...rest, unresolved } : rest;
 }
@@ -331,11 +387,18 @@ export function markerAfterRun(
   const retained = retainIncompleteMarker(previous, run, next);
   if (retained) return retained;
   if (!run.failedWrites) return undefined;
-  const pending = [...(run.pendingDestKeys?.flags ?? []), ...(run.pendingDestKeys?.segments ?? [])];
+  const pending = [
+    ...(run.pendingDestKeys?.flags ?? []),
+    ...(run.pendingDestKeys?.segments ?? []),
+  ];
   if (pending.length === 0) return undefined;
   return abortMarker(
     previous,
-    { reason: `${pending.length} failed write(s) left destination resources without an entry`, at },
+    {
+      reason:
+        `${pending.length} failed write(s) left destination resources without an entry`,
+      at,
+    },
     run,
     next,
   );
@@ -351,7 +414,10 @@ export function stampIdentity(
   identity: DestinationIdentity,
 ): Pick<SyncManifest, "destDomain" | "destAccountId"> {
   const accountId = identity.accountId ?? previous?.destAccountId;
-  return { destDomain: identity.domain, ...(accountId ? { destAccountId: accountId } : {}) };
+  return {
+    destDomain: identity.domain,
+    ...(accountId ? { destAccountId: accountId } : {}),
+  };
 }
 
 /**
@@ -391,7 +457,10 @@ export function adoptUnresolved(
   const unresolved = previous?.incomplete?.unresolved;
   if (!unresolved) return adopted;
   // The source key an untracked destination key belongs to: itself, or itself minus the conflict prefix
-  const ownerKey = <T>(record: Record<string, T> | undefined, destKey: string): string | undefined => {
+  const ownerKey = <T>(
+    record: Record<string, T> | undefined,
+    destKey: string,
+  ): string | undefined => {
     if (ownEntry(record, destKey)) return destKey;
     if (conflictPrefix && destKey.startsWith(conflictPrefix)) {
       const unprefixed = destKey.slice(conflictPrefix.length);
@@ -399,7 +468,10 @@ export function adoptUnresolved(
     }
     return undefined;
   };
-  const adopt = (record: Record<string, DestEntry> | undefined, destKey: string): boolean => {
+  const adopt = (
+    record: Record<string, DestEntry> | undefined,
+    destKey: string,
+  ): boolean => {
     const key = ownerKey(record, destKey);
     const entry = key === undefined ? undefined : record![key];
     if (!entry || ownedKeys(key!, entry).includes(destKey)) return false;
@@ -413,7 +485,9 @@ export function adoptUnresolved(
     // Candidates are the entries whose copy lives in that destination environment, keyed by source key
     const [destEnv, destKey] = splitSegmentId(id);
     const candidates: Record<string, SegmentEntryLike> = emptyRecord();
-    for (const { key, entry } of segmentEntriesIn(entries.segments, destEnv)) candidates[key] = entry;
+    for (const { key, entry } of segmentEntriesIn(entries.segments, destEnv)) {
+      candidates[key] = entry;
+    }
     if (adopt(candidates, destKey)) adopted.segments.push(id);
   }
   return adopted;
@@ -426,7 +500,10 @@ export function adoptUnresolved(
  * to its main destination key. The manifest itself stays, possibly with no flags, as the authoritative
  * inventory for the pair.
  */
-export function retireDeletedFlags(manifest: SyncManifest, deletedDestKeys: Iterable<string>): SyncManifest {
+export function retireDeletedFlags(
+  manifest: SyncManifest,
+  deletedDestKeys: Iterable<string>,
+): SyncManifest {
   const deleted = new Set(deletedDestKeys);
   const flags: SyncManifest["flags"] = emptyRecord();
   for (const [key, entry] of Object.entries(manifest.flags)) {
@@ -438,7 +515,9 @@ export function retireDeletedFlags(manifest: SyncManifest, deletedDestKeys: Iter
     const promoted = remaining[0] !== (entry.destKey ?? key);
     flags[key] = {
       ...rest,
-      ...(promoted ? { version: 0, lastModified: undefined, environments: {} } : {}),
+      ...(promoted
+        ? { version: 0, lastModified: undefined, environments: {} }
+        : {}),
       ...(remaining[0] !== key ? { destKey: remaining[0] } : {}),
       ...(remaining.length > 1 ? { extraDestKeys: remaining.slice(1) } : {}),
     };
@@ -458,14 +537,18 @@ export function segmentEnvironmentMismatches(
   destEnvOf: (sourceEnv: string) => string | undefined,
 ): string[] {
   const mismatches: string[] = [];
-  for (const [sourceEnv, segments] of Object.entries(previous?.segments ?? {})) {
+  for (
+    const [sourceEnv, segments] of Object.entries(previous?.segments ?? {})
+  ) {
     const current = destEnvOf(sourceEnv);
     if (current === undefined) continue;
     for (const [key, entry] of Object.entries(segments)) {
       if (!entry.destEnv) continue;
       const recorded = entry.destEnv;
       if (recorded !== current) {
-        mismatches.push(`${sourceEnv}/${key}: recorded in destination environment "${recorded}", mapping now targets "${current}"`);
+        mismatches.push(
+          `${sourceEnv}/${key}: recorded in destination environment "${recorded}", mapping now targets "${current}"`,
+        );
       }
     }
   }
@@ -482,12 +565,23 @@ export function legacySegmentEntries(
   previous: SyncManifest | null,
   destEnvOf: (sourceEnv: string) => string | undefined,
 ): Array<{ sourceEnv: string; key: string; destKey: string; destEnv: string }> {
-  const legacy: Array<{ sourceEnv: string; key: string; destKey: string; destEnv: string }> = [];
-  for (const [sourceEnv, segments] of Object.entries(previous?.segments ?? {})) {
+  const legacy: Array<
+    { sourceEnv: string; key: string; destKey: string; destEnv: string }
+  > = [];
+  for (
+    const [sourceEnv, segments] of Object.entries(previous?.segments ?? {})
+  ) {
     const destEnv = destEnvOf(sourceEnv);
     if (destEnv === undefined) continue;
     for (const [key, entry] of Object.entries(segments)) {
-      if (!entry.destEnv) legacy.push({ sourceEnv, key, destKey: entry.destKey ?? key, destEnv });
+      if (!entry.destEnv) {
+        legacy.push({
+          sourceEnv,
+          key,
+          destKey: entry.destKey ?? key,
+          destEnv,
+        });
+      }
     }
   }
   return legacy;
@@ -495,5 +589,11 @@ export function legacySegmentEntries(
 
 /** Destination keys of the flags a manifest records: the destKey when the flag was renamed, else the source key, plus adopted extra copies. */
 export function manifestDestinationFlagKeys(manifest: SyncManifest): string[] {
-  return [...new Set(Object.entries(manifest.flags).flatMap(([key, entry]) => ownedKeys(key, entry)))];
+  return [
+    ...new Set(
+      Object.entries(manifest.flags).flatMap(([key, entry]) =>
+        ownedKeys(key, entry)
+      ),
+    ),
+  ];
 }

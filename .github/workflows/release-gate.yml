@@ -1,0 +1,38 @@
+# Release-per-PR gate (see CONTRIBUTING.md, "Versioning and releases").
+#
+# A PR into main must bump the version in deno.json and have a dated
+# CHANGELOG section for it, with nothing left under [Unreleased]. A PR
+# labelled "no-release" (docs, CI, refactors) must leave the version alone.
+#
+# Kept separate from ci.yml so that adding or removing the label re-runs
+# only this job. Required status check: "release-gate".
+name: Release gate
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  release-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # The default checkout is the PR's merge commit: what main would become.
+      - uses: actions/checkout@v4
+
+      - name: Fetch base branch
+        run: git fetch --no-tags --depth=1 origin main
+
+      - name: Check version and changelog
+        env:
+          BASE_REF: FETCH_HEAD
+          NO_RELEASE: ${{ contains(github.event.pull_request.labels.*.name, 'no-release') }}
+        run: scripts/release-check.sh

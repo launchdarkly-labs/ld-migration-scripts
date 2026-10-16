@@ -1,8 +1,8 @@
 {
   "version": "5",
   "specifiers": {
-    "jsr:@std/cli@*": "1.0.32",
-    "npm:jsondiffpatch@*": "0.7.6"
+    "jsr:@std/cli@^1.0.6": "1.0.32",
+    "npm:jsondiffpatch@0.7.6": "0.7.6"
   },
   "jsr": {
     "@std/cli@1.0.32": {
