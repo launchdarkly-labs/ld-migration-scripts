@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.4.1] - 2026-10-16
+
 ### Changed
 
 - Every pull request that changes behaviour now bumps the version (`deno task version:bump:<type>`) and dates its changelog section; CI (`release-gate`) refuses the merge otherwise, unless the PR carries the `no-release` label. Merging into `main` creates the tag `vX.Y.Z` and a GitHub Release from the changelog automatically; tags are no longer created by hand. `deno task release:check` runs the same gate locally
