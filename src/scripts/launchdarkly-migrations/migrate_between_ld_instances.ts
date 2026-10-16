@@ -877,6 +877,9 @@ const segmentsSkippedByConflict: Set<string> = new Set(); // "<sourceEnv>/<segme
 // Segments whose create was attempted this run ("<sourceEnv>/<segmentKey>"); a previous manifest entry
 // for anything else (no extracted data for the environment, unselected environment, segments off) is kept
 const segmentsAttempted: Set<string> = new Set();
+// Flags whose processing reached the destination (existence check onwards); on an abort, flags the run
+// never got to keep their previous manifest entry
+const flagsAttempted: Set<string> = new Set();
 const flagErrorDetails: Map<string, string> = new Map();
 
 // Prerequisite check: with include/exclude filters, every prerequisite of a selected flag must be
@@ -2122,6 +2125,7 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
   let flagMaintainerId: string | null = null;
   let flagAlreadyExisted = false;
 
+  flagsAttempted.add(flag.key);
   // First, check if the flag already exists in the destination
   try {
     const checkFlagReq = ldAPIRequest(
@@ -2554,25 +2558,24 @@ for (const level of levels) {
 // resolves to the destination key recorded for it (e.g. a conflict prefix) instead of its raw key.
 function carryForwardManifestEntries(): void {
   if (!previousManifest) return;
-    // Attempted = selected and not skipped before any write (--since, --on-conflict skip)
-    const attempted = new Set(
-      flagList.filter((k: string) => !flagsSkippedByDate.has(k) && !flagsSkippedByConflict.has(k)),
-    );
-    for (const [key, entry] of Object.entries(previousManifest.flags ?? {})) {
-      if (!attempted.has(key) && !Object.hasOwn(updatedManifestFlags, key)) updatedManifestFlags[key] = entry;
+  // Attempted = processing reached the destination and was not skipped by --on-conflict skip; flags
+  // skipped by --since, never loaded, or not reached before an abort keep their previous entry
+  const attempted = new Set([...flagsAttempted].filter((k) => !flagsSkippedByConflict.has(k)));
+  for (const [key, entry] of Object.entries(previousManifest.flags ?? {})) {
+    if (!attempted.has(key) && !Object.hasOwn(updatedManifestFlags, key)) updatedManifestFlags[key] = entry;
+  }
+  // Attempted segments were rewritten above (or failed and stay absent); a selected environment alone
+  // does not mean every recorded segment was attempted, e.g. when it has no extracted segment data
+  for (const [envKey, segments] of Object.entries(previousManifest.segments ?? {})) {
+    for (const [key, entry] of Object.entries(segments)) {
+      const id = `${envKey}/${key}`;
+      if (segmentsAttempted.has(id) && !segmentsSkippedByConflict.has(id)) continue;
+      const envEntries = Object.hasOwn(updatedManifestSegments, envKey)
+        ? updatedManifestSegments[envKey]
+        : (updatedManifestSegments[envKey] = {});
+      if (!Object.hasOwn(envEntries, key)) envEntries[key] = entry;
     }
-    // Attempted segments were rewritten above (or failed and stay absent); a selected environment alone
-    // does not mean every recorded segment was attempted, e.g. when it has no extracted segment data
-    for (const [envKey, segments] of Object.entries(previousManifest.segments ?? {})) {
-      for (const [key, entry] of Object.entries(segments)) {
-        const id = `${envKey}/${key}`;
-        if (segmentsAttempted.has(id) && !segmentsSkippedByConflict.has(id)) continue;
-        const envEntries = Object.hasOwn(updatedManifestSegments, envKey)
-          ? updatedManifestSegments[envKey]
-          : (updatedManifestSegments[envKey] = {});
-        if (!Object.hasOwn(envEntries, key)) envEntries[key] = entry;
-      }
-    }
+  }
 }
 
 carryForwardManifestEntries();
