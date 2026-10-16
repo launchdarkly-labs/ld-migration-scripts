@@ -18,6 +18,8 @@ import {
   type View,
   ConflictTracker,
   applyConflictPrefix,
+  stripRulesReferencingSegment,
+  unknownSegmentFromError,
   // delay
 } from "../../utils/utils.ts";
 import * as Colors from "https://deno.land/std@0.149.0/fmt/colors.ts";
@@ -2077,6 +2079,40 @@ const wouldPatchChangeEnvironment = (
  * Retries 404s after a delay (environment may not be ready yet)
  * Skips patch if environment is already in desired state
  */
+// Segment keys per source environment from the extracted data; null when not extracted.
+// Segment files are only trusted when the extraction that produced the flag data also extracted
+// segments (extraction.json): with segment extraction disabled, older segment files stay on disk
+// and would misclassify a segment created since as a dangling reference.
+const sourceSegmentKeysCache = new Map<string, Set<string> | null>();
+let extractionIncludedSegments: boolean | null = null;
+async function segmentsFromSameExtraction(): Promise<boolean> {
+  if (extractionIncludedSegments === null) {
+    try {
+      const meta = JSON.parse(await Deno.readTextFile(`./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/extraction.json`));
+      extractionIncludedSegments = meta.extractSegments === true;
+    } catch (_) {
+      extractionIncludedSegments = false; // no metadata (older extraction): cannot establish
+    }
+  }
+  return extractionIncludedSegments;
+}
+// Environments whose patch was applied without one or more dead rules, keyed flag\0destEnv.
+// Their version is left out of the sync manifest so --incremental reconsiders them.
+const envsWithDroppedRules = new Set<string>();
+async function segmentAbsentInSource(sourceEnv: string, segmentKey: string): Promise<boolean> {
+  if (!(await segmentsFromSameExtraction())) return false;
+  if (!sourceSegmentKeysCache.has(sourceEnv)) {
+    try {
+      const data = JSON.parse(await Deno.readTextFile(`./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/segments/${sourceEnv}.json`));
+      sourceSegmentKeysCache.set(sourceEnv, new Set((data.items ?? []).map((s: any) => s.key)));
+    } catch (_) {
+      sourceSegmentKeysCache.set(sourceEnv, null); // segments not extracted: absence cannot be established
+    }
+  }
+  const keys = sourceSegmentKeysCache.get(sourceEnv);
+  return keys !== null && keys !== undefined && !keys.has(segmentKey);
+}
+
 const makePatchCall = async (
   flagKey: string,
   patchReq: any[],
@@ -2085,7 +2121,9 @@ const makePatchCall = async (
   fallbackMemberId: string | null,
   variations: any[],
   destinationFlag: any,
-  retryCount: number = 0
+  sourceEnv: string,
+  retryCount: number = 0,
+  unknownSegmentRetried: boolean = false
 ): Promise<Set<string>> => {
   // Check if this patch would actually change anything
   const currentEnvConfig = destinationFlag?.environments?.[env];
@@ -2114,7 +2152,7 @@ const makePatchCall = async (
     // Environment not ready yet, wait and retry
     console.log(Colors.gray(`\t  ⏳ ${env}: Environment not ready, retrying in 3s... (attempt ${retryCount + 1}/2)`));
     await new Promise(resolve => setTimeout(resolve, 3000));
-    return await makePatchCall(flagKey, patchReq, env, maintainerId, fallbackMemberId, variations, destinationFlag, retryCount + 1);
+    return await makePatchCall(flagKey, patchReq, env, maintainerId, fallbackMemberId, variations, destinationFlag, sourceEnv, retryCount + 1, unknownSegmentRetried);
   } else if (flagPatchStatus === 405) {
     // Environment requires approval workflow
     await handleApprovalWorkflow(
@@ -2125,6 +2163,33 @@ const makePatchCall = async (
       fallbackMemberId,
       variations
     );
+  } else if (flagPatchStatus === 400 && !unknownSegmentRetried) {
+    // A rule referencing a segment that does not exist in this destination environment is
+    // rejected as a whole patch. Such a rule can never match, so drop it, retry once, and
+    // report it under the flag's skipped fields.
+    const errorBody = await patchFlagReq.text();
+    const segmentKey = unknownSegmentFromError(errorBody);
+    // `env` is the destination environment key; `sourceEnv` is the environment this patch was built
+    // from (passed by the caller, so many-to-one mappings check the right one). The segment must be
+    // a dangling reference in the source too, not a segment we failed to migrate, before dropping.
+    const absentInSource = segmentKey ? await segmentAbsentInSource(sourceEnv, segmentKey) : false;
+    if (segmentKey && absentInSource) {
+      const { patches: stripped, removed, unsafe } = stripRulesReferencingSegment(patchReq, env, segmentKey);
+      if (unsafe.length > 0) {
+        console.log(Colors.red(`\t  ✗ ${env}: segment "${segmentKey}" is unknown, but ${unsafe.length} rule(s) reference it alongside other segments or negated (${unsafe.join(", ")}); not removed automatically`));
+      } else if (removed.length > 0) {
+        console.log(Colors.yellow(`\t  ⚠ ${env}: segment "${segmentKey}" does not exist in source or destination; dropping ${removed.length} dead rule(s) and retrying`));
+        if (!skippedFieldsByFlag.has(flagKey)) skippedFieldsByFlag.set(flagKey, new Set());
+        for (const r of removed) skippedFieldsByFlag.get(flagKey)!.add(`${env}: ${r} (references unknown segment "${segmentKey}")`);
+        envsWithDroppedRules.add(`${flagKey}\u0000${env}`);
+        return await makePatchCall(flagKey, stripped, env, maintainerId, fallbackMemberId, variations, destinationFlag, sourceEnv, retryCount, true);
+      }
+    } else if (segmentKey) {
+      console.log(Colors.red(`\t  ✗ ${env}: segment "${segmentKey}" exists in the source environment (${sourceEnv}) but not in the destination; migrate segments first`));
+    }
+    flagsWithErrors.add(flagKey);
+    console.log(Colors.red(`\t  ✗ ${env}: Error 400`));
+    console.log(Colors.red(`\t    ${errorBody}`));
   } else {
     await handlePatchResponse(flagPatchStatus, patchFlagReq, flagKey, env);
   }
@@ -2512,9 +2577,18 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
       console.log(Colors.yellow(`\t⚠ Could not fetch destination flag, using source IDs (may cause issues with approval requests and skip detection)`));
     }
 
-    // Update flag-level properties when flag already existed
-    // Only patch properties that have actually changed vs the destination
-    if (flagAlreadyExisted && destinationFlag) {
+    // Update flag-level properties when the flag already existed, or when it was just created
+    // from a source that is archived or deprecated: the create endpoint ignores those fields, so
+    // without this patch an archived source flag would go live in the destination (and be served).
+    // Only patch properties that have actually changed vs the destination.
+    if (!destinationFlag && !flagAlreadyExisted && (flag.archived || flag.deprecated) && !inputArgs.dryRun) {
+      // The create endpoint ignores archived/deprecated and we could not read the flag back to
+      // patch them: the flag would stay live. Record it so the run does not report success.
+      console.log(Colors.red(`\t✗ Could not read the created flag back; archived/deprecated state not applied`));
+      flagsWithErrors.add(flag.key);
+      flagErrorDetails.set(flag.key, "created, but archived/deprecated state could not be applied (destination read failed)");
+    }
+    if (destinationFlag && (flagAlreadyExisted || flag.archived || flag.deprecated)) {
       const flagLevelPatches: any[] = [];
       const changed = (srcVal: any, destVal: any) => JSON.stringify(srcVal) !== JSON.stringify(destVal);
 
@@ -2537,8 +2611,8 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
         flagLevelPatches.push(buildPatch("archived", "replace", flag.archived));
       if (flag.deprecated !== undefined && changed(flag.deprecated, destinationFlag.deprecated))
         flagLevelPatches.push(buildPatch("deprecated", "replace", flag.deprecated));
-      if (flag.deprecatedDate !== undefined && changed(flag.deprecatedDate, destinationFlag.deprecatedDate))
-        flagLevelPatches.push(buildPatch("deprecatedDate", "replace", flag.deprecatedDate));
+      // deprecatedDate is managed by the API (stamped when `deprecated` flips) and cannot be patched
+      // on its own: a lone `replace /deprecatedDate` is rejected with "Unsupported json-patch operation".
 
       // Variations and defaults must be patched together to avoid index conflicts
       // Strip _id from both sides before comparing
@@ -2634,10 +2708,11 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
           );
         }
       });
-      await makePatchCall(createdFlagKey, patchReq, destEnvKey, flagMaintainerId, currentMemberId, destinationVariations, destinationFlag);
+      await makePatchCall(createdFlagKey, patchReq, destEnvKey, flagMaintainerId, currentMemberId, destinationVariations, destinationFlag, env);
 
-    // Track env version in manifest
-    if (envVersion !== undefined) {
+    // Track env version in manifest. An environment applied without dead rules gets no entry, so
+    // the next --incremental run re-evaluates it (and restores the rules if the segment exists by then).
+    if (envVersion !== undefined && !envsWithDroppedRules.has(`${createdFlagKey}\u0000${destEnvKey}`)) {
       flagManifestEnvs[env] = { version: envVersion, lastModified: envLastModified };
     }
     }
