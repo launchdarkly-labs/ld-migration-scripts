@@ -221,7 +221,7 @@ const parseArguments = async (): Promise<RevertConfig[]> => {
     .describe("dry-run", "Preview actions without making changes (overrides revert.dryRun; --no-dry-run forces a real run)")
     .describe("delete-views", "Delete views after unlinking flags (overrides revert.deleteViews)")
     .describe("v", "Comma-separated list of view keys to process (overrides revert.viewKeys and migration.targetView)")
-    .describe("use-source-data", "Use extracted source data for faster flag list (default: true with --config)")
+    .describe("use-source-data", "Identify migrated flags from the sync manifest or extracted source data (default: true; --no-use-source-data scans the destination for description markers instead)")
     .parse() as Arguments;
 
   // If config file provided, extract settings from it
@@ -243,7 +243,8 @@ const parseArguments = async (): Promise<RevertConfig[]> => {
     dryRun: args.dryRun || false,
     deleteViews: args.deleteViews || false,
     viewKeys: args.views ? args.views.split(",") : undefined,
-    useSourceData: false
+    // Smart mode (sync manifest, else extracted data) applies without a config file too; it needs -s
+    useSourceData: args.useSourceData !== false
   }];
 };
 

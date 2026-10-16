@@ -735,9 +735,12 @@ if (previousManifest && !previousManifest.destDomain) {
   ));
 }
 
-// Destination environment a selected source environment migrates to (undefined: not migrated this run)
+// Destination environment a selected source environment's segments migrate to (undefined: not migrated
+// this run, including every environment when segment migration is off, so segment entries stay untouched)
 const destEnvOfSelected = (sourceEnv: string): string | undefined =>
-  envkeys.includes(sourceEnv) ? (inputArgs.envMap && envMapping[sourceEnv] ? envMapping[sourceEnv] : sourceEnv) : undefined;
+  inputArgs.migrateSegments && envkeys.includes(sourceEnv)
+    ? (inputArgs.envMap && envMapping[sourceEnv] ? envMapping[sourceEnv] : sourceEnv)
+    : undefined;
 
 // The manifest records where each segment copy lives; a mapping that now sends a source environment
 // elsewhere would make its entries claim unrelated segments there, so such a run stops before writing
