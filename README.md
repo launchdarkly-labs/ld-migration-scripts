@@ -365,7 +365,7 @@ migration:
   - `overwrite`, `prompt` or `abort`: the workflow stops and lists the keys, because the later source would overwrite the earlier one's targeting (or, with `abort`, the migrate step would stop part-way).
 
   The check reads extracted data, so `extract-source` must have run for every merged source.
-- `conflictPrefix` applies to *any* key that already exists in the destination, so rerunning a migration with it set creates prefixed duplicates instead of updating the flags from the first run.
+- `conflictPrefix` applies to any key that already exists in the destination and is not recorded in the [sync manifest](#sync-manifest). A rerun updates the copies recorded by the first run (`foo` migrated as `imported-foo` is updated as `imported-foo`), so prefixed duplicates only appear when there is no manifest for the pair (for example after a dry run only, or after deleting it).
 - Environments are matched by key across all sources (`migration.environmentMapping` applies to every project).
 
 #### Same-account guard
@@ -491,6 +491,7 @@ migration:                   # Optional - for migrate step
   tags: string[] | null      # Optional tags added to migrated flags and segments
   migrateBigSegments: boolean  # Copy big segment members via CSV export/import (default: false)
   migrateViews: boolean      # Recreate views and link flags/segments to them (default: true)
+  adoptUnresolved: boolean   # Record resources an incomplete sync manifest lists as untracked as this migration's copies
   conflictPrefix: string
   targetView: string
   environments: string[]
@@ -803,6 +804,8 @@ deno task migrate -p SOURCE_PROJECT -d DEST_PROJECT -c "imported-"
 
 **Notes:**
 - Only applies when a conflict (HTTP 409) is detected
+- Resources recorded in the [sync manifest](#sync-manifest) from an earlier run are updated under their recorded key, whatever the conflict policy; the policy applies to resources the manifest does not know
+- With `--on-conflict abort`, the run stops at the first existing key after writing the sync manifest marked incomplete (see [Sync Manifest](#sync-manifest))
 - Without a prefix, a flag that already exists is updated in place: flag-level properties (name, description, tags, variations, lifecycle state, ...) that differ from the source are patched, then its environments. This is the case both when the pre-check finds the flag and when the create itself returns 409 (the flag appeared in between, or the pre-check failed)
 - The prefix is applied to both the resource key and name
 - All related patches and configurations use the prefixed key
@@ -864,6 +867,7 @@ Reading flag 1 of 50 : my-feature
 - Several source environments may map to one destination environment. A segment key present in more than one of them is then written more than once into that environment: the later write replaces the earlier one, or with `onConflict: prefix` is created with the prefix
 - Destination environments must already exist in the target project, unless `migration.createEnvironments: true` (`--create-environments`) is set, in which case missing mapped environments are created from the source settings
 - If a mapped destination environment doesn't exist (and `createEnvironments` is off), migration will abort with error
+- The [sync manifest](#sync-manifest) records each migrated segment's destination environment; a rerun whose mapping sends a source environment elsewhere stops before writing
 - Environment keys are case-sensitive
 - Can be combined with `-e` flag for additional filtering
 
@@ -1003,6 +1007,18 @@ deno task migrate \
 # 5. Map maintainer IDs
 ```
 
+## Sync Manifest
+
+After every real run, `migrate` writes `data/launchdarkly-migrations/sync-manifest-<source>-<dest>.json`: the inventory of what the migration wrote, used by `--incremental`, by view linking and by `revert`.
+
+- **What it records.** For every migrated flag and segment, the source version (so `--incremental` can skip unchanged resources) and the destination key when it differs from the source key (conflict prefix). Segments also record their destination environment. The file records the destination domain and account it was written for.
+- **Cumulative.** A run rewrites the entries of the resources it attempted and keeps the others (`includeFlags` / `excludeFlags`, `--since`, unselected environments, `migrateSegments: false`). A resource whose write failed keeps its entry with its versions cleared, so the next `--incremental` run retries it.
+- **Reruns update recorded copies.** A flag or segment with an entry is updated under its recorded destination key, whatever `--on-conflict` says; `conflictPrefix` and the conflict policy apply only to resources the manifest does not know. A rerun with a prefix therefore does not create a second prefixed copy.
+- **Trusted only for its destination.** `migrate` and `revert` refuse a manifest that records another project pair, destination domain or account; migrating the same projects to another destination needs its own working directory. A rerun whose `environmentMapping` sends a source environment elsewhere than recorded stops before writing. Manifests written by older versions carry neither identity nor segment environments: they are accepted with a warning and stamped by the next run, and their segment entries are looked up in the destination first (found ones are kept, missing ones dropped).
+- **Incomplete marker.** A run stopped by `--on-conflict abort` or an unexpected error, or whose failed writes left resources with an unknown outcome (a create the API rejected outright is not one), writes the manifest marked `incomplete`, listing the destination keys that may exist untracked (segments with the destination environment they were written to, so a later run with another mapping cannot close the gap). `revert` refuses such a manifest. The marker clears when a run without `includeFlags`, `excludeFlags` or `--since` completes with no failed writes and every listed key is mapped by an entry again. While the marker is set, resources the aborted run created surface in later runs as conflicts on keys without an entry; a skip or prefix rename leaves them untracked, so they are added to the list (conflicts met by a run that is not recovering from an incomplete manifest are ordinary foreign resources and are never listed). Once you have verified they were created by the aborted run, run `migrate` once with `--adopt-unresolved` (`migration.adoptUnresolved: true`): they are recorded as further copies of the matching source resource, the marker clears, and `revert` removes them too.
+- **Revert keeps it current.** `revert` removes the entries of the flags it deleted and of recorded flags the destination confirms are already gone (entries whose deletion failed keep their surviving copies; a flag that cannot be read stops the revert), so a later rerun treats a flag another source creates under the same key as a conflict.
+- A dry run never writes the manifest.
+
 ## Reverting Migrations
 
 If you need to undo a migration (e.g., after a failed or partial migration), you can use the revert functionality to clean up migrated resources.
@@ -1033,7 +1049,7 @@ deno task revert -p DEST_PROJECT -s SOURCE_PROJECT -v "migration-view" --dry-run
 ### What Gets Reverted
 
 The revert process:
-1. **Identifies migrated flags** - Uses source data to know exactly which flags were migrated (smart mode)
+1. **Identifies migrated flags** - Uses the sync manifest written by `migrate` (destination keys, including conflict-prefixed ones), or the extracted source data when there is no manifest, to know exactly which flags were migrated (smart mode)
 2. **Deletes approval requests** - Removes any pending approval requests for migrated flags
 3. **Unlinks from views** - Removes flags from the target view
 4. **Archives flags** - Archives migrated flags before deletion
@@ -1065,7 +1081,7 @@ The `revert:` block applies both in the workflow orchestrator and when running `
 
 **Multiple projects:** When `source.projectKeys` is set, `deno task revert -f <config>` reverts every listed project in order, using its destination key (from `destination.projectKeyMapping`, else the same key). Pass `-p` (and optionally `-s`) to revert only one project; `-s` on its own is ignored when several projects are listed. In the workflow orchestrator, the `revert` step already runs once per project.
 
-**Merged destinations:** Revert removes only the flags that came from each source (using that source's extracted flag list), so other sources' flags in the same destination are untouched. `-p new-project` reverts every source mapped to `new-project`; add `-s njordan-cd-example` to revert just one. With `deleteViews`, a view in a merged destination is kept while flags from its other sources still exist there, and is deleted by the revert that removes the last of them. Flags you created by hand in that view are not detected.
+**Merged destinations:** Revert removes only the flags that came from each source, so other sources' flags in the same destination are untouched. The flag list comes from the source's [sync manifest](#sync-manifest), which names the destination key of every migrated flag, including conflict-prefixed ones. Without a manifest for the reverted source (for example after a dry run only), its extracted flag list is used, but only when every other source merged into the same destination has a manifest: an extracted list says nothing about destination keys, since a conflict prefix may have renamed them. Keys those sibling manifests hold are left in place with a warning, and the reverted source's own prefixed copies are not detected; if a sibling has no manifest, the revert stops rather than guess. `-p new-project` reverts every source mapped to `new-project`; add `-s njordan-cd-example` to revert just one. With `deleteViews`, a view in a merged destination is kept while flags from its other sources (per their manifests) still exist there, or while a sibling has no manifest to check against, and is deleted by the revert that removes the last of them. Flags you created by hand in that view are not detected.
 
 ### CLI Options
 
@@ -1233,9 +1249,10 @@ don't need to specify them manually.
   true. Set to false to skip segment migration.
 - `-c, --conflictPrefix`: (Optional) Prefix to use when resolving key conflicts
   (e.g., 'imported-'). When a resource with a conflicting key is detected, it
-  will be created with this prefix automatically. This includes flags from an
-  earlier run of the same migration, so reruns create prefixed copies instead
-  of updating.
+  will be created with this prefix automatically. A rerun updates the copies
+  recorded in the sync manifest of the earlier run instead of creating further
+  prefixed copies; without a manifest, a flag from an earlier run counts as a
+  conflict too.
 - `-v, --targetView`: (Optional) View key to link all migrated flags to. This
   will link all flags to the specified view in addition to any views they were
   already linked to in the source project.
@@ -1275,6 +1292,9 @@ don't need to specify them manually.
   during extraction (`--extract-big-segments`).
 - `--migrate-views=false`: (Optional) Do not recreate the source project's views or link
   flags and segments to them (config: `migration.migrateViews`). `-v` still applies.
+- `--adopt-unresolved`: (Optional) Record the destination resources an incomplete sync manifest
+  lists as untracked as this migration's copies (config: `migration.adoptUnresolved`). Only after
+  checking by hand that the aborted run created them; see the revert section on merged destinations.
 - `--dry-run`: (Optional) Preview without writing to the destination or the sync manifest.
 
 **Exit code.** After the summary, `migrate` reconciles the flag keys (and segment keys per mapped environment) in the source data against the destination and exits with code `1` when any flag or segment failed to create or update, is missing from the destination, or when the reconciliation itself could not be completed (flags skipped by `--since` are out of scope). The workflow runner stops at that step. Exit code `0` means every resource in scope is present in the destination; use `scripts/verify-segments.ts` or an external field-level comparison for content parity.

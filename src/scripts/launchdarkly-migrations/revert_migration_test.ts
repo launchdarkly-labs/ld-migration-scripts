@@ -5,6 +5,7 @@ import {
 import {
   buildRevertConfigs,
   findRemainingSiblingFlagKeys,
+  selectRevertFlagKeys,
 } from "./revert_migration.ts";
 import type { WorkflowConfig } from "../../utils/workflow_config.ts";
 
@@ -344,4 +345,72 @@ Deno.test("findRemainingSiblingFlagKeys ignores keys this revert removes", () =>
     [],
   );
   assertEquals(findRemainingSiblingFlagKeys([], new Set(["a1"])), []);
+});
+
+const inv = (project: string, keys: string[], source: "manifest" | "extract" | "none") => ({ project, keys, source });
+
+Deno.test("selectRevertFlagKeys keeps every manifest key, even ones a sibling also lists", () => {
+  assertEquals(
+    selectRevertFlagKeys(
+      inv("b", ["imported-shared", "only-b", "only-b"], "manifest"),
+      [inv("a", ["shared", "only-a"], "extract")],
+    ),
+    { keys: ["imported-shared", "only-b"], ambiguous: [] },
+  );
+});
+
+Deno.test("selectRevertFlagKeys leaves extracted keys that a sibling's manifest holds in place", () => {
+  assertEquals(
+    selectRevertFlagKeys(
+      inv("b", ["shared", "only-b"], "extract"),
+      [inv("a", ["shared", "only-a"], "manifest"), inv("c", ["only-c"], "manifest")],
+    ),
+    { keys: ["only-b"], ambiguous: ["shared"] },
+  );
+});
+
+Deno.test("selectRevertFlagKeys refuses raw keys when a sibling only has extracted data", () => {
+  // A's extracted "shared" may have landed as "imported-shared": B's raw "imported-shared" would be A's flag
+  assertThrows(
+    () =>
+      selectRevertFlagKeys(
+        inv("b", ["imported-shared"], "extract"),
+        [inv("a", ["shared"], "extract"), inv("c", ["only-c"], "manifest")],
+      ),
+    Error,
+    "a migrated into the same destination without a sync manifest",
+  );
+});
+
+Deno.test("selectRevertFlagKeys treats a sibling's manifest destination key as taken", () => {
+  // Sibling A's manifest says its flag landed as "shared" (no prefix); B's raw "shared" might be A's flag
+  assertEquals(
+    selectRevertFlagKeys(inv("b", ["shared"], "extract"), [inv("a", ["shared"], "manifest")]),
+    { keys: [], ambiguous: ["shared"] },
+  );
+  // A's manifest says its copy is "imported-shared", so B's raw "shared" is B's own
+  assertEquals(
+    selectRevertFlagKeys(inv("b", ["shared"], "extract"), [inv("a", ["imported-shared"], "manifest")]),
+    { keys: ["shared"], ambiguous: [] },
+  );
+});
+
+Deno.test("selectRevertFlagKeys without siblings keeps all extracted keys", () => {
+  assertEquals(
+    selectRevertFlagKeys(inv("b", ["a", "b", "a"], "extract"), []),
+    { keys: ["a", "b"], ambiguous: [] },
+  );
+});
+
+Deno.test("selectRevertFlagKeys refuses raw keys when a sibling has no inventory at all", () => {
+  assertThrows(
+    () => selectRevertFlagKeys(inv("b", ["shared"], "extract"), [inv("a", [], "none"), inv("c", ["x"], "extract")]),
+    Error,
+    "no sync manifest for b, and a, c migrated into the same destination without a sync manifest",
+  );
+  // A manifest for the reverted source itself makes sibling inventories irrelevant
+  assertEquals(
+    selectRevertFlagKeys(inv("b", ["imported-shared"], "manifest"), [inv("a", [], "none")]),
+    { keys: ["imported-shared"], ambiguous: [] },
+  );
 });

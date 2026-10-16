@@ -303,6 +303,7 @@ const buildMigrationArgs = (config: WorkflowConfig): string[] => {
   args = addBooleanFlag(args, "-s=false", migration.migrateSegments === false);
   args = addBooleanFlag(args, "--migrate-big-segments", migration.migrateBigSegments);
   args = addBooleanFlag(args, "--migrate-views=false", migration.migrateViews === false);
+  args = addBooleanFlag(args, "--adopt-unresolved", migration.adoptUnresolved);
   args = addBooleanFlag(args, "--dry-run", migration.dryRun);
   args = addBooleanFlag(args, "--incremental", migration.incremental);
   args = addBooleanFlag(args, "--create-project", migration.createProject);

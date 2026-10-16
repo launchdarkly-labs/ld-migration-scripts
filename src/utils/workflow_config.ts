@@ -62,6 +62,8 @@ export interface WorkflowConfig {
     createEnvironments?: boolean;
     /** false: views are neither extracted nor recreated/linked (targetView still applies) */
     migrateViews?: boolean;
+    /** Record the resources an incomplete sync manifest lists as untracked as this migration's copies */
+    adoptUnresolved?: boolean;
   };
   thirdPartyImport?: {
     inputFile: string;
