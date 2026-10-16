@@ -19,6 +19,7 @@ import {
   assertManifestComplete,
   manifestDestinationFlagKeys,
   readSyncManifest,
+  retireDeletedFlags,
   syncManifestPath,
 } from "../../utils/sync_manifest.ts";
 import {
@@ -965,7 +966,7 @@ const revertFlag = async (
   flag: Flag,
   environments: string[],
   stats: RevertStats
-): Promise<void> => {
+): Promise<boolean> => {
   console.log(Colors.cyan(`\n Processing flag: ${flag.key}`));
   
   try {
@@ -1023,11 +1024,39 @@ const revertFlag = async (
     } else {
       console.log(Colors.yellow(`  ⚠ Could not delete flag`));
     }
-    
+    return deleted;
   } catch (error) {
     const errorMsg = `Error processing flag ${flag.key}: ${error}`;
     stats.errors.push(errorMsg);
     console.log(Colors.red(`  ✗ ${errorMsg}`));
+    return false;
+  }
+};
+
+/**
+ * Removes the sync manifest entries of the flags this revert deleted, so a later rerun does not take a
+ * flag another source creates under the same key for its own recorded copy (which would bypass the
+ * conflict policy). Entries whose deletion failed keep their surviving copies; the file stays, possibly
+ * with no flags, as the authoritative inventory for the pair. A dry run changes nothing.
+ */
+const retireRevertedManifestEntries = async (
+  config: RevertConfig,
+  deletedKeys: Set<string>
+): Promise<void> => {
+  if (config.dryRun || !config.sourceProjectKey || deletedKeys.size === 0) return;
+  const path = syncManifestPath(config.sourceProjectKey, config.projectKey);
+  try {
+    const manifest = await readSyncManifest(config.sourceProjectKey, config.projectKey);
+    if (!manifest) return;
+    const updated = retireDeletedFlags(manifest, deletedKeys);
+    const retired = Object.keys(manifest.flags).length - Object.keys(updated.flags).length;
+    await Deno.writeTextFile(path, JSON.stringify(updated, null, 2));
+    console.log(Colors.gray(`  Sync manifest ${path}: ${retired} flag entr${retired === 1 ? "y" : "ies"} retired, ${Object.keys(updated.flags).length} kept`));
+  } catch (error) {
+    console.log(Colors.yellow(
+      `  Warning: could not update ${path} after deleting flags (${error instanceof Error ? error.message : String(error)}); ` +
+      `remove its entries for the deleted flags by hand before rerunning the migration`
+    ));
   }
 };
 
@@ -1264,9 +1293,13 @@ const revertProject = async (apiKey: string, config: RevertConfig): Promise<void
     
     // 5. Process each flag
     console.log(Colors.cyan("\n🗑️  Step 4: Reverting flags"));
+    const deletedKeys = new Set<string>();
     for (const flag of migrationFlags) {
-      await revertFlag(apiKey, domain, config, flag, environments, stats);
+      if (await revertFlag(apiKey, domain, config, flag, environments, stats)) deletedKeys.add(flag.key);
     }
+
+    // 5b. Retire the deleted flags' manifest entries so a rerun does not claim another source's flag
+    await retireRevertedManifestEntries(config, deletedKeys);
     
     // 6. Print summary
     printRevertSummary(config, stats);

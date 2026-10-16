@@ -309,6 +309,29 @@ export function adoptUnresolved(
   return adopted;
 }
 
+/**
+ * The manifest after a revert deleted destination flags: entries whose every owned copy was deleted are
+ * removed, so a later rerun does not take a flag another source creates under the same key for its own
+ * recorded copy; an entry with surviving copies (a failed deletion) keeps them, promoting the first one
+ * to its main destination key. The manifest itself stays, possibly with no flags, as the authoritative
+ * inventory for the pair.
+ */
+export function retireDeletedFlags(manifest: SyncManifest, deletedDestKeys: Iterable<string>): SyncManifest {
+  const deleted = new Set(deletedDestKeys);
+  const flags: SyncManifest["flags"] = {};
+  for (const [key, entry] of Object.entries(manifest.flags)) {
+    const remaining = ownedKeys(key, entry).filter((k) => !deleted.has(k));
+    if (remaining.length === 0) continue;
+    const { destKey: _d, extraDestKeys: _e, ...rest } = entry;
+    flags[key] = {
+      ...rest,
+      ...(remaining[0] !== key ? { destKey: remaining[0] } : {}),
+      ...(remaining.length > 1 ? { extraDestKeys: remaining.slice(1) } : {}),
+    };
+  }
+  return { ...manifest, flags, lastSyncTimestamp: new Date().toISOString() };
+}
+
 /** Destination keys of the flags a manifest records: the destKey when the flag was renamed, else the source key, plus adopted extra copies. */
 export function manifestDestinationFlagKeys(manifest: SyncManifest): string[] {
   return [...new Set(Object.entries(manifest.flags).flatMap(([key, entry]) => ownedKeys(key, entry)))];

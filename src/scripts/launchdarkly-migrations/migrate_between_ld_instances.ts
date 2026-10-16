@@ -2307,7 +2307,8 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
         // The flag appeared between the existence check and the POST, or the check itself failed.
         // Without a prefix it is treated like a flag found by the check: flag-level properties
         // (name, tags, variations, lifecycle, ...) and environments are updated below.
-        if (inputArgs.conflictPrefix && attemptCount === 1) {
+        // A recorded copy is never prefixed, even when the existence probe failed and only the POST saw it
+        if (inputArgs.conflictPrefix && attemptCount === 1 && !recorded.recorded) {
           // Conflict detected with prefix enabled, retry with prefix
           console.log(Colors.yellow(`\t⚠ Conflict detected, retrying with prefix "${inputArgs.conflictPrefix}"`));
           flagsPrefixedByConflict.add(flag.key);

@@ -12,6 +12,7 @@ import {
   ownEntry,
   readSyncManifest,
   retainIncompleteMarker,
+  retireDeletedFlags,
   type SyncManifest,
   syncManifestPath,
   withExtraDestKeys,
@@ -253,4 +254,30 @@ Deno.test("abortMarker records the destination keys of writes still in flight", 
   assertEquals(adoptUnresolved(left, entries, "imported-"), { flags: ["imported-b"], segments: [] });
   assertEquals(entries.flags.b.extraDestKeys, ["imported-b"]);
   assertEquals(retainIncompleteMarker(after, clean, entries), undefined);
+});
+
+Deno.test("retireDeletedFlags drops entries whose copies a revert deleted and keeps surviving copies", () => {
+  const before: SyncManifest = {
+    ...manifest,
+    flags: {
+      a: { version: 1, environments: {} },
+      b: { version: 1, environments: {}, destKey: "imported-b", extraDestKeys: ["b"] },
+      c: { version: 1, environments: {}, destKey: "imported-c", extraDestKeys: ["c"] },
+      d: { version: 1, environments: {} },
+    },
+  };
+  // a and both copies of b deleted; c's prefixed copy failed to delete; d was not touched
+  const after = retireDeletedFlags(before, ["a", "imported-b", "b", "c"]);
+  assertEquals(Object.keys(after.flags), ["c", "d"]);
+  assertEquals(after.flags.c, { version: 1, environments: {}, destKey: "imported-c" });
+  assertEquals(after.flags.d, before.flags.d);
+  assertEquals(manifestDestinationFlagKeys(after), ["imported-c", "d"]);
+  // Everything deleted: an authoritative empty inventory, not a missing manifest
+  assertEquals(retireDeletedFlags(before, manifestDestinationFlagKeys(before)).flags, {});
+  // A surviving extra copy becomes the main copy
+  assertEquals(
+    retireDeletedFlags(before, ["imported-c"]).flags.c,
+    { version: 1, environments: {} },
+    "c survives under its own key",
+  );
 });
