@@ -36,6 +36,8 @@ export interface SyncManifestSegment {
   destKey?: string;
   /** Further destination copies in this environment that this migration owns (see SyncManifestFlag.extraDestKeys) */
   extraDestKeys?: string[];
+  /** Destination environment the copy lives in, if it differs from the source environment (--env-map) */
+  destEnv?: string;
 }
 
 export interface SyncManifest {
@@ -323,13 +325,41 @@ export function retireDeletedFlags(manifest: SyncManifest, deletedDestKeys: Iter
     const remaining = ownedKeys(key, entry).filter((k) => !deleted.has(k));
     if (remaining.length === 0) continue;
     const { destKey: _d, extraDestKeys: _e, ...rest } = entry;
+    // A promoted extra copy was never synchronized by reruns (only the primary is updated), so its
+    // cached source versions are dropped and the next --incremental run re-syncs it in full
+    const promoted = remaining[0] !== (entry.destKey ?? key);
     flags[key] = {
       ...rest,
+      ...(promoted ? { version: 0, lastModified: undefined, environments: {} } : {}),
       ...(remaining[0] !== key ? { destKey: remaining[0] } : {}),
       ...(remaining.length > 1 ? { extraDestKeys: remaining.slice(1) } : {}),
     };
   }
   return { ...manifest, flags, lastSyncTimestamp: new Date().toISOString() };
+}
+
+/**
+ * Recorded segment copies whose destination environment differs from where the current mapping sends
+ * their source environment (`destEnvOf` returns undefined for a source environment not migrated this
+ * run). Treating such an entry as an owned copy would overwrite an unrelated segment in the new
+ * environment, so a run with a changed mapping must stop before writing.
+ */
+export function segmentEnvironmentMismatches(
+  previous: SyncManifest | null,
+  destEnvOf: (sourceEnv: string) => string | undefined,
+): string[] {
+  const mismatches: string[] = [];
+  for (const [sourceEnv, segments] of Object.entries(previous?.segments ?? {})) {
+    const current = destEnvOf(sourceEnv);
+    if (current === undefined) continue;
+    for (const [key, entry] of Object.entries(segments)) {
+      const recorded = entry.destEnv ?? sourceEnv;
+      if (recorded !== current) {
+        mismatches.push(`${sourceEnv}/${key}: recorded in destination environment "${recorded}", mapping now targets "${current}"`);
+      }
+    }
+  }
+  return mismatches;
 }
 
 /** Destination keys of the flags a manifest records: the destKey when the flag was renamed, else the source key, plus adopted extra copies. */

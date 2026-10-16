@@ -13,6 +13,7 @@ import {
   readSyncManifest,
   retainIncompleteMarker,
   retireDeletedFlags,
+  segmentEnvironmentMismatches,
   type SyncManifest,
   syncManifestPath,
   withExtraDestKeys,
@@ -274,10 +275,38 @@ Deno.test("retireDeletedFlags drops entries whose copies a revert deleted and ke
   assertEquals(manifestDestinationFlagKeys(after), ["imported-c", "d"]);
   // Everything deleted: an authoritative empty inventory, not a missing manifest
   assertEquals(retireDeletedFlags(before, manifestDestinationFlagKeys(before)).flags, {});
-  // A surviving extra copy becomes the main copy
+  // A surviving extra copy becomes the main copy, with its cached versions dropped: reruns only kept the
+  // primary in sync, so the next --incremental run must re-sync the promoted copy in full
   assertEquals(
     retireDeletedFlags(before, ["imported-c"]).flags.c,
-    { version: 1, environments: {} },
-    "c survives under its own key",
+    { version: 0, lastModified: undefined, environments: {} },
+    "c survives under its own key and is re-synced",
   );
+  // No promotion: the primary survives and its versions are kept
+  assertEquals(retireDeletedFlags(before, ["c"]).flags.c, { version: 1, environments: {}, destKey: "imported-c" });
 });
+
+Deno.test("segmentEnvironmentMismatches flags entries whose destination environment changed", () => {
+  const previous: SyncManifest = {
+    ...manifest,
+    segments: {
+      prod: { seg: { version: 1, destEnv: "staging" }, other: { version: 1, destEnv: "staging" } },
+      test: { t: { version: 1 } },
+    },
+  };
+  // Same mapping as recorded: fine; prod now mapped to production: both prod entries mismatch
+  assertEquals(segmentEnvironmentMismatches(previous, (e) => ({ prod: "staging", test: "test" })[e]), []);
+  assertEquals(
+    segmentEnvironmentMismatches(previous, (e) => ({ prod: "production", test: "test" })[e]),
+    [
+      'prod/seg: recorded in destination environment "staging", mapping now targets "production"',
+      'prod/other: recorded in destination environment "staging", mapping now targets "production"',
+    ],
+  );
+  // An unmapped (unselected) source environment is not checked; an entry without destEnv means same key
+  assertEquals(segmentEnvironmentMismatches(previous, (e) => ({ test: "qa" })[e]), [
+    'test/t: recorded in destination environment "test", mapping now targets "qa"',
+  ]);
+  assertEquals(segmentEnvironmentMismatches(null, () => "x"), []);
+});
+

@@ -866,6 +866,7 @@ Reading flag 1 of 50 : my-feature
 - Several source environments may map to one destination environment. A segment key present in more than one of them is then written more than once into that environment: the later write replaces the earlier one, or with `onConflict: prefix` is created with the prefix
 - Destination environments must already exist in the target project, unless `migration.createEnvironments: true` (`--create-environments`) is set, in which case missing mapped environments are created from the source settings
 - If a mapped destination environment doesn't exist (and `createEnvironments` is off), migration will abort with error
+- The sync manifest records the destination environment of each migrated segment. A rerun whose mapping sends a source environment elsewhere stops before writing, since the recorded copies would otherwise be taken for segments in the new environment
 - Environment keys are case-sensitive
 - Can be combined with `-e` flag for additional filtering
 

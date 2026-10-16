@@ -37,6 +37,7 @@ import {
   recordedDestination,
   retainIncompleteMarker,
   type RunOutcome,
+  segmentEnvironmentMismatches,
   withExtraDestKeys,
   syncManifestPath as syncManifestPathFor,
 } from "../../utils/sync_manifest.ts";
@@ -568,10 +569,21 @@ async function resolveConflictAction(
   return await result;
 }
 
-async function abortOnConflict(resourceType: string, key: string): Promise<never> {
+// --on-conflict abort: set by the worker that met the conflict. No further flag starts processing; the
+// workers already running settle (each writes its manifest entry or records its error), and only then
+// is the inventory snapshotted, so no write can land after the snapshot.
+let abortRequested: { resourceType: string; key: string } | null = null;
+
+function requestAbort(resourceType: string, key: string): void {
+  if (abortRequested) return;
+  abortRequested = { resourceType, key };
   console.log(Colors.red(`\n❌ Aborting: ${resourceType} "${key}" already exists in the destination (--on-conflict abort).`));
-  // Keep what this and earlier runs wrote, marked incomplete: concurrent flag writes may have finished
-  // without a manifest entry yet, so revert refuses manifest-based attribution until a completed run replaces it
+  console.log(Colors.yellow(`   Letting flags already being processed finish before saving the sync manifest...`));
+}
+
+/** Writes the manifest, marked incomplete, with everything settled workers recorded, then exits. */
+async function finalizeAbort(): Promise<never> {
+  const { resourceType, key } = abortRequested!;
   carryForwardManifestEntries(true);
   await writeSyncManifestFile({
     reason: `aborted: ${resourceType} "${key}" already exists (--on-conflict abort)`,
@@ -698,6 +710,19 @@ try {
 } catch (error) {
   console.log(Colors.red(`\n❌ ${error instanceof Error ? error.message : String(error)}`));
   console.log(Colors.yellow(`   Move or delete ${syncManifestPath} to start a fresh manifest.`));
+  Deno.exit(1);
+}
+
+// The manifest records where each segment copy lives; a mapping that now sends a source environment
+// elsewhere would make its entries claim unrelated segments there, so such a run stops before writing
+const envMismatches = segmentEnvironmentMismatches(
+  previousManifest,
+  (sourceEnv) => envkeys.includes(sourceEnv) ? (inputArgs.envMap && envMapping[sourceEnv] ? envMapping[sourceEnv] : sourceEnv) : undefined,
+);
+if (envMismatches.length > 0) {
+  console.log(Colors.red(`\n❌ The environment mapping differs from the one the sync manifest ${syncManifestPath} was written with:`));
+  envMismatches.forEach((m) => console.log(Colors.red(`   ${m}`)));
+  console.log(Colors.yellow(`   Re-run with the previous mapping, or revert that migration and remove the manifest before migrating with the new one.`));
   Deno.exit(1);
 }
 
@@ -1290,7 +1315,9 @@ if (inputArgs.migrateSegments) {
             ? await resolveConflictAction('segment', segmentKey)
             : 'overwrite';
           if (action === 'abort') {
-            await abortOnConflict('segment', segmentKey);
+            // The segment phase is sequential: nothing else is in flight
+            requestAbort('segment', segmentKey);
+            await finalizeAbort();
           } else if (action === 'skip') {
             console.log(Colors.gray(`  → Segment "${segmentKey}" exists, skipping`));
             segmentsSkippedByConflict.add(`${env.key}/${segment.key}`);
@@ -1464,6 +1491,7 @@ if (inputArgs.migrateSegments) {
           version: segment.version ?? 0,
           lastModified: segment.lastModifiedDate,
           ...(segmentKey !== segment.key && { destKey: segmentKey }),
+          ...(destEnvKey !== env.key && { destEnv: destEnvKey }),
         }, ownEntry(ownEntry(previousManifest?.segments, env.key), segment.key), segment.key);
       }
     };
@@ -2033,6 +2061,9 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
   let incrementalSkipCountDelta = 0;
   let incrementalEnvSkipCountDelta = 0;
 
+  // An abort is pending: start nothing new (this flag keeps its previous manifest entry, if any)
+  if (abortRequested) return { incrementalSkipCountDelta, incrementalEnvSkipCountDelta };
+
   // Read flag
   console.log(Colors.cyan(`\n[${index + 1}/${flagList.length}] Processing flag: ${flagkey}`));
 
@@ -2182,7 +2213,10 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
       // Flag already exists — resolve according to --on-conflict
       const action = await resolveConflictAction('flag', flagKey);
       if (action === 'abort') {
-        await abortOnConflict('flag', flagKey);
+        // The conflicting flag was not written: it is not an in-flight write of ours
+        flagsAttempted.delete(flag.key);
+        requestAbort('flag', flagKey);
+        return { incrementalSkipCountDelta, incrementalEnvSkipCountDelta };
       } else if (action === 'skip') {
         console.log(Colors.gray(`\t→ Flag already exists, skipping (--on-conflict)`));
         flagsSkippedByConflict.add(flag.key);
@@ -2593,6 +2627,8 @@ for (const level of levels) {
       incrementalSkipCount += r.incrementalSkipCountDelta;
       incrementalEnvSkipCount += r.incrementalEnvSkipCountDelta;
     }
+    // Every worker of this chunk has settled; snapshot the inventory and stop
+    if (abortRequested) await finalizeAbort();
   }
 }
 
