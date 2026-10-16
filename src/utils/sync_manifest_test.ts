@@ -88,7 +88,7 @@ Deno.test("assertManifestComplete rejects a manifest written by an aborted run a
   }
 });
 
-Deno.test("retainIncompleteMarker: an aborted run's marker survives until a clean unfiltered run reconciles every conflict", () => {
+Deno.test("retainIncompleteMarker: an aborted run's marker survives until the untracked keys are mapped by entries", () => {
   const incomplete = { reason: 'aborted: flag "c" already exists (--on-conflict abort)', at: "2026-10-16T09:00:00.000Z" };
   // The aborted run recorded "a"; its concurrent create of "b" finished without an entry
   const aborted: SyncManifest = {
@@ -98,15 +98,40 @@ Deno.test("retainIncompleteMarker: an aborted run's marker survives until a clea
     incomplete,
   };
   const clean = { flagScopeFiltered: false, failedWrites: false, conflictedFlags: [], conflictedSegments: [] };
+  const same = { flags: aborted.flags, segments: aborted.segments };
 
-  assertEquals(retainIncompleteMarker(manifest, clean), undefined, "no marker to keep");
-  assertEquals(retainIncompleteMarker(aborted, clean), undefined, "a clean unfiltered run closes the gap");
-  assertEquals(retainIncompleteMarker(aborted, { ...clean, flagScopeFiltered: true }), incomplete, "filtered run");
-  assertEquals(retainIncompleteMarker(aborted, { ...clean, failedWrites: true }), incomplete, "failed writes");
-  // Retry with --on-conflict skip or prefix: "b" exists but has no entry, so it may be the unrecorded write
-  assertEquals(retainIncompleteMarker(aborted, { ...clean, conflictedFlags: ["b"] }), incomplete, "unrecorded flag conflict");
-  assertEquals(retainIncompleteMarker(aborted, { ...clean, conflictedFlags: ["a"] }), undefined, "recorded flag conflict");
-  assertEquals(retainIncompleteMarker(aborted, { ...clean, conflictedSegments: ["production/other"] }), incomplete, "unrecorded segment conflict");
-  assertEquals(retainIncompleteMarker(aborted, { ...clean, conflictedSegments: ["test/seg"] }), incomplete, "same key, unrecorded environment");
-  assertEquals(retainIncompleteMarker(aborted, { ...clean, conflictedSegments: ["production/seg"] }), undefined, "recorded segment conflict");
+  assertEquals(retainIncompleteMarker(manifest, clean, same), undefined, "no marker to keep");
+  assertEquals(retainIncompleteMarker(aborted, clean, same), undefined, "a clean unfiltered run with nothing untracked closes the gap");
+  assertEquals(retainIncompleteMarker(aborted, { ...clean, flagScopeFiltered: true }, same), incomplete, "filtered run");
+  assertEquals(retainIncompleteMarker(aborted, { ...clean, failedWrites: true }, same), incomplete, "failed writes");
+  assertEquals(retainIncompleteMarker(aborted, { ...clean, conflictedFlags: ["a"] }, same), undefined, "conflict on a recorded key");
+  assertEquals(retainIncompleteMarker(aborted, { ...clean, conflictedSegments: ["production/seg"] }, same), undefined, "recorded segment");
+  assertEquals(
+    retainIncompleteMarker(aborted, { ...clean, conflictedSegments: ["test/seg"] }, same),
+    { ...incomplete, unresolved: { flags: [], segments: ["test/seg"] } },
+    "same key in an unrecorded environment stays untracked",
+  );
+});
+
+Deno.test("retainIncompleteMarker: untracked keys persist across recovery runs until an entry maps to them", () => {
+  const incomplete = { reason: "aborted", at: "2026-10-16T09:00:00.000Z" };
+  const aborted: SyncManifest = { ...manifest, flags: { a: { version: 1, environments: {} } }, incomplete };
+  const clean = { flagScopeFiltered: false, failedWrites: false, conflictedFlags: [], conflictedSegments: [] };
+
+  // Run 1: unfiltered --on-conflict prefix; "b" exists with no entry and is renamed to imported-b
+  const afterPrefix = { flags: { a: aborted.flags.a, b: { version: 1, environments: {}, destKey: "imported-b" } } };
+  const marker1 = retainIncompleteMarker(aborted, { ...clean, conflictedFlags: ["b"] }, afterPrefix);
+  assertEquals(marker1, { ...incomplete, unresolved: { flags: ["b"], segments: [] } });
+
+  // Run 2: unfiltered --incremental, everything unchanged, no conflicts seen: "b" is still untracked
+  const run1: SyncManifest = { ...manifest, ...afterPrefix, incomplete: marker1 };
+  assertEquals(retainIncompleteMarker(run1, clean, afterPrefix), marker1, "incremental retry keeps the marker");
+  // A second prefix/skip retry hits the same key, now with an entry, and still keeps it
+  assertEquals(retainIncompleteMarker(run1, { ...clean, conflictedFlags: ["b"] }, afterPrefix), marker1);
+
+  // Run 3: --on-conflict overwrite records "b" under its own key, so the gap is closed
+  const afterOverwrite = { flags: { a: aborted.flags.a, b: { version: 1, environments: {} } } };
+  assertEquals(retainIncompleteMarker(run1, clean, afterOverwrite), undefined, "an entry mapping to b clears the marker");
+  // A filtered run that records "b" keeps the marker (other writes may still be unattempted) but drops the resolved key
+  assertEquals(retainIncompleteMarker(run1, { ...clean, flagScopeFiltered: true }, afterOverwrite), incomplete);
 });

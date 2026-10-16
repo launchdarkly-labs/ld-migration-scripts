@@ -48,7 +48,19 @@ export interface SyncManifest {
    * skipping or prefix-renaming an existing resource that has no entry (it may be the aborted run's
    * unrecorded write); see retainIncompleteMarker.
    */
-  incomplete?: { reason: string; at: string };
+  incomplete?: IncompleteMarker;
+}
+
+export interface IncompleteMarker {
+  reason: string;
+  at: string;
+  /**
+   * Destination resources that exist but that no entry maps to, found by later runs as conflicts on
+   * keys without an entry (skipped or prefix-renamed): each may be the aborted run's unrecorded write.
+   * Flags by destination key; segments as "<sourceEnv>/<destinationKey>". The marker is cleared only
+   * once an entry maps to every one of them (for example after a run that overwrites them).
+   */
+  unresolved?: { flags: string[]; segments: string[] };
 }
 
 export function syncManifestPath(
@@ -95,12 +107,16 @@ export async function readSyncManifest(
  * the migration wrote, since a flag created just before the abort may have no entry.
  */
 export function assertManifestComplete(manifest: SyncManifest, path: string): void {
-  if (!manifest.incomplete) return;
+  const marker = manifest.incomplete;
+  if (!marker) return;
+  const untracked = [...(marker.unresolved?.flags ?? []), ...(marker.unresolved?.segments ?? [])];
   throw new Error(
-    `Sync manifest ${path} is marked incomplete (${manifest.incomplete.reason}, at ${manifest.incomplete.at}): ` +
-      `a migrate run stopped before recording all of its writes. Re-run the migration without includeFlags, ` +
-      `excludeFlags or --since and let it complete cleanly (no failed writes, no skipped or prefix-renamed conflicts on ` +
-      `resources missing from the manifest), or revert with --no-use-source-data after checking the flags by hand.`,
+    `Sync manifest ${path} is marked incomplete (${marker.reason}, at ${marker.at}): ` +
+      `a migrate run stopped before recording all of its writes` +
+      (untracked.length > 0 ? `; untracked destination resources: ${untracked.join(", ")}` : "") +
+      `. Re-run the migration without includeFlags, excludeFlags or --since and let it complete cleanly (no failed ` +
+      `writes), overwriting or recording the untracked resources, or revert with --no-use-source-data after ` +
+      `checking the flags by hand.`,
   );
 }
 
@@ -116,31 +132,56 @@ export interface RunOutcome {
   conflictedSegments: Iterable<string>;
 }
 
+/** The flag and segment entries a run is about to write. */
+export type ManifestEntries = Pick<SyncManifest, "flags" | "segments">;
+
+const mapsTo = (entries: Record<string, { destKey?: string }> | undefined, destKey: string): boolean =>
+  Object.entries(entries ?? {}).some(([key, entry]) => (entry.destKey ?? key) === destKey);
+
+const splitSegmentId = (id: string): [string, string] => {
+  const slash = id.indexOf("/");
+  return [id.slice(0, slash), id.slice(slash + 1)];
+};
+
 /**
  * The `incomplete` marker a run must keep from the previous manifest, or undefined when the run may
- * clear it. A run clears it only when it could have recorded every write the aborted run made: no
- * flag-scope filters, no failed writes, and every conflicted resource already had an entry. An
- * existing resource with no entry that was skipped or prefix-renamed may be the aborted run's
- * unrecorded write, and stays untracked, so the marker stays too.
+ * clear it. The aborted run's writes that finished without an entry surface later as conflicts on
+ * keys the manifest does not map to; skipping or prefix-renaming them leaves the existing copy
+ * untracked, so its destination key is recorded in the marker and persists across runs. The marker
+ * is cleared only by a run without flag-scope filters or failed writes, once an entry in `next` maps
+ * to every recorded destination key (an overwrite records it; an unchanged incremental retry does not).
  */
 export function retainIncompleteMarker(
   previous: SyncManifest | null,
   run: RunOutcome,
-): SyncManifest["incomplete"] | undefined {
+  next: ManifestEntries,
+): IncompleteMarker | undefined {
   const marker = previous?.incomplete;
   if (!marker) return undefined;
-  if (run.flagScopeFiltered || run.failedWrites) return marker;
-  const flags = previous!.flags ?? {};
+  const prevFlags = previous!.flags ?? {};
+  const prevSegments = previous!.segments ?? {};
+  // A conflict on a key with no entry reveals an untracked destination copy under that key
+  const flags = new Set(marker.unresolved?.flags ?? []);
   for (const key of run.conflictedFlags) {
-    if (!Object.hasOwn(flags, key)) return marker;
+    if (!Object.hasOwn(prevFlags, key)) flags.add(key);
   }
-  const segments = previous!.segments ?? {};
+  const segments = new Set(marker.unresolved?.segments ?? []);
   for (const id of run.conflictedSegments) {
-    const slash = id.indexOf("/");
-    const env = id.slice(0, slash), key = id.slice(slash + 1);
-    if (!Object.hasOwn(segments, env) || !Object.hasOwn(segments[env], key)) return marker;
+    const [env, key] = splitSegmentId(id);
+    if (!Object.hasOwn(prevSegments, env) || !Object.hasOwn(prevSegments[env], key)) segments.add(id);
   }
-  return undefined;
+  // Reconciled once some entry maps to the destination key
+  const unresolvedFlags = [...flags].filter((key) => !mapsTo(next.flags, key)).sort();
+  const unresolvedSegments = [...segments].filter((id) => {
+    const [env, key] = splitSegmentId(id);
+    return !mapsTo(next.segments?.[env], key);
+  }).sort();
+  const unresolved = unresolvedFlags.length > 0 || unresolvedSegments.length > 0
+    ? { flags: unresolvedFlags, segments: unresolvedSegments }
+    : undefined;
+  if (!run.flagScopeFiltered && !run.failedWrites && !unresolved) return undefined;
+  const { unresolved: _previous, ...rest } = marker;
+  return unresolved ? { ...rest, unresolved } : rest;
 }
 
 /** Destination keys of the flags a manifest records: the destKey when the flag was renamed, else the source key. */

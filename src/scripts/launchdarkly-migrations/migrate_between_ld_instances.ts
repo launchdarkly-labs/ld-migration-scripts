@@ -693,7 +693,10 @@ if (previousManifest?.incomplete) {
   console.log(Colors.yellow(
     `\n⚠ Previous sync manifest is marked incomplete (${previousManifest.incomplete.reason}, at ${previousManifest.incomplete.at}); ` +
       `revert refuses it until a run without includeFlags, excludeFlags or --since completes with no failed writes ` +
-      `and no skipped or prefix-renamed conflict on a resource missing from the manifest` +
+      `and an entry maps to every untracked destination resource` +
+      (previousManifest.incomplete.unresolved
+        ? ` (currently: ${[...previousManifest.incomplete.unresolved.flags, ...previousManifest.incomplete.unresolved.segments].join(", ")}; overwrite them to record them)`
+        : ``) +
       (flagScopeFiltered ? `. This run is filtered, so the marker is kept.` : `. This run clears it if it completes cleanly.`),
   ));
 }
@@ -2644,18 +2647,24 @@ if (usableViews.size > 0) {
  * recovery checks; otherwise retainIncompleteMarker decides whether an earlier abort's marker is kept.
  */
 async function writeSyncManifestFile(incomplete?: SyncManifest["incomplete"]): Promise<void> {
-  const marker = incomplete ?? retainIncompleteMarker(previousManifest, {
-    flagScopeFiltered,
-    failedWrites: flagsWithErrors.size > 0 || segmentsWithErrors.size > 0,
-    conflictedFlags: [...flagsSkippedByConflict, ...flagsPrefixedByConflict],
-    conflictedSegments: [...segmentsSkippedByConflict, ...segmentsPrefixedByConflict],
-  });
+  const entries = {
+    flags: updatedManifestFlags,
+    segments: Object.keys(updatedManifestSegments).length > 0 ? updatedManifestSegments : undefined,
+  };
+  const previousUnresolved = previousManifest?.incomplete?.unresolved;
+  const marker = incomplete
+    ? { ...incomplete, ...(previousUnresolved ? { unresolved: previousUnresolved } : {}) }
+    : retainIncompleteMarker(previousManifest, {
+      flagScopeFiltered,
+      failedWrites: flagsWithErrors.size > 0 || segmentsWithErrors.size > 0,
+      conflictedFlags: [...flagsSkippedByConflict, ...flagsPrefixedByConflict],
+      conflictedSegments: [...segmentsSkippedByConflict, ...segmentsPrefixedByConflict],
+    }, entries);
   const manifest: SyncManifest = {
     lastSyncTimestamp: new Date().toISOString(),
     sourceProject: inputArgs.projKeySource,
     destProject: inputArgs.projKeyDest,
-    flags: updatedManifestFlags,
-    segments: Object.keys(updatedManifestSegments).length > 0 ? updatedManifestSegments : undefined,
+    ...entries,
     ...(marker ? { incomplete: marker } : {}),
   };
   // A dry run changes nothing, so recording it would make a later --incremental run skip unsynced resources
@@ -2669,7 +2678,10 @@ async function writeSyncManifestFile(incomplete?: SyncManifest["incomplete"]): P
     const envCount = Object.values(manifest.flags).reduce((sum, f) => sum + Object.keys(f.environments).length, 0);
     const segCount = Object.values(updatedManifestSegments).reduce((sum, envSegs) => sum + Object.keys(envSegs).length, 0);
     const segPart = segCount > 0 ? `, ${segCount} segments` : '';
-    const note = marker ? ` — marked incomplete (${marker.reason})` : '';
+    const untracked = [...(marker?.unresolved?.flags ?? []), ...(marker?.unresolved?.segments ?? [])];
+    const note = marker
+      ? ` — marked incomplete (${marker.reason})${untracked.length > 0 ? `; untracked destination resources: ${untracked.join(", ")}` : ''}`
+      : '';
     console.log(Colors.green(`\n✓ Sync manifest written to ${syncManifestPath} (${Object.keys(manifest.flags).length} flags, ${envCount} environments${segPart} tracked)${note}`));
   } catch (error) {
     console.log(Colors.yellow(`\n⚠ Could not write sync manifest: ${error instanceof Error ? error.message : String(error)}`));
