@@ -990,31 +990,36 @@ export class ConflictTracker {
 }
 
 /**
- * Removes, from an environment patch, every rule that has a segmentMatch clause referencing
- * `segmentKey`. Used when the destination rejects a patch with `unknown segment "<key>"`: the
- * source tolerates the dangling reference (such a clause never matches), the destination does
- * not. Dropping the rule is evaluation-neutral because a rule whose segment is unknown never
- * matches anyway. Returns the new patch array and the descriptions of the removed rules.
+ * Removes, from an environment patch, the rules that can be dropped safely when the destination
+ * rejects the patch with `unknown segment "<key>"`: rules with a non-negated segmentMatch clause
+ * whose only value is `segmentKey`. Such a clause never matches when the segment is unknown, so
+ * removing the rule is evaluation-neutral. Rules where the segment is one of several OR'd values,
+ * or where the clause is negated, change targeting if removed; they are reported in `unsafe`
+ * and left in place, so the caller keeps the error.
+ * The caller must also have established that the segment is absent in the source environment.
  */
 export function stripRulesReferencingSegment(
   patches: Array<{ op: string; path: string; value?: unknown }>,
   envKey: string,
   segmentKey: string,
-): { patches: Array<{ op: string; path: string; value?: unknown }>; removed: string[] } {
-  const rulesPath = `/environments/${envKey}/rules`;
+): { patches: Array<{ op: string; path: string; value?: unknown }>; removed: string[]; unsafe: string[] } {
+  const rulesPath = `environments/${envKey}/rules`;
   const removed: string[] = [];
+  const unsafe: string[] = [];
+  const label = (rule: any, i: number) => rule?.description ? `rule "${rule.description}"` : `rule #${i + 1}`;
   const out = patches.map((p) => {
-    if (p.path !== rulesPath || !Array.isArray(p.value)) return p;
+    if (p.path.replace(/^\//, "") !== rulesPath || !Array.isArray(p.value)) return p;
     const kept = (p.value as any[]).filter((rule, i) => {
-      const hit = (rule?.clauses ?? []).some((c: any) =>
-        c?.op === "segmentMatch" && Array.isArray(c.values) && c.values.includes(segmentKey)
-      );
-      if (hit) removed.push(rule?.description ? `rule "${rule.description}"` : `rule #${i + 1}`);
-      return !hit;
+      const clauses: any[] = rule?.clauses ?? [];
+      const referencing = clauses.filter((c) => c?.op === "segmentMatch" && Array.isArray(c.values) && c.values.includes(segmentKey));
+      if (referencing.length === 0) return true;
+      const safe = referencing.every((c) => !c.negate && c.values.length === 1);
+      if (safe) removed.push(label(rule, i)); else unsafe.push(label(rule, i));
+      return !safe;
     });
     return { ...p, value: kept };
   });
-  return { patches: out, removed };
+  return { patches: out, removed, unsafe };
 }
 
 /** Extracts the segment key from a LaunchDarkly `unknown segment "<key>"` error body, if present. */
