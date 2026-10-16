@@ -47,14 +47,15 @@ echo "New version: $NEW_VERSION"
 sed -i.bak "s/\"version\": \"[^\"]*\"/\"version\": \"$NEW_VERSION\"/" deno.json
 rm deno.json.bak
 
-# Update README badge
-sed -i.bak "s/version-[^-]*-blue/version-$NEW_VERSION-blue/" README.md
-rm README.md.bak
+# The README version badge is dynamic (shields.io reads deno.json on main), so it needs no update.
 
-# Update CHANGELOG.md
+# Update CHANGELOG.md: the Unreleased section becomes this version, dated today, under a fresh
+# Unreleased heading. awk instead of sed: BSD sed (macOS) does not expand \n in a replacement.
 TODAY=$(date +%Y-%m-%d)
-sed -i.bak "s/## \[Unreleased\]/## [$NEW_VERSION] - $TODAY\n\n## [Unreleased]/" CHANGELOG.md
-rm CHANGELOG.md.bak
+awk -v v="$NEW_VERSION" -v d="$TODAY" '
+  !done && $0 == "## [Unreleased]" { print; print ""; print "## [" v "] - " d; done = 1; next }
+  { print }
+' CHANGELOG.md > CHANGELOG.md.tmp && mv CHANGELOG.md.tmp CHANGELOG.md
 
 echo "✅ Version bumped to $NEW_VERSION"
 echo ""
