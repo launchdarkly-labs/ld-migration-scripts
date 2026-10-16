@@ -134,6 +134,12 @@ export interface RunOutcome {
   conflictedFlags: Iterable<string>;
   /** "<sourceEnv>/<segmentKey>" of segments whose destination copy already existed and was skipped or prefix-renamed */
   conflictedSegments: Iterable<string>;
+  /**
+   * Destination keys of writes still in flight when a run aborted (flags by destination key, segments
+   * as "<sourceEnv>/<destinationKey>"): each may or may not exist, and none has an entry yet, so they
+   * stay untracked until an entry maps to them
+   */
+  pendingDestKeys?: { flags: Iterable<string>; segments: Iterable<string> };
 }
 
 /** The flag and segment entries a run is about to write. */
@@ -143,6 +149,25 @@ type DestEntry = { destKey?: string; extraDestKeys?: string[] };
 
 /** Every destination key an entry owns: its main copy and any adopted extra copies. */
 const ownedKeys = (key: string, entry: DestEntry): string[] => [entry.destKey ?? key, ...(entry.extraDestKeys ?? [])];
+
+/** Own-property lookup: a resource named like an Object.prototype member must not resolve to an inherited value. */
+export function ownEntry<T>(record: Record<string, T> | undefined, key: string): T | undefined {
+  return record !== undefined && Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
+/**
+ * A rebuilt manifest entry with the extra destination copies its previous entry owned (adopted with
+ * --adopt-unresolved) merged in, so a successful rerun does not drop them from the inventory.
+ */
+export function withExtraDestKeys<T extends DestEntry>(entry: T, previous: DestEntry | undefined, key: string): T {
+  const main = entry.destKey ?? key;
+  const extras = [...new Set([...(entry.extraDestKeys ?? []), ...(previous?.extraDestKeys ?? [])])].filter((k) => k !== main);
+  if (extras.length === 0) {
+    const { extraDestKeys: _none, ...rest } = entry;
+    return rest as T;
+  }
+  return { ...entry, extraDestKeys: extras };
+}
 
 const mapsTo = (entries: Record<string, DestEntry> | undefined, destKey: string): boolean =>
   Object.entries(entries ?? {}).some(([key, entry]) => ownedKeys(key, entry).includes(destKey));
@@ -173,6 +198,9 @@ export function unresolvedAfterRun(
     const [env, key] = splitSegmentId(id);
     if (!Object.hasOwn(prevSegments, env) || !Object.hasOwn(prevSegments[env], key)) segments.add(id);
   }
+  // Writes in flight at an abort have no entry yet, whatever their outcome
+  for (const key of run.pendingDestKeys?.flags ?? []) flags.add(key);
+  for (const id of run.pendingDestKeys?.segments ?? []) segments.add(id);
   const unresolvedFlags = [...flags].filter((key) => !mapsTo(next.flags, key)).sort();
   const unresolvedSegments = [...segments].filter((id) => {
     const [env, key] = splitSegmentId(id);
