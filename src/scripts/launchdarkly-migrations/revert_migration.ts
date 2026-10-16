@@ -1048,7 +1048,10 @@ const revertFlag = async (
       stats.flagsDeleted++;
       console.log(Colors.green(`  ✓ Deleted flag`));
     } else {
-      console.log(Colors.yellow(`  ⚠ Could not delete flag`));
+      // Recorded as an error: the flag remains, so the revert must not report success
+      const errorMsg = `Could not delete flag ${flag.key}`;
+      stats.errors.push(errorMsg);
+      console.log(Colors.red(`  ✗ ${errorMsg}`));
     }
     return deleted;
   } catch (error) {
