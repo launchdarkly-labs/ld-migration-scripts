@@ -1498,7 +1498,7 @@ deno task version:bump:major    # 1.0.0 → 2.0.0
 
 You can also manage versions manually:
 - **deno.json**: Update the `version` field
-- **README.md**: Update the version badge
+- **README.md**: nothing to do; the version badge is dynamic and reads `deno.json` on `main` (GitHub's image cache may show the previous version for a few minutes)
 - **CHANGELOG.md**: Move items from `[Unreleased]` to a new version section
 
 ## License
