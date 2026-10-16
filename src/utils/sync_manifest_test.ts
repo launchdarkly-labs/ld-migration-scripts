@@ -5,6 +5,7 @@ import {
 } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   abortMarker,
+  adoptUnresolved,
   assertManifestComplete,
   recordedDestination,
   manifestDestinationFlagKeys,
@@ -32,8 +33,13 @@ Deno.test("syncManifestPath matches the file migrate writes", () => {
   assertEquals(syncManifestPath("a", "b", "/tmp/x"), "/tmp/x/sync-manifest-a-b.json");
 });
 
-Deno.test("manifestDestinationFlagKeys prefers destKey over the source key", () => {
+Deno.test("manifestDestinationFlagKeys prefers destKey over the source key and includes adopted copies", () => {
   assertEquals(manifestDestinationFlagKeys(manifest), ["imported-shared", "only-payroll"]);
+  const withExtra: SyncManifest = {
+    ...manifest,
+    flags: { ...manifest.flags, shared: { ...manifest.flags.shared, extraDestKeys: ["shared"] } },
+  };
+  assertEquals(manifestDestinationFlagKeys(withExtra), ["imported-shared", "shared", "only-payroll"]);
 });
 
 Deno.test("readSyncManifest returns null when there is no manifest and parses one when there is", async () => {
@@ -154,10 +160,11 @@ Deno.test("abortMarker keeps gaps found during a recovery run that aborts again"
   assertEquals(abortMarker(manifest, incomplete, clean, { flags: manifest.flags }), incomplete);
 });
 
-Deno.test("recordedDestination reuses this migration's earlier prefixed copy on a rerun", () => {
+Deno.test("recordedDestination reuses this migration's earlier copy on a rerun, renamed or not", () => {
   const source = { key: "foo", name: "Foo" };
   assertEquals(recordedDestination(undefined, source, "imported-"), { key: "foo", name: "Foo", recorded: false });
-  assertEquals(recordedDestination({}, source, "imported-"), { key: "foo", name: "Foo", recorded: false });
+  // Recorded under its own key: a prefix-enabled rerun updates it instead of creating imported-foo
+  assertEquals(recordedDestination({}, source, "imported-"), { key: "foo", name: "Foo", recorded: true });
   assertEquals(
     recordedDestination({ destKey: "imported-foo" }, source, "imported-"),
     { key: "imported-foo", name: "imported-Foo", recorded: true },
@@ -167,4 +174,34 @@ Deno.test("recordedDestination reuses this migration's earlier prefixed copy on 
     recordedDestination({ destKey: "imported-foo" }, source, "legacy-"),
     { key: "imported-foo", name: "Foo", recorded: true },
   );
+});
+
+Deno.test("adoptUnresolved records untracked originals as extra copies, which clears the marker and reaches revert", () => {
+  const incomplete = { reason: "aborted", at: "2026-10-16T09:00:00.000Z", unresolved: { flags: ["b"], segments: ["production/seg"] } };
+  // After recovery: b was prefixed to imported-b, seg to imported-seg; the originals are still untracked
+  const previous: SyncManifest = {
+    ...manifest,
+    flags: { a: { version: 1, environments: {} }, b: { version: 1, environments: {}, destKey: "imported-b" } },
+    segments: { production: { seg: { version: 1, destKey: "imported-seg" } } },
+    incomplete,
+  };
+  const clean = { flagScopeFiltered: false, failedWrites: false, conflictedFlags: [], conflictedSegments: [] };
+  const entries: { flags: SyncManifest["flags"]; segments: NonNullable<SyncManifest["segments"]> } = {
+    flags: { a: { version: 1, environments: {} }, b: { version: 2, environments: {}, destKey: "imported-b" } },
+    segments: { production: { seg: { version: 2, destKey: "imported-seg" } } },
+  };
+  // Without adoption an unfiltered clean rerun cannot clear the marker: every run targets the prefixed copies
+  assertEquals(retainIncompleteMarker(previous, clean, entries), incomplete);
+
+  assertEquals(adoptUnresolved(previous, entries), { flags: ["b"], segments: ["production/seg"] });
+  assertEquals(entries.flags.b.extraDestKeys, ["b"]);
+  assertEquals(entries.segments.production.seg.extraDestKeys, ["seg"]);
+  assertEquals(retainIncompleteMarker(previous, clean, entries), undefined, "adopted copies are mapped, marker clears");
+  // Revert then removes both copies
+  assertEquals(manifestDestinationFlagKeys({ ...manifest, ...entries }), ["a", "imported-b", "b"]);
+  // Adopting again is a no-op; a key without a matching entry stays unresolved
+  assertEquals(adoptUnresolved({ ...previous, incomplete }, entries), { flags: [], segments: [] });
+  const filtered = { flags: { a: entries.flags.a }, segments: {} };
+  assertEquals(adoptUnresolved(previous, filtered), { flags: [], segments: [] });
+  assertEquals(retainIncompleteMarker(previous, { ...clean, flagScopeFiltered: true }, filtered), incomplete);
 });

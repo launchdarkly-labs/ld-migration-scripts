@@ -25,6 +25,8 @@ export interface SyncManifestFlag {
   environments: Record<string, SyncManifestEnv>;
   /** Destination key, if it differs from the source key (e.g. conflict prefix) */
   destKey?: string;
+  /** Further destination copies this migration owns, e.g. a write an aborted run left unrecorded and a later run prefixed; adopted with --adopt-unresolved */
+  extraDestKeys?: string[];
 }
 
 export interface SyncManifestSegment {
@@ -32,6 +34,8 @@ export interface SyncManifestSegment {
   lastModified?: number;
   /** Destination key in this environment, if it differs from the source key (e.g. conflict prefix) */
   destKey?: string;
+  /** Further destination copies in this environment that this migration owns (see SyncManifestFlag.extraDestKeys) */
+  extraDestKeys?: string[];
 }
 
 export interface SyncManifest {
@@ -115,8 +119,8 @@ export function assertManifestComplete(manifest: SyncManifest, path: string): vo
       `a migrate run stopped before recording all of its writes` +
       (untracked.length > 0 ? `; untracked destination resources: ${untracked.join(", ")}` : "") +
       `. Re-run the migration without includeFlags, excludeFlags or --since and let it complete cleanly (no failed ` +
-      `writes), overwriting or recording the untracked resources, or revert with --no-use-source-data after ` +
-      `checking the flags by hand.`,
+      `writes); if untracked resources remain, verify they were created by the aborted run and re-run with ` +
+      `--adopt-unresolved to record them, or revert with --no-use-source-data after checking the flags by hand.`,
   );
 }
 
@@ -135,8 +139,13 @@ export interface RunOutcome {
 /** The flag and segment entries a run is about to write. */
 export type ManifestEntries = Pick<SyncManifest, "flags" | "segments">;
 
-const mapsTo = (entries: Record<string, { destKey?: string }> | undefined, destKey: string): boolean =>
-  Object.entries(entries ?? {}).some(([key, entry]) => (entry.destKey ?? key) === destKey);
+type DestEntry = { destKey?: string; extraDestKeys?: string[] };
+
+/** Every destination key an entry owns: its main copy and any adopted extra copies. */
+const ownedKeys = (key: string, entry: DestEntry): string[] => [entry.destKey ?? key, ...(entry.extraDestKeys ?? [])];
+
+const mapsTo = (entries: Record<string, DestEntry> | undefined, destKey: string): boolean =>
+  Object.entries(entries ?? {}).some(([key, entry]) => ownedKeys(key, entry).includes(destKey));
 
 const splitSegmentId = (id: string): [string, string] => {
   const slash = id.indexOf("/");
@@ -211,25 +220,55 @@ export function abortMarker(
 }
 
 /**
- * The destination key and name a rerun should write a source resource under. A previous manifest
- * entry whose destination key differs from the source key names this migration's own earlier copy
- * (a conflict-prefix rename), so the rerun updates that copy instead of creating another prefixed
- * duplicate that the manifest would then track in place of the first one.
+ * The destination key and name a rerun should write a source resource under. Any previous manifest
+ * entry names this migration's own earlier copy: under the source key, or under another key after a
+ * conflict-prefix rename. The rerun updates that copy instead of treating it as a conflict, so a
+ * prefix-enabled rerun does not create another prefixed duplicate that the manifest would then track
+ * in place of the first one.
  */
 export function recordedDestination(
   entry: { destKey?: string } | undefined,
   source: { key: string; name: string },
   conflictPrefix: string | undefined,
 ): { key: string; name: string; recorded: boolean } {
-  const destKey = entry?.destKey;
-  if (!destKey || destKey === source.key) return { key: source.key, name: source.name, recorded: false };
+  if (!entry) return { key: source.key, name: source.name, recorded: false };
+  const destKey = entry.destKey ?? source.key;
   const name = conflictPrefix && destKey === `${conflictPrefix}${source.key}`
     ? `${conflictPrefix}${source.name}`
     : source.name;
   return { key: destKey, name, recorded: true };
 }
 
-/** Destination keys of the flags a manifest records: the destKey when the flag was renamed, else the source key. */
+/**
+ * Explicit reconciliation of an incomplete marker (--adopt-unresolved): every destination resource the
+ * marker lists as untracked whose key matches a source resource with an entry in `entries` is recorded
+ * as a further copy owned by that entry (extraDestKeys), so the marker can clear and revert removes it
+ * too. The caller has verified by hand that those resources were created by the aborted run. Returns
+ * what was adopted; keys without a matching entry (e.g. filtered out this run) stay unresolved.
+ */
+export function adoptUnresolved(
+  previous: SyncManifest | null,
+  entries: ManifestEntries,
+): { flags: string[]; segments: string[] } {
+  const adopted = { flags: [] as string[], segments: [] as string[] };
+  const unresolved = previous?.incomplete?.unresolved;
+  if (!unresolved) return adopted;
+  const adopt = (entry: DestEntry | undefined, key: string, destKey: string): boolean => {
+    if (!entry || ownedKeys(key, entry).includes(destKey)) return false;
+    entry.extraDestKeys = [...(entry.extraDestKeys ?? []), destKey];
+    return true;
+  };
+  for (const destKey of unresolved.flags) {
+    if (adopt(entries.flags[destKey], destKey, destKey)) adopted.flags.push(destKey);
+  }
+  for (const id of unresolved.segments) {
+    const [env, destKey] = splitSegmentId(id);
+    if (adopt(entries.segments?.[env]?.[destKey], destKey, destKey)) adopted.segments.push(id);
+  }
+  return adopted;
+}
+
+/** Destination keys of the flags a manifest records: the destKey when the flag was renamed, else the source key, plus adopted extra copies. */
 export function manifestDestinationFlagKeys(manifest: SyncManifest): string[] {
-  return Object.entries(manifest.flags).map(([key, entry]) => entry.destKey ?? key);
+  return [...new Set(Object.entries(manifest.flags).flatMap(([key, entry]) => ownedKeys(key, entry)))];
 }

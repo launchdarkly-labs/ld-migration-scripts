@@ -31,6 +31,7 @@ import {
   type SyncManifestFlag,
   type SyncManifestSegment,
   abortMarker,
+  adoptUnresolved,
   readSyncManifest,
   recordedDestination,
   retainIncompleteMarker,
@@ -64,6 +65,7 @@ interface Arguments {
   createProject?: boolean;
   createEnvironments?: boolean;
   migrateViews?: boolean;
+  adoptUnresolved?: boolean;
 }
 
 // Sync manifest types and path live in utils/sync_manifest.ts, shared with the revert tool
@@ -97,6 +99,7 @@ interface MigrationConfig {
     createProject?: boolean;
     createEnvironments?: boolean;
     migrateViews?: boolean;
+    adoptUnresolved?: boolean;
   };
   /** Alias for options — YAML configs may use migration: instead of options: */
   migration?: MigrationConfig["options"];
@@ -295,6 +298,10 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .default("concurrency", 10)
   .alias("create-project", "createProject")
   .alias("create-environments", "createEnvironments")
+  .alias("adopt-unresolved", "adoptUnresolved")
+  .boolean("adopt-unresolved")
+  .default("adopt-unresolved", undefined)
+  .describe("adopt-unresolved", "Record the destination resources an incomplete sync manifest lists as untracked as this migration's copies (after verifying by hand that the aborted run created them)")
   .alias("migrate-views", "migrateViews")
   .boolean("migrate-views")
   .default("migrate-views", undefined)
@@ -367,6 +374,7 @@ if (cliArgs.config) {
       createProject: cliArgs.createProject ?? opts?.createProject ?? false,
       createEnvironments: cliArgs.createEnvironments ?? opts?.createEnvironments ?? false,
       migrateViews: cliArgs.migrateViews ?? opts?.migrateViews ?? true,
+      adoptUnresolved: cliArgs.adoptUnresolved ?? opts?.adoptUnresolved ?? false,
       config: cliArgs.config
     };
     
@@ -405,6 +413,7 @@ console.log(Colors.gray(`  Conflict Prefix: ${inputArgs.conflictPrefix || 'none'
 console.log(Colors.gray(`  On Conflict: ${inputArgs.onConflict || (inputArgs.conflictPrefix ? 'prefix' : 'overwrite')}`));
 console.log(Colors.gray(`  Target View: ${inputArgs.targetView || 'none'}`));
 console.log(Colors.gray(`  Migrate Views: ${migrateViews}`));
+console.log(Colors.gray(`  Adopt Unresolved: ${inputArgs.adoptUnresolved || false}`));
 console.log(Colors.gray(`  Tags: ${migrationTags.length > 0 ? migrationTags.join(', ') : 'none'}`));
 console.log(Colors.gray(`  Environments: ${inputArgs.environments || 'all'}`));
 console.log(Colors.gray(`  Env Mapping: ${inputArgs.envMap || 'none'}`));
@@ -698,7 +707,8 @@ if (previousManifest?.incomplete) {
       `revert refuses it until a run without includeFlags, excludeFlags or --since completes with no failed writes ` +
       `and an entry maps to every untracked destination resource` +
       (previousManifest.incomplete.unresolved
-        ? ` (currently: ${[...previousManifest.incomplete.unresolved.flags, ...previousManifest.incomplete.unresolved.segments].join(", ")}; overwrite them to record them)`
+        ? ` (currently: ${[...previousManifest.incomplete.unresolved.flags, ...previousManifest.incomplete.unresolved.segments].join(", ")}; ` +
+          `verify the aborted run created them, then re-run with --adopt-unresolved to record them)`
         : ``) +
       (flagScopeFiltered ? `. This run is filtered, so the marker is kept.` : `. This run clears it if it completes cleanly.`),
   ));
@@ -2677,6 +2687,15 @@ async function writeSyncManifestFile(incomplete?: SyncManifest["incomplete"]): P
     conflictedFlags: [...flagsSkippedByConflict, ...flagsPrefixedByConflict],
     conflictedSegments: [...segmentsSkippedByConflict, ...segmentsPrefixedByConflict],
   };
+  // --adopt-unresolved: the user verified the untracked resources are the aborted run's writes; record them
+  // as this migration's extra copies so the marker can clear and revert removes them too
+  if (!incomplete && inputArgs.adoptUnresolved && previousManifest?.incomplete?.unresolved) {
+    const adopted = adoptUnresolved(previousManifest, entries);
+    const list = [...adopted.flags, ...adopted.segments];
+    console.log(list.length > 0
+      ? Colors.cyan(`\nAdopted ${list.length} untracked destination resource(s) into the sync manifest: ${list.join(", ")}`)
+      : Colors.yellow(`\nNo untracked destination resource could be adopted (no matching source resource in this run)`));
+  }
   // An abort keeps the gaps found so far (previous marker plus this run's conflicts on unrecorded keys)
   const marker = incomplete
     ? abortMarker(previousManifest, incomplete, run, entries)
