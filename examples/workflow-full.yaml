@@ -37,6 +37,9 @@ migration:
   # Needs createSegmentExport on the source token (see docs/launchdarkly-migration-role.md).
   # migrateBigSegments: true
 
+  # Recreate the source project's views and link flags/segments to them (optional, default: true)
+  # migrateViews: false
+
   # Preview without writing to the destination (optional, recommended for the first run)
   # dryRun: true
   

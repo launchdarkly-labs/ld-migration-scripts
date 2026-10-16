@@ -7,15 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-10-16
+
 ### Added
 
 - `migration.migrateViews` (`--migrate-views=false`, extraction `--extract-views=false`): opt out of recreating views and linking flags and segments to them; `targetView` still applies (#20)
 - `scripts/verify-segments.ts --source-domain / --dest-domain / --env-map`: verify a cross-instance (US → EU) or environment-mapped migration; only mapped source environments are checked (#20)
+- `migration.adoptUnresolved` (`--adopt-unresolved`): after an interrupted run left destination resources untracked, record them as this migration's copies once you have verified the aborted run created them, so the sync manifest's incomplete marker can clear and `revert` removes them (#21)
 
 ### Changed
 
 - **Sync manifest as the migration's ownership inventory** (#21, see the README section "Sync Manifest"). The manifest is cumulative (entries outside a run's scope are kept; a failed write keeps its entry with cleared versions so `--incremental` retries it), records the destination domain, account and each segment's destination environment, and is refused by `migrate` and `revert` when written for another project pair or destination (older manifests are accepted with a warning and stamped; their segment entries are verified against the destination first). Reruns update the copies the manifest records, under their recorded key, instead of creating further prefixed duplicates; reconciliation and view linking resolve keys through it. It is loaded before any destination write and persisted right after the flag phase, before view linking. Inventories use null-prototype dictionaries, so a flag named `__proto__` is kept
-- **Incomplete marker and `--adopt-unresolved`** (#21). A run stopped by `--on-conflict abort` (after the flags already being processed settle) or by an unexpected phase error, or whose failed writes left resources without an entry, writes the manifest marked `incomplete` with the destination keys that may exist untracked; `revert` refuses it. The marker clears when an unfiltered run completes without failed writes and every listed key is mapped by an entry again. `migration.adoptUnresolved` (`--adopt-unresolved`) records the listed resources as further copies of the matching source resource, after the user has verified the aborted run created them
+- **Incomplete marker and `--adopt-unresolved`** (#21). A run stopped by `--on-conflict abort` (after the flags already being processed settle) or by an unexpected phase error, or whose failed writes left resources without an entry, writes the manifest marked `incomplete` with the destination keys that may exist untracked; `revert` refuses it. The marker clears when an unfiltered run completes without failed writes and every listed key is mapped by an entry again (see `migration.adoptUnresolved` under Added)
 - Updating an existing segment clears targeting fields and rules that are empty in the source but still set in the destination (the destination is read once for that), so removals in the source are synced (#21)
 - `revert_migration.ts` exits with code `1` when a project revert finished with errors (a flag that could not be removed, a manifest that could not be updated), so the workflow stops; it retires the sync manifest entries of the flags it deleted and of recorded flags the destination confirms are gone (entries whose deletion failed keep their surviving copies, re-synced by the next `--incremental` run), so a later rerun does not take a flag another source creates under the same key for its own recorded copy (#21)
 - Sync manifest types and path moved to `src/utils/sync_manifest.ts`, shared by `migrate` and `revert`; a flag whose extracted data cannot be loaded is counted as an error (#21)
