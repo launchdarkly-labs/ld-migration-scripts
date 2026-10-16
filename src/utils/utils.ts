@@ -988,3 +988,37 @@ export class ConflictTracker {
     return generateConflictReport(this.resolutions);
   }
 }
+
+/**
+ * Removes, from an environment patch, every rule that has a segmentMatch clause referencing
+ * `segmentKey`. Used when the destination rejects a patch with `unknown segment "<key>"`: the
+ * source tolerates the dangling reference (such a clause never matches), the destination does
+ * not. Dropping the rule is evaluation-neutral because a rule whose segment is unknown never
+ * matches anyway. Returns the new patch array and the descriptions of the removed rules.
+ */
+export function stripRulesReferencingSegment(
+  patches: Array<{ op: string; path: string; value?: unknown }>,
+  envKey: string,
+  segmentKey: string,
+): { patches: Array<{ op: string; path: string; value?: unknown }>; removed: string[] } {
+  const rulesPath = `/environments/${envKey}/rules`;
+  const removed: string[] = [];
+  const out = patches.map((p) => {
+    if (p.path !== rulesPath || !Array.isArray(p.value)) return p;
+    const kept = (p.value as any[]).filter((rule, i) => {
+      const hit = (rule?.clauses ?? []).some((c: any) =>
+        c?.op === "segmentMatch" && Array.isArray(c.values) && c.values.includes(segmentKey)
+      );
+      if (hit) removed.push(rule?.description ? `rule "${rule.description}"` : `rule #${i + 1}`);
+      return !hit;
+    });
+    return { ...p, value: kept };
+  });
+  return { patches: out, removed };
+}
+
+/** Extracts the segment key from a LaunchDarkly `unknown segment "<key>"` error body, if present. */
+export function unknownSegmentFromError(body: string): string | null {
+  const m = /unknown segment \\?"([^"\\]+)\\?"/.exec(body);
+  return m ? m[1] : null;
+}

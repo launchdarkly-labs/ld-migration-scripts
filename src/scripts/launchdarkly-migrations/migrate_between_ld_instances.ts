@@ -18,6 +18,8 @@ import {
   type View,
   ConflictTracker,
   applyConflictPrefix,
+  stripRulesReferencingSegment,
+  unknownSegmentFromError,
   // delay
 } from "../../utils/utils.ts";
 import * as Colors from "https://deno.land/std@0.149.0/fmt/colors.ts";
@@ -2085,7 +2087,8 @@ const makePatchCall = async (
   fallbackMemberId: string | null,
   variations: any[],
   destinationFlag: any,
-  retryCount: number = 0
+  retryCount: number = 0,
+  unknownSegmentRetried: boolean = false
 ): Promise<Set<string>> => {
   // Check if this patch would actually change anything
   const currentEnvConfig = destinationFlag?.environments?.[env];
@@ -2125,6 +2128,25 @@ const makePatchCall = async (
       fallbackMemberId,
       variations
     );
+  } else if (flagPatchStatus === 400 && !unknownSegmentRetried) {
+    // A rule referencing a segment that does not exist in this destination environment is
+    // rejected as a whole patch. Such a rule can never match, so drop it, retry once, and
+    // report it under the flag's skipped fields.
+    const errorBody = await patchFlagReq.text();
+    const segmentKey = unknownSegmentFromError(errorBody);
+    if (segmentKey) {
+      const destEnvKeyForPath = inputArgs.envMap && envMapping[env] ? envMapping[env] : env;
+      const { patches: stripped, removed } = stripRulesReferencingSegment(patchReq, destEnvKeyForPath, segmentKey);
+      if (removed.length > 0) {
+        console.log(Colors.yellow(`\t  ⚠ ${env}: segment "${segmentKey}" does not exist in the destination; dropping ${removed.length} rule(s) that reference it and retrying`));
+        if (!skippedFieldsByFlag.has(flagKey)) skippedFieldsByFlag.set(flagKey, new Set());
+        for (const r of removed) skippedFieldsByFlag.get(flagKey)!.add(`${env}: ${r} (references unknown segment "${segmentKey}")`);
+        return await makePatchCall(flagKey, stripped, env, maintainerId, fallbackMemberId, variations, destinationFlag, retryCount, true);
+      }
+    }
+    flagsWithErrors.add(flagKey);
+    console.log(Colors.red(`\t  ✗ ${env}: Error 400`));
+    console.log(Colors.red(`\t    ${errorBody}`));
   } else {
     await handlePatchResponse(flagPatchStatus, patchFlagReq, flagKey, env);
   }
@@ -2512,9 +2534,11 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
       console.log(Colors.yellow(`\t⚠ Could not fetch destination flag, using source IDs (may cause issues with approval requests and skip detection)`));
     }
 
-    // Update flag-level properties when flag already existed
-    // Only patch properties that have actually changed vs the destination
-    if (flagAlreadyExisted && destinationFlag) {
+    // Update flag-level properties when the flag already existed, or when it was just created
+    // from a source that is archived or deprecated: the create endpoint ignores those fields, so
+    // without this patch an archived source flag would go live in the destination (and be served).
+    // Only patch properties that have actually changed vs the destination.
+    if (destinationFlag && (flagAlreadyExisted || flag.archived || flag.deprecated)) {
       const flagLevelPatches: any[] = [];
       const changed = (srcVal: any, destVal: any) => JSON.stringify(srcVal) !== JSON.stringify(destVal);
 
