@@ -656,6 +656,42 @@ const destEnvBody = (srcKey: string): Record<string, unknown> => {
   return { ...meta, key: destKey, name: meta.name || destKey };
 };
 
+// ==================== Incremental Sync ====================
+
+const syncManifestPath = syncManifestPathFor(inputArgs.projKeySource, inputArgs.projKeyDest);
+let previousManifest: SyncManifest | null = null;
+const updatedManifestFlags: Record<string, SyncManifestFlag> = {};
+const updatedManifestSegments: Record<string, Record<string, SyncManifestSegment>> = {};
+let incrementalSkipCount = 0;
+let incrementalEnvSkipCount = 0;
+let incrementalSegmentSkipCount = 0;
+
+// Always load the previous manifest for tracking; it is only used for skipping with --incremental.
+// Loaded before any destination write, including project and environment creation below: a manifest
+// that cannot be read, or that records another project pair (keys containing "-" can share a file
+// name), stops the run while the destination is still unchanged, since its entries would be carried
+// forward and trusted by incremental skips, view linking and revert.
+try {
+  previousManifest = await readSyncManifest(inputArgs.projKeySource, inputArgs.projKeyDest);
+} catch (error) {
+  console.log(Colors.red(`\n❌ ${error instanceof Error ? error.message : String(error)}`));
+  console.log(Colors.yellow(`   Move or delete ${syncManifestPath} to start a fresh manifest.`));
+  Deno.exit(1);
+}
+
+if (inputArgs.incremental) {
+  if (previousManifest) {
+    const flagCount = Object.keys(previousManifest.flags).length;
+    const segCount = previousManifest.segments
+      ? Object.values(previousManifest.segments).reduce((sum, envSegs) => sum + Object.keys(envSegs).length, 0)
+      : 0;
+    const segPart = segCount > 0 ? `, ${segCount} segments` : '';
+    console.log(Colors.cyan(`\n📋 Incremental sync: loaded manifest from ${previousManifest.lastSyncTimestamp} (${flagCount} flags${segPart} tracked)`));
+  } else {
+    console.log(Colors.cyan(`\n📋 Incremental sync: no previous manifest found, will sync all flags`));
+  }
+}
+
 // Destination project must exist unless --create-project is set.
 // 401/403 means the token cannot see the project; do not treat that as "missing".
 const projStatus = await getProjectStatus(apiKey, domain, inputArgs.projKeyDest);
@@ -759,41 +795,6 @@ if (inputArgs.envMap) {
   envkeys = envkeys.filter(key => existingEnvs.includes(key));
   if (envkeys.length > 0) {
     console.log(Colors.cyan(`Migrating ${envkeys.length} environment(s) that exist in both projects\n`));
-  }
-}
-
-// ==================== Incremental Sync ====================
-
-const syncManifestPath = syncManifestPathFor(inputArgs.projKeySource, inputArgs.projKeyDest);
-let previousManifest: SyncManifest | null = null;
-const updatedManifestFlags: Record<string, SyncManifestFlag> = {};
-const updatedManifestSegments: Record<string, Record<string, SyncManifestSegment>> = {};
-let incrementalSkipCount = 0;
-let incrementalEnvSkipCount = 0;
-let incrementalSegmentSkipCount = 0;
-
-// Always load the previous manifest for tracking; it is only used for skipping with --incremental.
-// Loaded before any destination write: a manifest that cannot be read, or that records another
-// project pair (keys containing "-" can share a file name), stops the run, since its entries would
-// be carried forward and trusted by incremental skips, view linking and revert.
-try {
-  previousManifest = await readSyncManifest(inputArgs.projKeySource, inputArgs.projKeyDest);
-} catch (error) {
-  console.log(Colors.red(`\n❌ ${error instanceof Error ? error.message : String(error)}`));
-  console.log(Colors.yellow(`   Move or delete ${syncManifestPath} to start a fresh manifest.`));
-  Deno.exit(1);
-}
-
-if (inputArgs.incremental) {
-  if (previousManifest) {
-    const flagCount = Object.keys(previousManifest.flags).length;
-    const segCount = previousManifest.segments
-      ? Object.values(previousManifest.segments).reduce((sum, envSegs) => sum + Object.keys(envSegs).length, 0)
-      : 0;
-    const segPart = segCount > 0 ? `, ${segCount} segments` : '';
-    console.log(Colors.cyan(`\n📋 Incremental sync: loaded manifest from ${previousManifest.lastSyncTimestamp} (${flagCount} flags${segPart} tracked)`));
-  } else {
-    console.log(Colors.cyan(`\n📋 Incremental sync: no previous manifest found, will sync all flags`));
   }
 }
 
@@ -2524,6 +2525,32 @@ for (const level of levels) {
   }
 }
 
+// The manifest is the inventory revert and view linking use to find migrated copies, so it stays
+// cumulative: entries for flags and segments outside this run's scope (include/exclude filters,
+// --since, unselected environments, migrateSegments: false) are carried over. Resources attempted
+// this run were rewritten above; a failed one stays absent so the next --incremental run retries it.
+// Runs before view linking, so a flag or segment skipped this run (--since, --on-conflict skip) still
+// resolves to the destination key recorded for it (e.g. a conflict prefix) instead of its raw key.
+if (previousManifest) {
+  // Attempted = selected and not skipped before any write (--since, --on-conflict skip)
+  const attempted = new Set(
+    flagList.filter((k: string) => !flagsSkippedByDate.has(k) && !flagsSkippedByConflict.has(k)),
+  );
+  for (const [key, entry] of Object.entries(previousManifest.flags ?? {})) {
+    if (!attempted.has(key) && !Object.hasOwn(updatedManifestFlags, key)) updatedManifestFlags[key] = entry;
+  }
+  for (const [envKey, segments] of Object.entries(previousManifest.segments ?? {})) {
+    const rewritten = inputArgs.migrateSegments && envkeys.includes(envKey);
+    for (const [key, entry] of Object.entries(segments)) {
+      if (rewritten && !segmentsSkippedByConflict.has(`${envKey}/${key}`)) continue;
+      const envEntries = Object.hasOwn(updatedManifestSegments, envKey)
+        ? updatedManifestSegments[envKey]
+        : (updatedManifestSegments[envKey] = {});
+      if (!Object.hasOwn(envEntries, key)) envEntries[key] = entry;
+    }
+  }
+}
+
 // Link migrated flags and segments to their views. Done after migration so it also covers
 // flags and segments that already existed in the destination.
 if (usableViews.size > 0) {
@@ -2571,30 +2598,6 @@ if (usableViews.size > 0) {
   }
 }
 
-
-// The manifest is the inventory revert and view linking use to find migrated copies, so it stays
-// cumulative: entries for flags and segments outside this run's scope (include/exclude filters,
-// --since, unselected environments, migrateSegments: false) are carried over. Resources attempted
-// this run were rewritten above; a failed one stays absent so the next --incremental run retries it.
-if (previousManifest) {
-  // Attempted = selected and not skipped before any write (--since, --on-conflict skip)
-  const attempted = new Set(
-    flagList.filter((k: string) => !flagsSkippedByDate.has(k) && !flagsSkippedByConflict.has(k)),
-  );
-  for (const [key, entry] of Object.entries(previousManifest.flags ?? {})) {
-    if (!attempted.has(key) && !Object.hasOwn(updatedManifestFlags, key)) updatedManifestFlags[key] = entry;
-  }
-  for (const [envKey, segments] of Object.entries(previousManifest.segments ?? {})) {
-    const rewritten = inputArgs.migrateSegments && envkeys.includes(envKey);
-    for (const [key, entry] of Object.entries(segments)) {
-      if (rewritten && !segmentsSkippedByConflict.has(`${envKey}/${key}`)) continue;
-      const envEntries = Object.hasOwn(updatedManifestSegments, envKey)
-        ? updatedManifestSegments[envKey]
-        : (updatedManifestSegments[envKey] = {});
-      if (!Object.hasOwn(envEntries, key)) envEntries[key] = entry;
-    }
-  }
-}
 
 // Always write sync manifest so --incremental works on next run
 const manifest: SyncManifest = {

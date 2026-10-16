@@ -543,18 +543,21 @@ const discoverMigrationFlags = async (
       
       console.log(Colors.gray(`  Found ${destinationFlags.length} matching flag(s) in destination`));
       
-      // First try: Filter by migration marker in description
-      let migrationFlags = identifyMigrationFlags(
-        destinationFlags,
-        config.sourceProjectKey
-      );
-      
-      // If no flags found with description marker, assume all flags from source list are migration flags
-      // This handles the case where the migration script doesn't add description markers
-      if (migrationFlags.length === 0 && destinationFlags.length > 0) {
-        console.log(Colors.yellow(`  Note: No migration markers found in descriptions`));
-        console.log(Colors.cyan(`  Assuming all ${destinationFlags.length} flag(s) from source are migration flags`));
+      let migrationFlags: Flag[];
+      if (own.source === "manifest") {
+        // Manifest keys are the destination keys this migration wrote: every fetched flag is one of its
+        // copies, prefixed or not, so the description-marker heuristic must not filter them
         migrationFlags = destinationFlags;
+      } else {
+        // Raw source keys: prefer flags carrying the migration marker in their description
+        migrationFlags = identifyMigrationFlags(destinationFlags, config.sourceProjectKey);
+        // If no flags found with description marker, assume all flags from source list are migration flags
+        // This handles the case where the migration script doesn't add description markers
+        if (migrationFlags.length === 0 && destinationFlags.length > 0) {
+          console.log(Colors.yellow(`  Note: No migration markers found in descriptions`));
+          console.log(Colors.cyan(`  Assuming all ${destinationFlags.length} flag(s) from source are migration flags`));
+          migrationFlags = destinationFlags;
+        }
       }
       
       return {
