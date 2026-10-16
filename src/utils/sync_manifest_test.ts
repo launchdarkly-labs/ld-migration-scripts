@@ -378,3 +378,24 @@ Deno.test("stampIdentity keeps the previous account stamp when the lookup fails"
   assertEquals(stampIdentity(null, { domain: "app.eu.launchdarkly.com" }), { destDomain: "app.eu.launchdarkly.com" });
   assertEquals(stampIdentity(manifest, { domain: "app.launchdarkly.com", accountId: "acct-9" }), { destDomain: "app.launchdarkly.com", destAccountId: "acct-9" });
 });
+
+Deno.test("a freshly raised marker does not list ordinary foreign conflicts as adoption candidates", () => {
+  const previous: SyncManifest = { ...manifest, flags: { a: { version: 1, environments: {} } } };
+  const next = { flags: { a: previous.flags.a } };
+  // No earlier marker: 20 foreign keys were skipped/prefixed and one create was left with an unknown outcome
+  const run = {
+    flagScopeFiltered: false,
+    failedWrites: true,
+    conflictedFlags: ["customer-1", "customer-2"],
+    conflictedSegments: ["production/their-seg"],
+    pendingDestKeys: { flags: ["b"], segments: [] },
+  };
+  assertEquals(markerAfterRun(previous, run, next, "x")?.unresolved, { flags: ["b"], segments: [] });
+  assertEquals(abortMarker(previous, { reason: "aborted", at: "x" }, run, next).unresolved, { flags: ["b"], segments: [] });
+  // Recovering from an earlier incomplete run, the same conflicts may be its unrecorded writes and are listed
+  const aborted: SyncManifest = { ...previous, incomplete: { reason: "aborted", at: "x" } };
+  assertEquals(
+    retainIncompleteMarker(aborted, { ...run, pendingDestKeys: undefined }, next)?.unresolved,
+    { flags: ["customer-1", "customer-2"], segments: ["production/their-seg"] },
+  );
+});

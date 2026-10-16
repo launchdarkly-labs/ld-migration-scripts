@@ -172,9 +172,10 @@ export interface RunOutcome {
   /** "<sourceEnv>/<segmentKey>" of segments whose destination copy already existed and was skipped or prefix-renamed */
   conflictedSegments: Iterable<string>;
   /**
-   * Destination keys of writes still in flight when a run aborted (flags by destination key, segments
-   * as "<sourceEnv>/<destinationKey>"): each may or may not exist, and none has an entry yet, so they
-   * stay untracked until an entry maps to them
+   * Destination keys of writes whose outcome is unknown: in flight when a run aborted, or failed after
+   * the create may have succeeded (flags by destination key, segments as "<sourceEnv>/<destinationKey>").
+   * Each may or may not exist and none has an entry, so they stay untracked until an entry maps to them.
+   * A create the API definitively rejected (4xx) is not pending: nothing was written.
    */
   pendingDestKeys?: { flags: Iterable<string>; segments: Iterable<string> };
 }
@@ -215,9 +216,12 @@ const splitSegmentId = (id: string): [string, string] => {
 };
 
 /**
- * Destination resources that no entry maps to after this run: the previous marker's list plus the
+ * Destination resources that no entry maps to after this run: the previous marker's list, the writes
+ * still in flight (`pendingDestKeys`), and, only while recovering from an earlier incomplete run, the
  * copies this run found as conflicts on keys without an entry (skipped or prefix-renamed, so left
- * untracked), minus those an entry in `next` now maps to. Undefined when nothing is untracked.
+ * untracked: each may be that run's unrecorded write). Without an earlier marker such a conflict is an
+ * ordinary foreign resource and is not listed, so it is never offered for adoption. Keys an entry in
+ * `next` maps to are removed. Undefined when nothing is untracked.
  */
 export function unresolvedAfterRun(
   previous: SyncManifest | null,
@@ -226,14 +230,17 @@ export function unresolvedAfterRun(
 ): IncompleteMarker["unresolved"] {
   const prevFlags = previous?.flags ?? {};
   const prevSegments = previous?.segments ?? {};
+  const recovering = Boolean(previous?.incomplete);
   const flags = new Set(previous?.incomplete?.unresolved?.flags ?? []);
-  for (const key of run.conflictedFlags) {
-    if (!Object.hasOwn(prevFlags, key)) flags.add(key);
-  }
   const segments = new Set(previous?.incomplete?.unresolved?.segments ?? []);
-  for (const id of run.conflictedSegments) {
-    const [env, key] = splitSegmentId(id);
-    if (!Object.hasOwn(prevSegments, env) || !Object.hasOwn(prevSegments[env], key)) segments.add(id);
+  if (recovering) {
+    for (const key of run.conflictedFlags) {
+      if (!Object.hasOwn(prevFlags, key)) flags.add(key);
+    }
+    for (const id of run.conflictedSegments) {
+      const [env, key] = splitSegmentId(id);
+      if (!Object.hasOwn(prevSegments, env) || !Object.hasOwn(prevSegments[env], key)) segments.add(id);
+    }
   }
   // Writes in flight at an abort have no entry yet, whatever their outcome
   for (const key of run.pendingDestKeys?.flags ?? []) flags.add(key);

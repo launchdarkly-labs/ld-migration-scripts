@@ -766,6 +766,10 @@ if (legacySegments.length > 0) {
     } else if (resp.status === 404) {
       delete previousManifest!.segments![e.sourceEnv][e.key];
       dropped.push(`${e.sourceEnv}/${e.key} (not found as ${e.destEnv}/${e.destKey})`);
+    } else if (resp.status === 401 || resp.status === 403) {
+      console.log(Colors.red(`\n❌ Destination API key is invalid or lacks access (HTTP ${resp.status}).`));
+      console.log(Colors.yellow(`   Check "destination_account_api_key" in config/api_keys.json — it needs write access to "${inputArgs.projKeyDest}".`));
+      Deno.exit(1);
     } else {
       console.log(Colors.red(`\n❌ Could not verify legacy sync manifest entry ${e.sourceEnv}/${e.key} in ${e.destEnv} (HTTP ${resp.status}); stopping before any write.`));
       Deno.exit(1);
@@ -965,7 +969,7 @@ async function getFlagDataByIndexOrKey(_index: number, key: string): Promise<any
 // run exit non-zero after the summary, so partial migrations are never reported as success.
 const segmentsWithErrors: Set<string> = new Set();
 const flagsWithErrors: Set<string> = new Set();
-// Read by the manifest writer, which an --on-conflict abort can call during the segment phase
+// Declared with the shared tracking state so the flag phase and reconciliation both see it
 const flagsSkippedByDate: Set<string> = new Set(); // --since: never attempted, excluded from reconciliation
 // --on-conflict skip: the destination copy stays as it is, so the previous manifest entry is kept
 const flagsSkippedByConflict: Set<string> = new Set();
@@ -979,6 +983,10 @@ const segmentsAttempted: Set<string> = new Set();
 // Flags whose processing reached the destination (existence check onwards); on an abort, flags the run
 // never got to keep their previous manifest entry
 const flagsAttempted: Set<string> = new Set();
+// Creates the API definitively rejected (4xx other than 409): nothing was written, so the resource is not
+// a possibly-existing untracked copy and must not block revert through the incomplete marker
+const flagsCreateRejected: Set<string> = new Set();
+const segmentsCreateRejected: Set<string> = new Set(); // "<sourceEnv>/<segmentKey>"
 const flagErrorDetails: Map<string, string> = new Map();
 
 // Prerequisite check: with include/exclude filters, every prerequisite of a selected flag must be
@@ -1396,6 +1404,8 @@ if (inputArgs.migrateSegments) {
         } else {
           console.log(Colors.red(`  ✗ Error creating segment ${newSegment.key} (status: ${segmentStatus})`));
           segmentsWithErrors.add(`${destEnvKey}/${segmentKey}`);
+          // A 4xx means the API rejected the create: nothing exists under this key (a 5xx is unknown)
+          if (segmentStatus >= 400 && segmentStatus < 500) segmentsCreateRejected.add(`${env.key}/${segment.key}`);
       if (segmentStatus > 201) {
             console.log(Colors.gray(`  Payload: ${JSON.stringify(newSegment)}`));
           }
@@ -2427,6 +2437,8 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
         console.log(Colors.red(`\t  ${errorText}`));
         flagsWithErrors.add(flag.key);
         flagErrorDetails.set(flag.key, `create failed (HTTP ${flagResp.status}): ${errorText.slice(0, 300)}`);
+        // A 4xx means the API rejected the create: nothing exists under this key (a 5xx is unknown)
+        if (flagResp.status >= 400 && flagResp.status < 500) flagsCreateRejected.add(flag.key);
         break; // Exit loop on non-conflict errors
       }
     }
@@ -2592,7 +2604,8 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
   }
 
   // Track flag version for sync manifest (flag-level lastModified comes from creationDate or _version).
-  // A flag whose create failed gets no entry, so the next --incremental run retries it.
+  // A flag whose create failed gets no new entry; carryForwardManifestEntries keeps its previous one with
+  // cleared versions, so the next --incremental run retries it.
   if (flagCreated) {
     updatedManifestFlags[flag.key] = withExtraDestKeys({
       version: flag._version ?? 0,
@@ -2698,9 +2711,9 @@ for (const level of levels) {
 // The manifest is the inventory revert and view linking use to find migrated copies, so it stays
 // cumulative: entries for flags and segments outside this run's scope (include/exclude filters,
 // --since, unselected environments, migrateSegments: false) are carried over. Resources attempted
-// this run were rewritten above; a failed one stays absent so the next --incremental run retries it.
-// Runs before view linking, so a flag or segment skipped this run (--since, --on-conflict skip) still
-// resolves to the destination key recorded for it (e.g. a conflict prefix) instead of its raw key.
+// this run were rewritten above; a failed one keeps its previous entry with cleared versions so the
+// next --incremental run retries it. Runs before view linking, so a flag or segment skipped this run
+// (--since, --on-conflict skip) still resolves to its recorded destination key instead of its raw key.
 function carryForwardManifestEntries(): void {
   if (!previousManifest) return;
   // A previous entry is kept unless this run rewrote it. One whose resource was attempted but got no
@@ -2808,9 +2821,10 @@ async function writeSyncManifestFile(incomplete?: SyncManifest["incomplete"]): P
       ? Colors.cyan(`\n${verb} ${list.length} untracked destination resource(s) into the sync manifest: ${list.join(", ")}`)
       : Colors.yellow(`\nNo untracked destination resource could be adopted (no matching source resource in this run)`));
   }
-  // Attempted resources without an entry: in flight at an abort, or failed after a create may already
-  // have succeeded. Their destination keys (the key being written, plus the prefixed key for a prefix
-  // retry) may exist without an entry, so they are recorded as pending in the marker.
+  // Attempted resources without an entry whose outcome is unknown: in flight at an abort, or failed after
+  // a create may already have succeeded (a create the API rejected with a 4xx is excluded: nothing exists).
+  // Their destination keys (the key being written, plus the prefixed key for a prefix retry) may exist
+  // without an entry, so they are recorded as pending in the marker.
   {
     const prefix = inputArgs.conflictPrefix;
     const splitId = (id: string): [string, string] => {
@@ -2818,7 +2832,7 @@ async function writeSyncManifestFile(incomplete?: SyncManifest["incomplete"]): P
       return [id.slice(0, slash), id.slice(slash + 1)];
     };
     const pendingFlags = [...flagsAttempted]
-      .filter((k) => !flagsSkippedByConflict.has(k) && !Object.hasOwn(updatedManifestFlags, k))
+      .filter((k) => !flagsSkippedByConflict.has(k) && !flagsCreateRejected.has(k) && !Object.hasOwn(updatedManifestFlags, k))
       .flatMap((k) => [
         ownEntry(previousManifest?.flags, k)?.destKey ?? k,
         ...(prefix && flagsPrefixedByConflict.has(k) ? [applyConflictPrefix(k, prefix)] : []),
@@ -2826,7 +2840,7 @@ async function writeSyncManifestFile(incomplete?: SyncManifest["incomplete"]): P
     const pendingSegments = [...segmentsAttempted]
       .filter((id) => {
         const [env, key] = splitId(id);
-        return !segmentsSkippedByConflict.has(id) &&
+        return !segmentsSkippedByConflict.has(id) && !segmentsCreateRejected.has(id) &&
           !(Object.hasOwn(updatedManifestSegments, env) && Object.hasOwn(updatedManifestSegments[env], key));
       })
       .flatMap((id) => {
