@@ -2,14 +2,19 @@
  * The sync manifest `migrate` writes after every real run:
  *   data/launchdarkly-migrations/sync-manifest-<sourceProject>-<destProject>.json
  *
- * It records the source versions of the migrated flags and segments (used by --incremental) and,
- * for every resource whose destination key differs from its source key (conflict prefix), that
- * destination key. Later runs and the revert tool use those keys to find the migrated copies.
+ * It is the inventory of what the migration wrote. For every migrated flag and segment it records
+ * the source version (used by --incremental) and the destination key when it differs from the source
+ * key (conflict prefix); segments also record their destination environment. The file records the
+ * destination domain and account it was written for. Later runs update the recorded copies, view
+ * linking and the revert tool use the recorded keys to find them.
  *
- * The manifest is cumulative: a run rewrites the entries of the resources it attempted and keeps
- * the entries of resources outside its scope (include/exclude filters, --since, unselected
- * environments, migrateSegments: false). A resource whose write failed gets no entry, so the
- * next --incremental run retries it. A dry run never writes a manifest.
+ * The manifest is cumulative: a run rewrites the entries of the resources it attempted and keeps the
+ * entries of resources outside its scope (include/exclude filters, --since, unselected environments,
+ * migrateSegments: false). A resource whose write failed keeps its entry with its cached versions
+ * cleared, so the next --incremental run retries it. A run that stops early, or whose failed writes
+ * left resources without an entry, writes the manifest marked `incomplete`; revert refuses such a
+ * manifest until a later run clears the marker (see markerAfterRun and adoptUnresolved). A dry run
+ * never writes a manifest.
  */
 
 export const MIGRATION_DATA_DIR = "./data/launchdarkly-migrations";
@@ -36,7 +41,7 @@ export interface SyncManifestSegment {
   destKey?: string;
   /** Further destination copies in this environment that this migration owns (see SyncManifestFlag.extraDestKeys) */
   extraDestKeys?: string[];
-  /** Destination environment the copy lives in, if it differs from the source environment (--env-map) */
+  /** Destination environment the copy lives in; always recorded since 3.4, absent in entries from older versions */
   destEnv?: string;
 }
 
@@ -52,11 +57,11 @@ export interface SyncManifest {
   /** segments[sourceEnvKey][segmentKey] */
   segments?: Record<string, Record<string, SyncManifestSegment>>;
   /**
-   * Set when the writing run stopped early (--on-conflict abort): writes that were still in flight
-   * have no entry, so the inventory is not exhaustive. Cleared by a later run that completes without
-   * flag-scope filters (includeFlags, excludeFlags, --since), without failed writes, and without
-   * skipping or prefix-renaming an existing resource that has no entry (it may be the aborted run's
-   * unrecorded write); see retainIncompleteMarker.
+   * Set when the writing run stopped early (--on-conflict abort, unexpected phase error) or when its
+   * failed writes left resources without an entry: the inventory is not exhaustive. Cleared by a later
+   * run that completes without flag-scope filters (includeFlags, excludeFlags, --since), without failed
+   * writes, once an entry maps to every destination key the marker lists; see retainIncompleteMarker,
+   * markerAfterRun and adoptUnresolved.
    */
   incomplete?: IncompleteMarker;
 }

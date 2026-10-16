@@ -39,7 +39,6 @@ import {
   ownEntry,
   readSyncManifest,
   recordedDestination,
-  retainIncompleteMarker,
   type RunOutcome,
   segmentEnvironmentMismatches,
   stampIdentity,
@@ -327,7 +326,7 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .default("s", true)
   .describe("c", "Prefix to use when resolving key conflicts (e.g., 'imported-')")
   .describe("tags", "Comma-separated tags to add to migrated flags and segments")
-  .describe("on-conflict", "What to do when a flag/segment key already exists: prompt (interactive), skip, overwrite (default), prefix (requires -c), abort")
+  .describe("on-conflict", "What to do when a flag/segment key already exists and is not a copy recorded in the sync manifest (recorded copies are always updated): prompt (interactive), skip, overwrite (default), prefix (requires -c), abort")
   .describe("v", "View key to link all migrated flags to")
   .describe("e", "Comma-separated list of environment keys to migrate (e.g., 'production,staging')")
   .describe("env-map", "Environment mapping in format 'source1:dest1,source2:dest2' (e.g., 'prod:production,dev:development')")
@@ -2786,7 +2785,7 @@ if (usableViews.size > 0) try {
 // Always write sync manifest so --incremental works on next run
 /**
  * Writes the cumulative manifest. An explicit `incomplete` marks a run that stopped early and skips the
- * recovery checks; otherwise retainIncompleteMarker decides whether an earlier abort's marker is kept.
+ * recovery checks; otherwise markerAfterRun decides whether an earlier marker is kept or a new one raised.
  */
 async function writeSyncManifestFile(incomplete?: SyncManifest["incomplete"]): Promise<void> {
   const entries = {
@@ -2804,8 +2803,9 @@ async function writeSyncManifestFile(incomplete?: SyncManifest["incomplete"]): P
   if (!incomplete && inputArgs.adoptUnresolved && previousManifest?.incomplete?.unresolved) {
     const adopted = adoptUnresolved(previousManifest, entries, inputArgs.conflictPrefix);
     const list = [...adopted.flags, ...adopted.segments];
+    const verb = inputArgs.dryRun ? "[DRY RUN] Would adopt" : "Adopted";
     console.log(list.length > 0
-      ? Colors.cyan(`\nAdopted ${list.length} untracked destination resource(s) into the sync manifest: ${list.join(", ")}`)
+      ? Colors.cyan(`\n${verb} ${list.length} untracked destination resource(s) into the sync manifest: ${list.join(", ")}`)
       : Colors.yellow(`\nNo untracked destination resource could be adopted (no matching source resource in this run)`));
   }
   // Attempted resources without an entry: in flight at an abort, or failed after a create may already

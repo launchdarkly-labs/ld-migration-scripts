@@ -341,17 +341,17 @@ export interface MigratedFlagKeys {
   source: "manifest" | "extract" | "none";
 }
 
+// The destination this revert talks to; set per project before any manifest is read
+let manifestIdentity: DestinationIdentity | undefined;
+
 /**
  * Loads the destination flag keys of one source's migration. The sync manifest migrate writes is
  * authoritative: it records the destination key of every migrated flag, including conflict-prefixed
  * ones. Only when there is no manifest at all (for example after a dry run only) is the extracted
  * source flag list used.
- * @throws Error when a manifest exists but is unreadable, records another project pair, or is marked
- *   incomplete by an aborted run: falling back to raw keys could select another source's flag
+ * @throws Error when a manifest exists but is unreadable, records another project pair or destination,
+ *   or is marked incomplete: falling back to raw keys could select another source's flag
  */
-// The destination this revert talks to; set per project before any manifest is read
-let manifestIdentity: DestinationIdentity | undefined;
-
 const loadMigratedFlagKeys = async (
   sourceProjectKey: string,
   destProjectKey: string
