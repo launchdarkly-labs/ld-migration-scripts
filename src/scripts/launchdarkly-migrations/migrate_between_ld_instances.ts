@@ -2745,6 +2745,9 @@ await writeSyncManifestFile();
 
 // Link migrated flags and segments to their views. Done after migration so it also covers
 // flags and segments that already existed in the destination.
+// A manifest that could not be saved leaves no trustworthy inventory for revert or --incremental: the
+// run fails so the workflow stops instead of advancing on a missing or stale manifest
+let manifestWriteFailed = false;
 let viewLinkingFailed = false;
 if (usableViews.size > 0) try {
   console.log(Colors.cyan("\n=== View Links ==="));
@@ -2833,10 +2836,10 @@ async function writeSyncManifestFile(incomplete?: SyncManifest["incomplete"]): P
     };
     const pendingFlags = [...flagsAttempted]
       .filter((k) => !flagsSkippedByConflict.has(k) && !flagsCreateRejected.has(k) && !Object.hasOwn(updatedManifestFlags, k))
-      .flatMap((k) => [
-        ownEntry(previousManifest?.flags, k)?.destKey ?? k,
-        ...(prefix && flagsPrefixedByConflict.has(k) ? [applyConflictPrefix(k, prefix)] : []),
-      ]);
+      // A prefix retry only ever wrote the prefixed key; the original belongs to someone else
+      .map((k) => prefix && flagsPrefixedByConflict.has(k)
+        ? applyConflictPrefix(k, prefix)
+        : ownEntry(previousManifest?.flags, k)?.destKey ?? k);
     const pendingSegments = [...segmentsAttempted]
       .filter((id) => {
         const [env, key] = splitId(id);
@@ -2846,10 +2849,9 @@ async function writeSyncManifestFile(incomplete?: SyncManifest["incomplete"]): P
       .flatMap((id) => {
         const [env, key] = splitId(id);
         const prev = ownEntry(ownEntry(previousManifest?.segments, env), key);
-        return [
-          `${env}/${prev?.destKey ?? key}`,
-          ...(prefix && segmentsPrefixedByConflict.has(id) ? [`${env}/${applyConflictPrefix(key, prefix)}`] : []),
-        ];
+        return prefix && segmentsPrefixedByConflict.has(id)
+          ? [`${env}/${applyConflictPrefix(key, prefix)}`]
+          : [`${env}/${prev?.destKey ?? key}`];
       });
     run.pendingDestKeys = { flags: pendingFlags, segments: pendingSegments };
   }
@@ -2897,7 +2899,9 @@ async function writeSyncManifestFile(incomplete?: SyncManifest["incomplete"]): P
       : '';
     console.log(Colors.green(`\n✓ Sync manifest written to ${syncManifestPath} (${Object.keys(manifest.flags).length} flags, ${envCount} environments${segPart} tracked)${note}`));
   } catch (error) {
-    console.log(Colors.yellow(`\n⚠ Could not write sync manifest: ${error instanceof Error ? error.message : String(error)}`));
+    manifestWriteFailed = true;
+    console.log(Colors.red(`\n❌ Could not write sync manifest ${syncManifestPath}: ${error instanceof Error ? error.message : String(error)}`));
+    console.log(Colors.yellow(`   The destination was written but the inventory was not saved; fix the cause and re-run (an --incremental run re-records what exists).`));
   }
 }
 
@@ -3176,6 +3180,6 @@ printMigrationSummary(
   conflictTracker.getReport()
 );
 
-if (flagsWithErrors.size > 0 || segmentsWithErrors.size > 0 || reconciliationErrors.length > 0 || viewLinkingFailed) {
+if (flagsWithErrors.size > 0 || segmentsWithErrors.size > 0 || reconciliationErrors.length > 0 || viewLinkingFailed || manifestWriteFailed) {
   Deno.exit(1);
 }
