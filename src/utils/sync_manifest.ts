@@ -213,7 +213,11 @@ const mapsTo = (entries: Record<string, DestEntry> | undefined, destKey: string)
 
 type SegmentEntryLike = DestEntry & { destEnv?: string };
 
-/** Segment entries (with their source environment and key) whose copy lives in `destEnv`. */
+/**
+ * Segment entries (with their source environment and key) whose copy is known to live in `destEnv`.
+ * Only entries with a recorded destination environment qualify: a missing one marks an unverified entry
+ * from an older version, whose copy may live anywhere, so it can neither resolve nor adopt a gap.
+ */
 const segmentEntriesIn = (
   segments: Record<string, Record<string, SegmentEntryLike>> | undefined,
   destEnv: string,
@@ -221,7 +225,7 @@ const segmentEntriesIn = (
   const found: Array<{ sourceEnv: string; key: string; entry: SegmentEntryLike }> = [];
   for (const [sourceEnv, entries] of Object.entries(segments ?? {})) {
     for (const [key, entry] of Object.entries(entries)) {
-      if ((entry.destEnv ?? sourceEnv) === destEnv) found.push({ sourceEnv, key, entry });
+      if (entry.destEnv === destEnv) found.push({ sourceEnv, key, entry });
     }
   }
   return found;

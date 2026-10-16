@@ -191,13 +191,13 @@ Deno.test("adoptUnresolved records untracked originals as extra copies, which cl
   const previous: SyncManifest = {
     ...manifest,
     flags: { a: { version: 1, environments: {} }, b: { version: 1, environments: {}, destKey: "imported-b" } },
-    segments: { production: { seg: { version: 1, destKey: "imported-seg" } } },
+    segments: { production: { seg: { version: 1, destKey: "imported-seg", destEnv: "production" } } },
     incomplete,
   };
   const clean = { flagScopeFiltered: false, failedWrites: false, conflictedFlags: [], conflictedSegments: [] };
   const entries: { flags: SyncManifest["flags"]; segments: NonNullable<SyncManifest["segments"]> } = {
     flags: { a: { version: 1, environments: {} }, b: { version: 2, environments: {}, destKey: "imported-b" } },
-    segments: { production: { seg: { version: 2, destKey: "imported-seg" } } },
+    segments: { production: { seg: { version: 2, destKey: "imported-seg", destEnv: "production" } } },
   };
   // Without adoption an unfiltered clean rerun cannot clear the marker: every run targets the prefixed copies
   assertEquals(retainIncompleteMarker(previous, clean, entries), incomplete);
@@ -429,4 +429,17 @@ Deno.test("unresolved segments are keyed by destination environment, so a change
     retainIncompleteMarker(after, { ...clean, conflictedSegments: [{ sourceEnv: "prod", key: "other", destEnv: "staging" }] }, inStaging)?.unresolved,
     { flags: [], segments: ["staging/other"] },
   );
+});
+
+Deno.test("an unverified legacy segment entry neither resolves nor adopts a gap in any environment", () => {
+  const clean = { flagScopeFiltered: false, failedWrites: false, conflictedFlags: [], conflictedSegments: [] };
+  const marker = { reason: "aborted", at: "x", unresolved: { flags: [], segments: ["prod/seg"] } };
+  const previous: SyncManifest = { ...manifest, flags: {}, incomplete: marker };
+  // A legacy entry prod/seg without destEnv (unselected this run, so never verified) may actually live in staging
+  const legacy = { flags: {}, segments: { prod: { seg: { version: 1 } } } };
+  assertEquals(retainIncompleteMarker(previous, clean, legacy), marker, "unverified entry does not close the gap");
+  assertEquals(adoptUnresolved(previous, legacy), { flags: [], segments: [] });
+  // The same entry once verified in prod resolves it
+  const verified = { flags: {}, segments: { prod: { seg: { version: 1, destEnv: "prod" } } } };
+  assertEquals(retainIncompleteMarker(previous, clean, verified), undefined);
 });

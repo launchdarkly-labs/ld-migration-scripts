@@ -415,37 +415,31 @@ export const selectRevertFlagKeys = (
 
 /**
  * Fetches a single flag by key (beta API, so viewKeys are included).
- * Returns "absent" when the destination confirms the flag does not exist (404), null when it could not
- * be read; only a confirmed absence may retire a manifest entry.
+ * Returns "absent" when the destination confirms the flag does not exist (404).
+ * @throws Error on any other failure: a flag that could not be read must stop the revert rather than be
+ *   silently left out of the deletion list or of a sibling's remaining-flags check
  */
 const fetchFlagByKey = async (
   apiKey: string,
   domain: string,
   projectKey: string,
   flagKey: string
-): Promise<Flag | "absent" | null> => {
-  try {
-    // Use beta API to get viewKeys field
-    const req = ldAPIRequest(apiKey, domain, `flags/${projectKey}/${flagKey}`, true);
-    const response = await rateLimitRequest(req, 'flags');
-    
-    if (response.status === 200) {
-      return await response.json();
-    }
-    if (response.status === 404) {
-      return "absent";
-    }
-    console.log(Colors.gray(`  Warning: Could not fetch flag ${flagKey} (HTTP ${response.status})`));
-    return null;
-  } catch (error) {
-    console.log(Colors.gray(`  Warning: Could not fetch flag ${flagKey}: ${error}`));
-    return null;
+): Promise<Flag | "absent"> => {
+  // Use beta API to get viewKeys field
+  const req = ldAPIRequest(apiKey, domain, `flags/${projectKey}/${flagKey}`, true);
+  const response = await rateLimitRequest(req, 'flags');
+  if (response.status === 200) {
+    return await response.json();
   }
+  if (response.status === 404) {
+    return "absent";
+  }
+  throw new Error(`Could not read flag ${flagKey} in ${projectKey} (HTTP ${response.status}); stopping, nothing was changed for it`);
 };
 
 /**
- * Fetches multiple flags by their keys. `absent` lists the keys the destination confirmed do not exist;
- * keys that could not be read are in neither list.
+ * Fetches multiple flags by their keys. `absent` lists the keys the destination confirmed do not exist.
+ * @throws Error when a flag could not be read (see fetchFlagByKey)
  */
 const fetchFlagsByKeys = async (
   apiKey: string,
@@ -461,7 +455,7 @@ const fetchFlagsByKeys = async (
     const flag = await fetchFlagByKey(apiKey, domain, projectKey, flagKey);
     if (flag === "absent") {
       absent.push(flagKey);
-    } else if (flag) {
+    } else {
       flags.push(flag);
     }
   }
@@ -1066,9 +1060,9 @@ const revertFlag = async (
  * Removes the sync manifest entries of the flags this revert deleted, and of recorded flags the
  * destination confirmed are already gone (a DELETE whose response was lost on an earlier revert), so a
  * later rerun does not take a flag another source creates under the same key for its own recorded copy
- * (which would bypass the conflict policy). Entries whose deletion failed, or that could not be read,
- * keep their surviving copies; the file stays, possibly with no flags, as the authoritative inventory
- * for the pair. A dry run changes nothing.
+ * (which would bypass the conflict policy). Entries whose deletion failed keep their surviving copies;
+ * the file stays, possibly with no flags, as the authoritative inventory for the pair. A dry run
+ * changes nothing.
  */
 const retireRevertedManifestEntries = async (
   config: RevertConfig,
