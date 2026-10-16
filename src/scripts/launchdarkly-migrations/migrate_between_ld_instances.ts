@@ -2102,6 +2102,7 @@ const makePatchCall = async (
   fallbackMemberId: string | null,
   variations: any[],
   destinationFlag: any,
+  sourceEnv: string,
   retryCount: number = 0,
   unknownSegmentRetried: boolean = false
 ): Promise<Set<string>> => {
@@ -2132,7 +2133,7 @@ const makePatchCall = async (
     // Environment not ready yet, wait and retry
     console.log(Colors.gray(`\t  ⏳ ${env}: Environment not ready, retrying in 3s... (attempt ${retryCount + 1}/2)`));
     await new Promise(resolve => setTimeout(resolve, 3000));
-    return await makePatchCall(flagKey, patchReq, env, maintainerId, fallbackMemberId, variations, destinationFlag, retryCount + 1);
+    return await makePatchCall(flagKey, patchReq, env, maintainerId, fallbackMemberId, variations, destinationFlag, sourceEnv, retryCount + 1, unknownSegmentRetried);
   } else if (flagPatchStatus === 405) {
     // Environment requires approval workflow
     await handleApprovalWorkflow(
@@ -2149,10 +2150,9 @@ const makePatchCall = async (
     // report it under the flag's skipped fields.
     const errorBody = await patchFlagReq.text();
     const segmentKey = unknownSegmentFromError(errorBody);
-    // `env` is the destination environment key here (see the call site); the source environment
-    // is needed to confirm the segment is a dangling reference there too, not a segment we failed
-    // to migrate. Only then is dropping the rule evaluation-neutral.
-    const sourceEnv = inputArgs.envMap ? (reverseEnvMapping[env] ?? env) : env;
+    // `env` is the destination environment key; `sourceEnv` is the environment this patch was built
+    // from (passed by the caller, so many-to-one mappings check the right one). The segment must be
+    // a dangling reference in the source too, not a segment we failed to migrate, before dropping.
     const absentInSource = segmentKey ? await segmentAbsentInSource(sourceEnv, segmentKey) : false;
     if (segmentKey && absentInSource) {
       const { patches: stripped, removed, unsafe } = stripRulesReferencingSegment(patchReq, env, segmentKey);
@@ -2162,7 +2162,7 @@ const makePatchCall = async (
         console.log(Colors.yellow(`\t  ⚠ ${env}: segment "${segmentKey}" does not exist in source or destination; dropping ${removed.length} dead rule(s) and retrying`));
         if (!skippedFieldsByFlag.has(flagKey)) skippedFieldsByFlag.set(flagKey, new Set());
         for (const r of removed) skippedFieldsByFlag.get(flagKey)!.add(`${env}: ${r} (references unknown segment "${segmentKey}")`);
-        return await makePatchCall(flagKey, stripped, env, maintainerId, fallbackMemberId, variations, destinationFlag, retryCount, true);
+        return await makePatchCall(flagKey, stripped, env, maintainerId, fallbackMemberId, variations, destinationFlag, sourceEnv, retryCount, true);
       }
     } else if (segmentKey) {
       console.log(Colors.red(`\t  ✗ ${env}: segment "${segmentKey}" exists in the source environment (${sourceEnv}) but not in the destination; migrate segments first`));
@@ -2688,7 +2688,7 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
           );
         }
       });
-      await makePatchCall(createdFlagKey, patchReq, destEnvKey, flagMaintainerId, currentMemberId, destinationVariations, destinationFlag);
+      await makePatchCall(createdFlagKey, patchReq, destEnvKey, flagMaintainerId, currentMemberId, destinationVariations, destinationFlag, env);
 
     // Track env version in manifest
     if (envVersion !== undefined) {
