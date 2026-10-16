@@ -1,0 +1,100 @@
+# Tag and publish a GitHub Release when a version bump lands on main.
+#
+# The version in deno.json is the single source of truth. When a push to
+# main changes it, this workflow creates the tag vX.Y.Z and a GitHub Release
+# whose notes are that version's CHANGELOG.md section. A push that leaves
+# the version unchanged (a "no-release" PR) does nothing.
+#
+# Re-run safe: workflow_dispatch exists to retry a failed run. The run
+# fails loudly when the version changed but its tag already exists, i.e.
+# two PRs bumped to the same version and the second one merged; fix with a
+# follow-up PR that bumps to the next version.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Read versions
+        id: v
+        run: |
+          set -euo pipefail
+          version=$(jq -r .version deno.json)
+          previous=$(git show HEAD^1:deno.json 2>/dev/null | jq -r .version || echo "")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "previous=$previous" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null 2>&1; then
+            echo "tagged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tagged=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version $version (previous main: ${previous:-unknown}), tag exists: $(git ls-remote --tags origin "refs/tags/v$version" | wc -l | tr -d ' ')"
+
+      - name: Nothing to release
+        if: steps.v.outputs.version == steps.v.outputs.previous
+        run: echo "::notice::Version unchanged at ${{ steps.v.outputs.version }}; no release (a no-release merge)."
+
+      - name: Version already tagged
+        if: steps.v.outputs.version != steps.v.outputs.previous && steps.v.outputs.tagged == 'true'
+        run: |
+          echo "::error::v${{ steps.v.outputs.version }} is already tagged, but this merge changed the version to it. Another PR released ${{ steps.v.outputs.version }} first. Open a follow-up PR that bumps to the next version (its changelog section should describe the changes of this merge)."
+          exit 1
+
+      - name: Extract release notes
+        if: steps.v.outputs.version != steps.v.outputs.previous && steps.v.outputs.tagged == 'false'
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Lines after "## [VERSION]" up to the next "## [", trimmed of leading/trailing blank lines.
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { f = 1; next }
+            /^## \[/ { f = 0 }
+            f
+          ' CHANGELOG.md | awk 'NF { p = 1 } p' | awk '
+            { a[NR] = $0 }
+            END { n = NR; while (n && a[n] !~ /[^[:space:]]/) n--; for (i = 1; i <= n; i++) print a[i] }
+          ' > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::error::CHANGELOG.md has no (or an empty) section '## [$VERSION]'. Add it in a follow-up PR; then re-run this workflow."
+            exit 1
+          fi
+          git fetch --tags --quiet origin
+          previous_tag=$(git tag -l 'v*' --sort=-v:refname | head -1 || true)
+          if [ -n "$previous_tag" ]; then
+            printf '\n**Full changelog**: https://github.com/%s/compare/%s...v%s\n' "$GITHUB_REPOSITORY" "$previous_tag" "$VERSION" >> notes.md
+          fi
+          echo "Release notes:"; cat notes.md
+
+      - name: Create tag and GitHub Release
+        if: steps.v.outputs.version != steps.v.outputs.previous && steps.v.outputs.tagged == 'false'
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          gh release create "v$VERSION" \
+            --target "$GITHUB_SHA" \
+            --title "v$VERSION" \
+            --notes-file notes.md \
+            --latest
+          echo "::notice::Released v$VERSION"
