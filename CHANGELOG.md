@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `migrate`: a flag created from an archived or deprecated source flag now receives the flag-level patch right after creation. The create endpoint ignores `archived`/`deprecated` in the POST body, so until now such flags went live in the destination (and were served to SDKs); only flags that already existed were patched. Found in a rehearsal run with 230 archived flags
+- `migrate`: `deprecatedDate` is no longer patched. The API stamps it when `deprecated` changes and rejects a stand-alone `replace /deprecatedDate` as an unsupported operation, which made every re-run of an already-deprecated flag fail its flag-level update
 - `migrate`: an environment patch rejected with `unknown segment "<key>"` (a source rule references a segment that does not exist in that destination environment) is retried without the rules that reference the segment, and those rules are listed under the flag's non-migrated settings. Such a rule can never match, so the retry is evaluation-neutral; previously the whole environment configuration for that flag failed
 
 ## [3.4.0] - 2026-10-16

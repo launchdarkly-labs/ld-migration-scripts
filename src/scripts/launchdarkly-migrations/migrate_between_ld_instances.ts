@@ -2591,8 +2591,8 @@ async function processOneFlag(index: number, flagkey: string): Promise<FlagProce
         flagLevelPatches.push(buildPatch("archived", "replace", flag.archived));
       if (flag.deprecated !== undefined && changed(flag.deprecated, destinationFlag.deprecated))
         flagLevelPatches.push(buildPatch("deprecated", "replace", flag.deprecated));
-      if (flag.deprecatedDate !== undefined && changed(flag.deprecatedDate, destinationFlag.deprecatedDate))
-        flagLevelPatches.push(buildPatch("deprecatedDate", "replace", flag.deprecatedDate));
+      // deprecatedDate is managed by the API (stamped when `deprecated` flips) and cannot be patched
+      // on its own: a lone `replace /deprecatedDate` is rejected with "Unsupported json-patch operation".
 
       // Variations and defaults must be patched together to avoid index conflicts
       // Strip _id from both sides before comparing
