@@ -35,5 +35,13 @@
   },
   "fmt": {
     "proseWrap": "preserve"
+  },
+  "lint": {
+    "rules": {
+      "exclude": [
+        "no-import-prefix",
+        "no-explicit-any"
+      ]
+    }
   }
 }

@@ -3,7 +3,6 @@ import yargs from "https://deno.land/x/yargs@v17.7.2-deno/deno.ts";
 import {
   applyConflictPrefix,
   buildPatch,
-  buildRules,
   buildRulesReplace,
   checkViewExists,
   ConflictTracker,
@@ -123,7 +122,7 @@ interface MigrationConfig {
 /**
  * Simulates an API POST request in dry-run mode
  */
-function simulatePostRequest(resource: string, data: any): Response {
+function simulatePostRequest(resource: string, _data: any): Response {
   console.log(Colors.gray(`    [DRY RUN] Would POST to ${resource}`));
   return new Response(JSON.stringify({ success: true, _id: "dry-run-id" }), {
     status: 201,
@@ -659,7 +658,7 @@ try {
       ),
     );
   }
-} catch (error) {
+} catch {
   console.log(Colors.gray(`Could not determine authenticated user type`));
 }
 
@@ -755,7 +754,7 @@ async function resolveConflictAction(
     return "overwrite";
   }
 
-  const ask = async (): Promise<ConflictAction> => {
+  const ask = (): ConflictAction => {
     const prefixChoices = inputArgs.conflictPrefix
       ? ", [p]refix, [P] prefix all"
       : "";
@@ -951,7 +950,6 @@ if (inputArgs.environments) {
 // If mapping is provided, filter to only mapped source environments
 if (inputArgs.envMap) {
   const mappedSourceEnvs = Object.keys(envMapping);
-  const originalEnvCount = envkeys.length;
   envkeys = envkeys.filter((key) => mappedSourceEnvs.includes(key));
 
   if (envkeys.length === 0) {
@@ -2540,7 +2538,7 @@ const convertPatchToSemanticInstruction = (
  */
 const convertToSemanticPatch = (
   jsonPatches: any[],
-  envKey: string,
+  _envKey: string,
   variations: any[],
 ): ConversionResult => {
   const getVariationId = createVariationMapper(variations);
@@ -2784,7 +2782,7 @@ const handleApprovalWorkflow = async (
       console.log(Colors.gray(`\t    API response: ${errorBody}`));
       flagsWithErrors.add(flagKey);
     }
-  } catch (error) {
+  } catch {
     console.log(Colors.red(`\t  ✗ ${env}: Error creating approval request`));
     flagsWithErrors.add(flagKey);
   }
@@ -2821,7 +2819,7 @@ const handlePatchResponse = async (
 const wouldPatchChangeEnvironment = (
   currentEnvConfig: any,
   patchOperations: any[],
-  variations: any[],
+  _variations: any[],
 ): boolean => {
   // If no current config, changes are needed
   if (!currentEnvConfig) return true;
@@ -3421,7 +3419,7 @@ async function processOneFlag(
       // Flag doesn't exist, we'll create it
       flagAlreadyExisted = false;
     }
-  } catch (error) {
+  } catch {
     // If check fails, proceed with creation attempt
     console.log(
       Colors.gray(
@@ -3603,7 +3601,7 @@ async function processOneFlag(
           destinationVariations = destinationFlag.variations;
         }
       }
-    } catch (error) {
+    } catch {
       console.log(
         Colors.yellow(
           `\t⚠ Could not fetch destination flag, using source IDs (may cause issues with approval requests and skip detection)`,

@@ -36,7 +36,6 @@ import {
   mapStandardSegment,
   mapTrafficTypes,
   type Note,
-  sanitizeKey,
   type VariationDecision,
 } from "../../utils/split/mapping.ts";
 import type {

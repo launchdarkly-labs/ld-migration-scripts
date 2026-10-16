@@ -21,7 +21,6 @@ import type {
   SplitRuleBasedSegment,
   SplitSegment,
   SplitTrafficType,
-  SplitTreatment,
 } from "./types.ts";
 
 // ==================== Fidelity Notes ====================

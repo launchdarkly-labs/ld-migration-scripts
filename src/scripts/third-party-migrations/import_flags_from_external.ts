@@ -9,7 +9,7 @@ import {
   upsertFlagViaAPI,
   validateFlagData,
 } from "../../utils/utils.ts";
-import type { ImportFlag, ImportResult } from "../../types/deno.d.ts";
+import type { ImportResult } from "../../types/deno.d.ts";
 
 interface Arguments {
   file: string;

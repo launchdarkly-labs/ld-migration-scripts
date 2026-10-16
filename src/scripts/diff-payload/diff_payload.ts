@@ -1,6 +1,6 @@
 #!/usr/bin/env -S deno run --allow-net --allow-env --allow-read
 
-import { parseArgs } from "jsr:@std/cli/parse-args";
+import { parseArgs } from "jsr:@std/cli@^1.0.6/parse-args";
 import { type DiffFormat, diffPayloads, fetchSDKPayload } from "./mod.ts";
 
 const DEFAULT_KEYS_FILE = new URL(

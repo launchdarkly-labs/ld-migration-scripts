@@ -13,12 +13,8 @@
 import yargs from "https://deno.land/x/yargs@v17.7.2-deno/deno.ts";
 import * as Colors from "https://deno.land/std@0.149.0/fmt/colors.ts";
 import { parse as parseYaml } from "https://deno.land/std@0.224.0/yaml/parse.ts";
-import {
-  ldAPIPostRequest,
-  ldAPIRequest,
-  rateLimitRequest,
-} from "../../utils/utils.ts";
-import { getDestinationApiKey, getSourceApiKey } from "../../utils/api_keys.ts";
+import { ldAPIRequest, rateLimitRequest } from "../../utils/utils.ts";
+import { getDestinationApiKey } from "../../utils/api_keys.ts";
 import { getAccountId } from "../../utils/account_guard.ts";
 import {
   assertManifestComplete,
@@ -794,7 +790,7 @@ const fetchFlagApprovalRequests = async (
         }));
         allRequests.push(...envRequests);
       }
-    } catch (error) {
+    } catch {
       // Environment might not exist or no permissions, continue
       console.log(
         Colors.gray(`  Warning: Could not fetch approvals for ${env}`),
@@ -896,94 +892,6 @@ const fetchProjectViews = async (
   }
 
   return [];
-};
-
-/**
- * Fetches views linked to a flag
- */
-const fetchFlagViews = async (
-  apiKey: string,
-  domain: string,
-  projectKey: string,
-  flagKey: string,
-  debug: boolean = false,
-): Promise<string[]> => {
-  try {
-    const req = ldAPIRequest(
-      apiKey,
-      domain,
-      `projects/${projectKey}/flags/${flagKey}/views`,
-      true, // Use beta API version
-    );
-    const response = await rateLimitRequest(req, "flags");
-
-    if (debug) {
-      console.log(
-        Colors.gray(
-          `      DEBUG: GET /api/v2/projects/${projectKey}/flags/${flagKey}/views -> ${response.status}`,
-        ),
-      );
-    }
-
-    if (response.status === 200) {
-      const data = await response.json();
-      if (debug) {
-        console.log(
-          Colors.gray(
-            `      DEBUG: Response has ${data.items?.length || 0} view(s): ${
-              (data.items || []).map((v: any) => v.key).join(", ") || "none"
-            }`,
-          ),
-        );
-      }
-      // Extract view keys from the response
-      return (data.items || []).map((item: any) => item.key);
-    } else if (debug) {
-      const errorText = await response.text();
-      console.log(Colors.yellow(`      DEBUG: Error - ${errorText}`));
-    }
-  } catch (error) {
-    if (debug) {
-      console.log(Colors.yellow(`      DEBUG: Exception - ${error}`));
-    }
-  }
-
-  return [];
-};
-
-/**
- * Finds flags linked to a view by checking each flag individually
- * This is a fallback when the /views/{viewKey}/linked/flags endpoint fails
- */
-const findFlagsLinkedToView = async (
-  apiKey: string,
-  domain: string,
-  projectKey: string,
-  viewKey: string,
-  flagKeys: string[],
-): Promise<string[]> => {
-  console.log(
-    Colors.gray(`    Checking ${flagKeys.length} flag(s) for view links...`),
-  );
-  const linkedFlags: string[] = [];
-
-  for (let i = 0; i < flagKeys.length; i++) {
-    const flagKey = flagKeys[i];
-    // Debug first 3 flags
-    const debug = i < 3;
-    const views = await fetchFlagViews(
-      apiKey,
-      domain,
-      projectKey,
-      flagKey,
-      debug,
-    );
-    if (views.includes(viewKey)) {
-      linkedFlags.push(flagKey);
-    }
-  }
-
-  return linkedFlags;
 };
 
 /**

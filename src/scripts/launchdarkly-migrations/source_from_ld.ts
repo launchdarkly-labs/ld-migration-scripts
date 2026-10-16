@@ -7,7 +7,6 @@ import {
   consoleLogger,
   ldAPIRequest,
   rateLimitRequest,
-  sha256HexUtf8,
   writeSourceData,
 } from "../../utils/utils.ts";
 import { Semaphore } from "../../utils/semaphore.ts";
