@@ -872,6 +872,9 @@ async function getFlagDataByIndexOrKey(_index: number, key: string): Promise<any
 // Error tracking shared by the segment and flag phases. Anything added here makes the
 // run exit non-zero after the summary, so partial migrations are never reported as success.
 const segmentsWithErrors: Set<string> = new Set();
+const flagsWithErrors: Set<string> = new Set();
+// Read by the manifest writer, which an --on-conflict abort can call during the segment phase
+const flagsSkippedByDate: Set<string> = new Set(); // --since: never attempted, excluded from reconciliation
 // --on-conflict skip: the destination copy stays as it is, so the previous manifest entry is kept
 const flagsSkippedByConflict: Set<string> = new Set();
 const segmentsSkippedByConflict: Set<string> = new Set(); // "<sourceEnv>/<segmentKey>"
@@ -1969,8 +1972,7 @@ const makePatchCall = async (
 };
 
 console.log(Colors.blue("\n🚩 Starting flag migration..."));
-const flagsWithErrors: Set<string> = new Set();
-const flagsSkippedByDate: Set<string> = new Set(); // --since: never attempted, excluded from reconciliation
+// flagsWithErrors and flagsSkippedByDate are declared with the shared tracking state above the segment phase
 const approvalRequestsCreated: Array<{flag: string, env: string, skippedFields: string[]}> = [];
 const skippedFieldsByFlag: Map<string, Set<string>> = new Map();
 
