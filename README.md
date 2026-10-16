@@ -84,7 +84,7 @@ destination:
 
 ```bash
 # Source extraction with custom domain
-deno task source -p my-project --domain app.launchdarkly.com
+deno task source-from-ld -p my-project --domain app.launchdarkly.com
 
 # Migration with different domains
 deno task migrate -p us-project -d eu-project --domain app.eu.launchdarkly.com
@@ -101,7 +101,7 @@ deno task map-members --source-domain app.launchdarkly.com --dest-domain app.eu.
 
 ## Prerequisites
 
-- [Deno](https://deno.land/) **2.0.0 or higher** installed
+- [Deno](https://deno.land/) **2.0.0 or higher** installed (CI uses the version in `.deno-version`)
   - If you use Homebrew: `brew install deno`
 - LaunchDarkly API key with appropriate permissions
   - Source account API key with at least Reader access
@@ -1183,20 +1183,33 @@ configured in `deno.json` and include all necessary permissions.
 
 ### Available Tasks
 
-```json
-{
-  "tasks": {
-    "workflow": "...",
-    "workflow:full": "deno task workflow -- -f examples/workflow-full.yaml",
-    "workflow:incremental": "deno task workflow -- -f examples/workflow-extract-migrate-incremental.yaml",
-    "source-from-ld": "...",
-    "map-members": "...",
-    "migrate": "...",
-    "estimate-migration-time": "...",
-    "import-flags": "..."
-  }
-}
-```
+The task definitions live in `deno.json`; the ones above the line are the migration scripts, the ones below are for working on the repository (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+
+| Task                                | Purpose                                                                                                          |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `deno task workflow`                | Run a migration workflow from a YAML file (`-f`); see Workflow Orchestrator                                      |
+| `deno task workflow:full`           | `workflow -f examples/workflow-full.yaml`                                                                        |
+| `deno task workflow:incremental`    | `workflow -f examples/workflow-extract-migrate-incremental.yaml`                                                 |
+| `deno task source-from-ld`          | Extract flags, segments, environments (and optionally views, big segments, archived flags) from a source project |
+| `deno task map-members`             | Map member IDs between source and destination accounts by email                                                  |
+| `deno task migrate`                 | Create/update segments, flags and views in the destination project                                               |
+| `deno task revert`                  | Remove what a migration created in the destination (uses the sync manifest)                                      |
+| `deno task estimate-migration-time` | Estimate how long a migration will take from resource counts and rate limits                                     |
+| `deno task import-flags`            | Bulk-import flags from a JSON or CSV file (third-party migrations)                                               |
+| `deno task source-from-split`       | Extract and map a Split.io workspace into the extraction format                                                  |
+| `deno task diff`                    | Compare the SDK payloads two environments or instances serve                                                     |
+| `deno task test`                    | Unit tests                                                                                                       |
+| `deno task check`                   | Type-check `src/` and `scripts/`                                                                                 |
+| `deno task lint`                    | `deno lint`                                                                                                      |
+| `deno task fmt`                     | Format the repository                                                                                            |
+| `deno task fmt:check`               | Verify formatting (what CI runs)                                                                                 |
+| `deno task version:show`            | Current version, whether it is tagged, pending changelog entries                                                 |
+| `deno task version:bump:patch`      | Bump the patch version and roll the changelog (see CONTRIBUTING.md)                                              |
+| `deno task version:bump:minor`      | Bump the minor version                                                                                           |
+| `deno task version:bump:major`      | Bump the major version                                                                                           |
+| `deno task release:check`           | The release gate CI runs on a PR                                                                                 |
+
+Options after the task name go straight to the script, for example `deno task workflow -f my-workflow.yaml`.
 
 ### Task Descriptions
 
@@ -1234,6 +1247,18 @@ configured in `deno.json` and include all necessary permissions.
    - Dry-run mode for safe testing
    - Rate limiting and error handling
    - Detailed reporting and optional JSON output
+
+6. **revert**: Removes the flags, segments and views a migration created in the destination
+   - Reads the sync manifest `migrate` wrote, so prefixed/renamed copies are found under their destination key
+   - Dry run by default in the workflow; see "Reverting Migrations"
+
+7. **source-from-split**: Extracts a Split.io workspace and maps it into the extraction format
+   - Requires `--allow-env` for the Split Admin API key; see `docs/SPLIT-MAPPING.md`
+
+8. **diff**: Compares the SDK payloads served by two environments or two instances (for example US vs EU)
+   - Useful as a post-migration check; see `src/scripts/diff-payload/`
+
+The `test`, `check`, `lint`, `fmt*`, `version:*` and `release:check` tasks are development tasks, described in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Task Permissions
 
@@ -1506,29 +1531,13 @@ deno task import-flags -f flags.csv -p myproject
 deno task import-flags -f examples/flags_template.json -p myproject -d
 ```
 
-## Version Management
+## Contributing and Releases
 
-This project uses [Semantic Versioning](https://semver.org/) and maintains a [CHANGELOG.md](CHANGELOG.md) for tracking changes.
-
-### Quick Version Commands
-
-```bash
-# Check current version
-deno task version:show
-
-# Bump version (patch, minor, or major)
-deno task version:bump:patch    # 1.0.0 → 1.0.1
-deno task version:bump:minor    # 1.0.0 → 1.1.0
-deno task version:bump:major    # 1.0.0 → 2.0.0
-```
-
-### Manual Version Management
-
-You can also manage versions manually:
-
-- **deno.json**: Update the `version` field
-- **README.md**: nothing to do; the version badge is dynamic and reads `deno.json` on `main` (GitHub's image cache may show the previous version for a few minutes)
-- **CHANGELOG.md**: Move items from `[Unreleased]` to a new version section
+Versions follow [Semantic Versioning](https://semver.org/); `deno.json` holds the version and
+[CHANGELOG.md](CHANGELOG.md) the notes. Every pull request that changes behaviour bumps the version
+(`deno task version:bump:<patch|minor|major>`) and, when it merges, CI creates the tag and a
+[GitHub Release](https://github.com/launchdarkly-labs/ld-migration-scripts/releases) from the changelog.
+How to set up, what a PR needs and how the release gate works: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
@@ -1544,4 +1553,4 @@ supported SDKs and tools, visit https://launchdarkly.com
 
 If you came across any issues while using these migration scripts or if you have
 suggestions for additional enhancements, please create an issue in this
-repository.
+repository. Pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
