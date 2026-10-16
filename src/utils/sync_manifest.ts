@@ -44,7 +44,8 @@ export interface SyncManifest {
   /**
    * Set when the writing run stopped early (--on-conflict abort): writes that were still in flight
    * have no entry, so the inventory is not exhaustive. Cleared by a later run that completes without
-   * flag-scope filters (includeFlags, excludeFlags, --since).
+   * flag-scope filters (includeFlags, excludeFlags, --since), without failed writes, and without
+   * conflict-skipping a resource that has no entry (it may be the aborted run's unrecorded write).
    */
   incomplete?: { reason: string; at: string };
 }
@@ -97,7 +98,8 @@ export function assertManifestComplete(manifest: SyncManifest, path: string): vo
   throw new Error(
     `Sync manifest ${path} is marked incomplete (${manifest.incomplete.reason}, at ${manifest.incomplete.at}): ` +
       `a migrate run stopped before recording all of its writes. Re-run the migration without includeFlags, ` +
-      `excludeFlags or --since to complete it, or revert with --no-use-source-data after checking the flags by hand.`,
+      `excludeFlags or --since and let it complete cleanly (no failed writes, no conflict-skipped resources missing ` +
+      `from the manifest), or revert with --no-use-source-data after checking the flags by hand.`,
   );
 }
 

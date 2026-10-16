@@ -691,8 +691,9 @@ const flagScopeFiltered = Boolean(inputArgs.includeFlags || inputArgs.excludeFla
 if (previousManifest?.incomplete) {
   console.log(Colors.yellow(
     `\n⚠ Previous sync manifest is marked incomplete (${previousManifest.incomplete.reason}, at ${previousManifest.incomplete.at}); ` +
-      `revert refuses it until a run without includeFlags, excludeFlags or --since completes` +
-      (flagScopeFiltered ? `. This run is filtered, so the marker is kept.` : `. This run clears it when it completes.`),
+      `revert refuses it until a run without includeFlags, excludeFlags or --since completes with no failed writes ` +
+      `and no conflict-skipped resource missing from the manifest` +
+      (flagScopeFiltered ? `. This run is filtered, so the marker is kept.` : `. This run clears it if it completes cleanly.`),
   ));
 }
 
@@ -2630,11 +2631,26 @@ if (usableViews.size > 0) {
 
 // Always write sync manifest so --incremental works on next run
 /**
- * Writes the cumulative manifest. `incomplete` marks a run that stopped early; otherwise an incomplete
- * marker left by an earlier abort is cleared only when this run had no flag-scope filters.
+ * Writes the cumulative manifest. `incomplete` marks a run that stopped early. Otherwise a marker left
+ * by an earlier abort is cleared only when this run could have recorded every write the aborted run
+ * made: no flag-scope filters, no failed writes, and no conflict-skipped resource without a previous
+ * entry (an existing resource with no entry may be the aborted run's unrecorded write).
  */
+function hasUnrecordedConflictSkips(): boolean {
+  const prevFlags = previousManifest?.flags ?? {};
+  const prevSegments = previousManifest?.segments ?? {};
+  if ([...flagsSkippedByConflict].some((k) => !Object.hasOwn(prevFlags, k))) return true;
+  return [...segmentsSkippedByConflict].some((id) => {
+    const slash = id.indexOf("/");
+    const env = id.slice(0, slash), key = id.slice(slash + 1);
+    return !Object.hasOwn(prevSegments, env) || !Object.hasOwn(prevSegments[env], key);
+  });
+}
+
 async function writeSyncManifestFile(incomplete?: SyncManifest["incomplete"]): Promise<void> {
-  const marker = incomplete ?? (flagScopeFiltered ? previousManifest?.incomplete : undefined);
+  const unresolved = flagScopeFiltered || flagsWithErrors.size > 0 || segmentsWithErrors.size > 0 ||
+    hasUnrecordedConflictSkips();
+  const marker = incomplete ?? (unresolved ? previousManifest?.incomplete : undefined);
   const manifest: SyncManifest = {
     lastSyncTimestamp: new Date().toISOString(),
     sourceProject: inputArgs.projKeySource,
