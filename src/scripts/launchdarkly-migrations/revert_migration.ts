@@ -414,15 +414,16 @@ export const selectRevertFlagKeys = (
 };
 
 /**
- * Fetches a single flag by key
- * Uses beta API to ensure viewKeys are included
+ * Fetches a single flag by key (beta API, so viewKeys are included).
+ * Returns "absent" when the destination confirms the flag does not exist (404), null when it could not
+ * be read; only a confirmed absence may retire a manifest entry.
  */
 const fetchFlagByKey = async (
   apiKey: string,
   domain: string,
   projectKey: string,
   flagKey: string
-): Promise<Flag | null> => {
+): Promise<Flag | "absent" | null> => {
   try {
     // Use beta API to get viewKeys field
     const req = ldAPIRequest(apiKey, domain, `flags/${projectKey}/${flagKey}`, true);
@@ -431,8 +432,10 @@ const fetchFlagByKey = async (
     if (response.status === 200) {
       return await response.json();
     }
-    
-    // Flag doesn't exist (404) or other error
+    if (response.status === 404) {
+      return "absent";
+    }
+    console.log(Colors.gray(`  Warning: Could not fetch flag ${flagKey} (HTTP ${response.status})`));
     return null;
   } catch (error) {
     console.log(Colors.gray(`  Warning: Could not fetch flag ${flagKey}: ${error}`));
@@ -441,25 +444,29 @@ const fetchFlagByKey = async (
 };
 
 /**
- * Fetches multiple flags by their keys
+ * Fetches multiple flags by their keys. `absent` lists the keys the destination confirmed do not exist;
+ * keys that could not be read are in neither list.
  */
 const fetchFlagsByKeys = async (
   apiKey: string,
   domain: string,
   projectKey: string,
   flagKeys: string[]
-): Promise<Flag[]> => {
+): Promise<{ flags: Flag[]; absent: string[] }> => {
   console.log(Colors.gray(`  Fetching ${flagKeys.length} flag(s) from destination...`));
   const flags: Flag[] = [];
+  const absent: string[] = [];
   
   for (const flagKey of flagKeys) {
     const flag = await fetchFlagByKey(apiKey, domain, projectKey, flagKey);
-    if (flag) {
+    if (flag === "absent") {
+      absent.push(flagKey);
+    } else if (flag) {
       flags.push(flag);
     }
   }
   
-  return flags;
+  return { flags, absent };
 };
 
 /**
@@ -519,7 +526,9 @@ const discoverMigrationFlags = async (
   apiKey: string,
   domain: string,
   config: RevertConfig
-): Promise<{ flags: Flag[], stats: { checked: number, identified: number } }> => {
+): Promise<{ flags: Flag[], stats: { checked: number, identified: number }, absent: string[] }> => {
+  // `absent`: manifest-recorded destination keys the destination confirmed are gone (e.g. a DELETE whose
+  // response was lost on an earlier revert), so their entries can be retired like deleted ones
   // Strategy 1: Use the sync manifest or source data for a precise flag list (much faster!)
   if (config.useSourceData && config.sourceProjectKey) {
     console.log(Colors.cyan("  Using the sync manifest / extracted source data for the flag list (smart mode)"));
@@ -549,7 +558,7 @@ const discoverMigrationFlags = async (
       console.log(Colors.gray(`  Found ${sourceFlags.length} flag(s) in source data`));
       console.log(Colors.gray(`  Checking which exist in destination...`));
       
-      const destinationFlags = await fetchFlagsByKeys(
+      const { flags: destinationFlags, absent } = await fetchFlagsByKeys(
         apiKey,
         domain,
         config.projectKey,
@@ -557,6 +566,9 @@ const discoverMigrationFlags = async (
       );
       
       console.log(Colors.gray(`  Found ${destinationFlags.length} matching flag(s) in destination`));
+      if (own.source === "manifest" && absent.length > 0) {
+        console.log(Colors.gray(`  ${absent.length} recorded flag(s) no longer exist in the destination; their manifest entries are retired`));
+      }
       
       let migrationFlags: Flag[];
       if (own.source === "manifest") {
@@ -580,7 +592,8 @@ const discoverMigrationFlags = async (
         stats: {
           checked: sourceFlags.length,
           identified: migrationFlags.length
-        }
+        },
+        absent: own.source === "manifest" ? absent : [],
       };
     }
     
@@ -588,12 +601,12 @@ const discoverMigrationFlags = async (
       // An empty manifest is authoritative too (e.g. every flag was conflict-skipped): a destination-wide
       // scan could select marker-matching flags that this migration never wrote
       console.log(Colors.yellow("  The sync manifest lists no flags for this source; nothing to revert"));
-      return { flags: [], stats: { checked: 0, identified: 0 } };
+      return { flags: [], stats: { checked: 0, identified: 0 }, absent: [] };
     }
     if (ambiguous.length > 0) {
       // Every key was ambiguous: a full scan would only find marker-less flags, which could be the siblings'
       console.log(Colors.yellow("  No unambiguous flags to revert"));
-      return { flags: [], stats: { checked: own.keys.length, identified: 0 } };
+      return { flags: [], stats: { checked: own.keys.length, identified: 0 }, absent: [] };
     }
     console.log(Colors.yellow("  No source data found, falling back to full scan"));
   }
@@ -608,7 +621,8 @@ const discoverMigrationFlags = async (
     stats: {
       checked: allFlags.length,
       identified: migrationFlags.length
-    }
+    },
+    absent: [],
   };
 };
 
@@ -1046,10 +1060,12 @@ const revertFlag = async (
 };
 
 /**
- * Removes the sync manifest entries of the flags this revert deleted, so a later rerun does not take a
- * flag another source creates under the same key for its own recorded copy (which would bypass the
- * conflict policy). Entries whose deletion failed keep their surviving copies; the file stays, possibly
- * with no flags, as the authoritative inventory for the pair. A dry run changes nothing.
+ * Removes the sync manifest entries of the flags this revert deleted, and of recorded flags the
+ * destination confirmed are already gone (a DELETE whose response was lost on an earlier revert), so a
+ * later rerun does not take a flag another source creates under the same key for its own recorded copy
+ * (which would bypass the conflict policy). Entries whose deletion failed, or that could not be read,
+ * keep their surviving copies; the file stays, possibly with no flags, as the authoritative inventory
+ * for the pair. A dry run changes nothing.
  */
 const retireRevertedManifestEntries = async (
   config: RevertConfig,
@@ -1119,7 +1135,7 @@ const revertViews = async (
       siblingKeys,
       new Set(migrationFlags.map(f => f.key))
     );
-    otherSourceFlags = await fetchFlagsByKeys(apiKey, domain, config.projectKey, remaining);
+    otherSourceFlags = (await fetchFlagsByKeys(apiKey, domain, config.projectKey, remaining)).flags;
   }
   
   for (const view of targetViews) {
@@ -1279,7 +1295,7 @@ const revertProject = async (apiKey: string, config: RevertConfig): Promise<void
     
     // 1. Discover migration flags (smart or full scan)
     console.log(Colors.cyan("\n🚩 Step 1: Identifying migration flags"));
-    const { flags: migrationFlags, stats: discoveryStats } = await discoverMigrationFlags(
+    const { flags: migrationFlags, stats: discoveryStats, absent } = await discoverMigrationFlags(
       apiKey,
       domain,
       config
@@ -1292,6 +1308,8 @@ const revertProject = async (apiKey: string, config: RevertConfig): Promise<void
     
     if (migrationFlags.length === 0) {
       console.log(Colors.yellow("\nNo migration flags found. Nothing to revert."));
+      // Entries of recorded flags that are confirmed gone are still retired
+      await retireRevertedManifestEntries(config, new Set(absent));
       return;
     }
     
@@ -1311,8 +1329,8 @@ const revertProject = async (apiKey: string, config: RevertConfig): Promise<void
       if (await revertFlag(apiKey, domain, config, flag, environments, stats)) deletedKeys.add(flag.key);
     }
 
-    // 5b. Retire the deleted flags' manifest entries so a rerun does not claim another source's flag
-    await retireRevertedManifestEntries(config, deletedKeys);
+    // 5b. Retire the manifest entries of deleted and confirmed-absent flags so a rerun does not claim another source's flag
+    await retireRevertedManifestEntries(config, new Set([...deletedKeys, ...absent]));
     
     // 6. Print summary
     printRevertSummary(config, stats);

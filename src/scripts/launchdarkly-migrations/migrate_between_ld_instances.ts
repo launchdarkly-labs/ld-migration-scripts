@@ -1445,10 +1445,32 @@ if (inputArgs.migrateSegments) {
       const followUpBatches: { label: string; ops: { op: string; path: string; value: unknown }[] }[] = [];
       let targetBudget = SEGMENT_TARGET_BATCH_LIMIT;
 
+      // An existing copy may still hold targets or rules the source no longer has. A field empty in the
+      // source is cleared when the destination still has values in it; the destination is read once for
+      // that, since a replace on a path the resource lacks would fail the whole patch.
+      let destinationSegment: any = null;
+      if (segmentAlreadyExisted) {
+        const existingResp = await rateLimitRequest(
+          ldAPIRequest(apiKey, domain, `segments/${inputArgs.projKeyDest}/${destEnvKey}/${segmentKey}`),
+          'segments',
+        );
+        if (existingResp.status === 200) destinationSegment = await existingResp.json();
+        else console.log(Colors.yellow(`    ⚠ Could not read existing segment ${segmentKey} (HTTP ${existingResp.status}); targeting removed in the source is not cleared`));
+      }
+      const clearIfRemoved = (field: string): void => {
+        if (Array.isArray(destinationSegment?.[field]) && destinationSegment[field].length > 0) {
+          console.log(Colors.gray(`    Clearing ${field}: removed in the source`));
+          sgmtPatches.push(buildPatch(field, "replace", []));
+        }
+      };
+
       // Legacy user targeting (single context kind) — use replace for idempotency
       for (const field of ["included", "excluded"] as const) {
         const keys: string[] = segment[field] ?? [];
-        if (keys.length === 0) continue;
+        if (keys.length === 0) {
+          clearIfRemoved(field);
+          continue;
+        }
         const take = Math.min(keys.length, targetBudget);
         sgmtPatches.push(buildPatch(field, "replace", keys.slice(0, take)));
         targetBudget -= take;
@@ -1469,7 +1491,10 @@ if (inputArgs.migrateSegments) {
       // Multi-context targeting — use replace for the whole array for idempotency
       for (const field of ["includedContexts", "excludedContexts"] as const) {
         const entries: { values?: string[] }[] = segment[field] ?? [];
-        if (entries.length === 0) continue;
+        if (entries.length === 0) {
+          clearIfRemoved(field);
+          continue;
+        }
         const initialEntries: unknown[] = [];
         const overflowOps: { op: string; path: string; value: unknown }[] = [];
         entries.forEach((entry, idx) => {
@@ -1497,6 +1522,8 @@ if (inputArgs.migrateSegments) {
       if (segment.rules?.length > 0) {
           console.log(`Copying Segment: ${segmentKey} rules`);
         sgmtPatches.push(buildRulesReplace(segment.rules));
+      } else {
+        clearIfRemoved("rules");
       }
 
       const patchRules = await dryRunAwarePatch(
