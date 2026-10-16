@@ -1,14 +1,26 @@
-# Tag and publish a GitHub Release when a version bump lands on main.
+# Tag and publish a GitHub Release for the version in deno.json.
 #
-# The version in deno.json is the single source of truth. When a push to
-# main changes it, this workflow creates the tag vX.Y.Z and a GitHub Release
-# whose notes are that version's CHANGELOG.md section. A push that leaves
-# the version unchanged (a "no-release" PR) does nothing.
+# The version in deno.json is the single source of truth. On every push to
+# main (and on manual dispatch) this workflow reconciles the release state of
+# that version:
 #
-# Re-run safe: workflow_dispatch exists to retry a failed run. The run
-# fails loudly when the version changed but its tag already exists, i.e.
-# two PRs bumped to the same version and the second one merged; fix with a
-# follow-up PR that bumps to the next version.
+#   no tag vX.Y.Z yet            -> create the tag on the main commit that
+#                                   introduced the version, and a GitHub
+#                                   Release whose notes are that version's
+#                                   CHANGELOG.md section
+#   tag there, no Release        -> create the Release (an earlier run failed
+#                                   half-way)
+#   tag and Release both there   -> nothing to do (a no-release merge, or a
+#                                   re-run), unless this push changed that
+#                                   version's changelog section, which means
+#                                   a second PR merged under an already
+#                                   released version: fail loudly
+#   tag points somewhere else    -> fail: the tag was not made by this
+#                                   workflow
+#
+# Deciding from the tag state rather than from "did this push change the
+# version" means a skipped or failed run is repaired by the next push or by a
+# manual run, whatever merged in between.
 name: Release
 
 on:
@@ -34,67 +46,76 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
-      - name: Read versions
-        id: v
+      - name: Reconcile tag and release for the current version
         run: |
           set -euo pipefail
+          git fetch --tags --quiet origin
+
           version=$(jq -r .version deno.json)
-          previous=$(git show HEAD^1:deno.json 2>/dev/null | jq -r .version || echo "")
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "previous=$previous" >> "$GITHUB_OUTPUT"
-          if git ls-remote --exit-code --tags origin "refs/tags/v$version" >/dev/null 2>&1; then
-            echo "tagged=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "tagged=false" >> "$GITHUB_OUTPUT"
+          tag="v$version"
+
+          # Body of a version's changelog section at a given commit: the lines
+          # after its "## [version]" heading up to the next "## [" heading,
+          # trimmed of leading and trailing blank lines.
+          section() {
+            git show "$1:CHANGELOG.md" | awk -v v="$2" '
+              $0 ~ "^## \\[" v "\\]" { f = 1; next }
+              /^## \[/ { f = 0 }
+              f
+            ' | awk 'NF { p = 1 } p' | awk '
+              { a[NR] = $0 }
+              END { n = NR; while (n && a[n] !~ /[^[:space:]]/) n--; for (i = 1; i <= n; i++) print a[i] }
+            '
+          }
+
+          # The main commit that introduced this version (first-parent history,
+          # so a PR's merge commit rather than a commit inside the PR). Normally
+          # this is the commit being pushed; after a skipped run it is older.
+          target=$(git log --first-parent --format=%H -S"\"version\": \"$version\"" -- deno.json | tail -1)
+          target=${target:-$GITHUB_SHA}
+
+          tag_sha=$(git rev-parse -q --verify "refs/tags/$tag^{commit}" || true)
+          if gh release view "$tag" >/dev/null 2>&1; then released=true; else released=false; fi
+
+          section_changed=false
+          if git rev-parse -q --verify HEAD^1 >/dev/null 2>&1; then
+            if [ "$(section HEAD^1 "$version")" != "$(section HEAD "$version")" ]; then section_changed=true; fi
           fi
-          echo "version $version (previous main: ${previous:-unknown}), tag exists: $(git ls-remote --tags origin "refs/tags/v$version" | wc -l | tr -d ' ')"
 
-      - name: Nothing to release
-        if: steps.v.outputs.version == steps.v.outputs.previous
-        run: echo "::notice::Version unchanged at ${{ steps.v.outputs.version }}; no release (a no-release merge)."
+          echo "version $version; introduced by ${target:0:12}; tag: ${tag_sha:-absent}; release: $released; section changed in this push: $section_changed"
 
-      - name: Version already tagged
-        if: steps.v.outputs.version != steps.v.outputs.previous && steps.v.outputs.tagged == 'true'
-        run: |
-          echo "::error::v${{ steps.v.outputs.version }} is already tagged, but this merge changed the version to it. Another PR released ${{ steps.v.outputs.version }} first. Open a follow-up PR that bumps to the next version (its changelog section should describe the changes of this merge)."
-          exit 1
+          notes() {
+            section HEAD "$version" > notes.md
+            if [ ! -s notes.md ]; then
+              echo "::error::CHANGELOG.md has no (or an empty) section '## [$version]'. Add it in a follow-up PR, then re-run this workflow."
+              exit 1
+            fi
+            # Compare link to the tag just below this version.
+            previous_tag=$( (git tag -l 'v*'; echo "$tag") | sort -uV | awk -v cur="$tag" '$0 == cur { print prev; exit } { prev = $0 }')
+            if [ -n "$previous_tag" ]; then
+              printf '\n**Full changelog**: https://github.com/%s/compare/%s...%s\n' "$GITHUB_REPOSITORY" "$previous_tag" "$tag" >> notes.md
+            fi
+            echo "Release notes:"; cat notes.md
+          }
 
-      - name: Extract release notes
-        if: steps.v.outputs.version != steps.v.outputs.previous && steps.v.outputs.tagged == 'false'
-        env:
-          VERSION: ${{ steps.v.outputs.version }}
-        run: |
-          set -euo pipefail
-          # Lines after "## [VERSION]" up to the next "## [", trimmed of leading/trailing blank lines.
-          awk -v v="$VERSION" '
-            $0 ~ "^## \\[" v "\\]" { f = 1; next }
-            /^## \[/ { f = 0 }
-            f
-          ' CHANGELOG.md | awk 'NF { p = 1 } p' | awk '
-            { a[NR] = $0 }
-            END { n = NR; while (n && a[n] !~ /[^[:space:]]/) n--; for (i = 1; i <= n; i++) print a[i] }
-          ' > notes.md
-          if [ ! -s notes.md ]; then
-            echo "::error::CHANGELOG.md has no (or an empty) section '## [$VERSION]'. Add it in a follow-up PR; then re-run this workflow."
+          if [ -z "$tag_sha" ]; then
+            notes
+            gh release create "$tag" --target "$target" --title "$tag" --notes-file notes.md --latest
+            echo "::notice::Released $tag (tag on ${target:0:12})"
+          elif [ "$tag_sha" = "$target" ]; then
+            if [ "$released" = false ]; then
+              notes
+              gh release create "$tag" --title "$tag" --notes-file notes.md --latest
+              echo "::notice::Tag $tag existed without a release; created the release"
+            elif [ "$section_changed" = true ]; then
+              echo "::error::$tag was already released from ${target:0:12}, but this push changed the [$version] changelog section (or re-bumped to it). Another PR released $version first; the changes merged here are unreleased. Open a follow-up PR that bumps to the next version and moves these notes under it."
+              exit 1
+            else
+              echo "::notice::$tag is already released; nothing to do"
+            fi
+          else
+            echo "::error::Tag $tag points at ${tag_sha:0:12}, but main introduced version $version at ${target:0:12}. This workflow did not create that tag. Remove or move it only if you are sure, then re-run; otherwise bump to the next version."
             exit 1
           fi
-          git fetch --tags --quiet origin
-          previous_tag=$(git tag -l 'v*' --sort=-v:refname | head -1 || true)
-          if [ -n "$previous_tag" ]; then
-            printf '\n**Full changelog**: https://github.com/%s/compare/%s...v%s\n' "$GITHUB_REPOSITORY" "$previous_tag" "$VERSION" >> notes.md
-          fi
-          echo "Release notes:"; cat notes.md
-
-      - name: Create tag and GitHub Release
-        if: steps.v.outputs.version != steps.v.outputs.previous && steps.v.outputs.tagged == 'false'
-        env:
-          VERSION: ${{ steps.v.outputs.version }}
-        run: |
-          gh release create "v$VERSION" \
-            --target "$GITHUB_SHA" \
-            --title "v$VERSION" \
-            --notes-file notes.md \
-            --latest
-          echo "::notice::Released v$VERSION"

@@ -124,11 +124,19 @@ exists.
   "require branches to be up to date" on, configured in the repository
   ruleset. The ruleset has no bypass, so nothing is pushed to `main`
   directly; disable it temporarily if that is ever needed.
-- **Release workflow failed** (for example a transient GitHub error after the
-  merge): re-run it from the Actions tab, or trigger it manually
-  (`workflow_dispatch`). It is safe to re-run: with the tag already present
-  and the version unchanged since the previous main commit, it does nothing.
-- **Release workflow failed with "already tagged"**: two PRs bumped to the same
-  version and both merged. The second one's changes are on `main` but
-  unreleased. Open a PR that bumps to the next version and moves the second
-  PR's entries under it (edit the changelog by hand in this case).
+- **Release workflow failed or was skipped** (a transient GitHub error, a
+  run replaced in the queue): nothing is lost. The workflow decides from the
+  tag state, not from the push that triggered it: a version without a tag is
+  tagged on the `main` commit that introduced it and released; a tag without
+  a release gets its release. The next push to `main` repairs it, or trigger
+  the workflow by hand from the Actions tab (`workflow_dispatch`). Re-running
+  a successful run does nothing.
+- **Release workflow failed with "already released ... changes merged here
+  are unreleased"**: two PRs bumped to the same version and both merged (the
+  required up-to-date check normally prevents this). The second one's changes
+  are on `main` but unreleased. Open a PR that bumps to the next version and
+  moves the second PR's entries under it (edit the changelog by hand in this
+  case).
+- **"Tag ... points at ..., but main introduced version ... at ..."**: a tag
+  the workflow did not create. Decide whether that tag is right; the
+  workflow never moves tags.
