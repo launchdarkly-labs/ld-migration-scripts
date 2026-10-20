@@ -3223,14 +3223,7 @@ async function processOneFlag(
                 buildPatch("deprecated", "replace", flag.deprecated),
               );
             }
-            if (
-              flag.deprecatedDate !== undefined &&
-              changed(flag.deprecatedDate, destFlag.deprecatedDate)
-            ) {
-              lifecyclePatches.push(
-                buildPatch("deprecatedDate", "replace", flag.deprecatedDate),
-              );
-            }
+            // deprecatedDate is API-managed (stamped when `deprecated` flips); a lone replace is rejected.
             if (migrationTags.length > 0) {
               const desiredTags = mergeTags(
                 flag.tags,
