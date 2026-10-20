@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `migrate --incremental`: the lifecycle/tags reconciliation for unchanged flags no longer patches `deprecatedDate` on its own. The API rejects that operation ("Unsupported json-patch operation"), so every incremental run failed each already-deprecated flag and exited 1. Same root cause as the flag-level fix in 3.4.1, missed in the incremental fast path
+
 ## [3.4.1] - 2026-10-16
 
 ### Changed
