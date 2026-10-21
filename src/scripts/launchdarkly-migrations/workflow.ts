@@ -376,6 +376,11 @@ const buildMigrationArgs = (config: WorkflowConfig): string[] => {
     migration.migrateViews === false,
   );
   args = addBooleanFlag(args, "--adopt-unresolved", migration.adoptUnresolved);
+  args = addBooleanFlag(
+    args,
+    "--propagate-archived=false",
+    migration.propagateArchived === false,
+  );
   args = addBooleanFlag(args, "--dry-run", migration.dryRun);
   args = addBooleanFlag(args, "--incremental", migration.incremental);
   args = addBooleanFlag(args, "--create-project", migration.createProject);

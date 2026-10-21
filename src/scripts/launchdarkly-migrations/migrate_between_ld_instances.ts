@@ -46,6 +46,7 @@ import {
   type SyncManifestSegment,
   withExtraDestKeys,
 } from "../../utils/sync_manifest.ts";
+import { classifyVanishedFlags } from "../../utils/archived_propagation.ts";
 import {
   bigSegmentCsvPath,
   readExportedKeys,
@@ -78,6 +79,7 @@ interface Arguments {
   createEnvironments?: boolean;
   migrateViews?: boolean;
   adoptUnresolved?: boolean;
+  propagateArchived?: boolean;
 }
 
 // Sync manifest types and path live in utils/sync_manifest.ts, shared with the revert tool
@@ -112,6 +114,7 @@ interface MigrationConfig {
     createEnvironments?: boolean;
     migrateViews?: boolean;
     adoptUnresolved?: boolean;
+    propagateArchived?: boolean;
   };
   /** Alias for options — YAML configs may use migration: instead of options: */
   migration?: MigrationConfig["options"];
@@ -373,6 +376,13 @@ const cliArgs: Arguments = (yargs(Deno.args)
     "adopt-unresolved",
     "Record the destination resources an incomplete sync manifest lists as untracked as this migration's copies (after verifying by hand that the aborted run created them)",
   )
+  .alias("propagate-archived", "propagateArchived")
+  .boolean("propagate-archived")
+  .default("propagate-archived", undefined)
+  .describe(
+    "propagate-archived",
+    "Archive the destination copy of a recorded flag that was archived in the source since it was migrated (default: true; --propagate-archived=false to skip)",
+  )
   .alias("migrate-views", "migrateViews")
   .boolean("migrate-views")
   .default("migrate-views", undefined)
@@ -505,6 +515,8 @@ if (cliArgs.config) {
       migrateViews: cliArgs.migrateViews ?? opts?.migrateViews ?? true,
       adoptUnresolved: cliArgs.adoptUnresolved ?? opts?.adoptUnresolved ??
         false,
+      propagateArchived: cliArgs.propagateArchived ??
+        opts?.propagateArchived ?? true,
       config: cliArgs.config,
     };
 
@@ -527,6 +539,8 @@ const migrationTags = inputArgs.tags
   .filter(Boolean) ?? [];
 // Views are migrated unless opted out; --target-view links are created either way
 const migrateViews = inputArgs.migrateViews ?? true;
+// A recorded flag archived in the source since it was migrated is archived in the destination unless opted out
+const propagateArchived = inputArgs.propagateArchived ?? true;
 
 console.log(Colors.blue("\n=== Migration Script Starting ==="));
 console.log(
@@ -572,6 +586,7 @@ console.log(
 );
 console.log(Colors.gray(`  Target View: ${inputArgs.targetView || "none"}`));
 console.log(Colors.gray(`  Migrate Views: ${migrateViews}`));
+console.log(Colors.gray(`  Propagate Archived: ${propagateArchived}`));
 console.log(
   Colors.gray(`  Adopt Unresolved: ${inputArgs.adoptUnresolved || false}`),
 );
@@ -1447,6 +1462,8 @@ async function getFlagDataByIndexOrKey(
 // run exit non-zero after the summary, so partial migrations are never reported as success.
 const segmentsWithErrors: Set<string> = new Set();
 const flagsWithErrors: Set<string> = new Set();
+// Checks that could not be completed (reconciliation, source archival); also fail the run
+const reconciliationErrors: string[] = [];
 // Declared with the shared tracking state so the flag phase and reconciliation both see it
 const flagsSkippedByDate: Set<string> = new Set(); // --since: never attempted, excluded from reconciliation
 // --on-conflict skip: the destination copy stays as it is, so the previous manifest entry is kept
@@ -3981,6 +3998,135 @@ try {
   await persistAndExit(`flag phase failed: ${msg.slice(0, 200)}`);
 }
 
+// ==================== Flags archived or deleted in the source ====================
+// The flags API omits archived flags unless --include-archived, so a flag archived in the source
+// after it was migrated leaves flags.json and the flag loop never sees it again: its destination copy
+// would stay live (and be served). The extraction records the source's archived keys
+// (archived-flags.json); every recorded flag that is no longer in the flag list and is archived in the
+// source is archived in the destination too. A recorded flag that is neither live nor archived in the
+// source was deleted there; its destination copy is kept and reported, never deleted.
+// Destination keys of the recorded flags found archived in the source (archived now or already), so
+// reconciliation does not report them as extra
+const flagsArchivedInSource: string[] = [];
+// Source keys of recorded flags deleted in the source, whose destination copy is kept
+const flagsDeletedInSource: string[] = [];
+
+async function propagateSourceArchival(): Promise<void> {
+  if (!propagateArchived || !previousManifest) return;
+  const archivedKeys = await getJson(
+    `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/archived-flags.json`,
+  );
+  if (!Array.isArray(archivedKeys)) {
+    console.log(
+      Colors.yellow(
+        `\n⚠ The extracted data does not list the source's archived flags (archived-flags.json; re-extract with this version). ` +
+          `Flags archived in the source since the last run were not archived in the destination.`,
+      ),
+    );
+    return;
+  }
+  const { archived, deleted } = classifyVanishedFlags({
+    manifestKeys: Object.keys(previousManifest.flags ?? {}),
+    extractedKeys: sourceIndexByKey.keys(),
+    archivedKeys,
+    includeFlags: inputArgs.includeFlags,
+    excludeFlags: inputArgs.excludeFlags,
+  });
+  flagsDeletedInSource.push(...deleted);
+  if (archived.length === 0 && deleted.length === 0) return;
+  console.log(
+    Colors.cyan(
+      `\n🗄  Recorded flags no longer in the source flag list: ${archived.length} archived in the source, ${deleted.length} deleted in the source`,
+    ),
+  );
+  for (const key of archived) {
+    const destKey = ownEntry(previousManifest.flags, key)?.destKey ?? key;
+    const fail = (detail: string) => {
+      console.log(Colors.red(`\t✗ ${destKey}: ${detail}`));
+      flagsWithErrors.add(key);
+      flagErrorDetails.set(
+        key,
+        `archived in the source, but the destination copy could not be archived: ${
+          detail.slice(0, 300)
+        }`,
+      );
+    };
+    try {
+      const destResp = await rateLimitRequest(
+        ldAPIRequest(
+          apiKey,
+          domain,
+          `flags/${inputArgs.projKeyDest}/${destKey}`,
+        ),
+        "flags",
+      );
+      if (destResp.status === 404) {
+        console.log(
+          Colors.gray(
+            `\t- ${destKey}: archived in the source, no copy in the destination`,
+          ),
+        );
+        continue;
+      }
+      if (destResp.status !== 200) {
+        fail(`could not read the destination flag (HTTP ${destResp.status})`);
+        continue;
+      }
+      flagsArchivedInSource.push(destKey);
+      const destFlag = await destResp.json();
+      if (destFlag.archived === true) {
+        console.log(
+          Colors.gray(`\t✓ ${destKey}: already archived in the destination`),
+        );
+        continue;
+      }
+      const patchResp = await dryRunAwarePatch(
+        inputArgs.dryRun || false,
+        apiKey,
+        domain,
+        `flags/${inputArgs.projKeyDest}/${destKey}`,
+        [buildPatch("archived", "replace", true)],
+        false,
+        "flags",
+        "archived in the source",
+      );
+      if (patchResp.status >= 200 && patchResp.status < 300) {
+        console.log(
+          Colors.green(
+            `\t✓ ${destKey}: ${
+              inputArgs.dryRun ? "would be archived" : "archived"
+            } in the destination (archived in the source${
+              destKey !== key ? ` as ${key}` : ""
+            })`,
+          ),
+        );
+      } else {
+        fail(`HTTP ${patchResp.status}: ${await patchResp.text()}`);
+      }
+    } catch (err) {
+      fail(err instanceof Error ? err.message : String(err));
+    }
+  }
+  for (const key of deleted) {
+    const destKey = ownEntry(previousManifest.flags, key)?.destKey ?? key;
+    console.log(
+      Colors.yellow(
+        `\t⚠ ${destKey}: deleted in the source; the destination copy is kept`,
+      ),
+    );
+  }
+}
+
+try {
+  await propagateSourceArchival();
+} catch (error) {
+  const msg = error instanceof Error ? error.message : String(error);
+  console.log(
+    Colors.red(`\n❌ Propagating source archival failed unexpectedly: ${msg}`),
+  );
+  reconciliationErrors.push(`archived in source: ${msg}`);
+}
+
 // The manifest is the inventory revert and view linking use to find migrated copies, so it stays
 // cumulative: entries for flags and segments outside this run's scope (include/exclude filters,
 // --since, unselected environments, migrateSegments: false) are carried over. Resources attempted
@@ -4431,6 +4577,34 @@ const printNonMigratedSettingsSection = (
 };
 
 /**
+ * Prints the flags whose source counterpart left the flag list since they were migrated
+ */
+const printSourceLifecycleSection = (): void => {
+  if (flagsArchivedInSource.length === 0 && flagsDeletedInSource.length === 0) {
+    return;
+  }
+  console.log(Colors.cyan("\n🗄  FLAGS ARCHIVED OR DELETED IN THE SOURCE"));
+  if (flagsArchivedInSource.length > 0) {
+    console.log(
+      Colors.gray(
+        `  Archived in the source since they were migrated; archived in the destination too${
+          inputArgs.dryRun ? " (dry run: not applied)" : ""
+        }:`,
+      ),
+    );
+    flagsArchivedInSource.forEach((k) => console.log(Colors.gray(`    ${k}`)));
+  }
+  if (flagsDeletedInSource.length > 0) {
+    console.log(
+      Colors.yellow(
+        `  Deleted in the source; the destination copy is kept (delete it by hand if it should go):`,
+      ),
+    );
+    flagsDeletedInSource.forEach((k) => console.log(Colors.yellow(`    ${k}`)));
+  }
+};
+
+/**
  * Prints flags with errors section
  */
 const printErrorsSection = (flagsWithErrors: Set<string>): void => {
@@ -4512,6 +4686,7 @@ const printMigrationSummary = (
 
   printApprovalRequestsSection(approvals);
   printNonMigratedSettingsSection(skippedFields);
+  printSourceLifecycleSection();
   printErrorsSection(flagsWithErrors);
   printSegmentErrorsSection(segmentsWithErrors);
   if (reconciliationErrors.length > 0) {
@@ -4581,8 +4756,6 @@ async function listDestinationKeys(path: string): Promise<Set<string>> {
   return keys;
 }
 
-const reconciliationErrors: string[] = [];
-
 async function reconcileDestination(): Promise<void> {
   if (inputArgs.dryRun) return;
   console.log(Colors.blue("\n🔎 RECONCILIATION (source data vs destination)"));
@@ -4594,12 +4767,14 @@ async function reconcileDestination(): Promise<void> {
   // --since skipped without attempting. Failed attempts stay in scope so they are reported.
   // Destination keys come from the manifest entries written this run (prefix renames from earlier runs
   // included), then from this run's conflict resolutions, else the source key
-  const expectedFlags = new Set(
-    flagList.filter((k: string) => !flagsSkippedByDate.has(k))
+  const expectedFlags = new Set([
+    ...flagList.filter((k: string) => !flagsSkippedByDate.has(k))
       .map((k: string) =>
         ownEntry(updatedManifestFlags, k)?.destKey ?? resolved.get(k) ?? k
       ),
-  );
+    // Recorded copies whose source flag is archived stay in the destination, archived
+    ...flagsArchivedInSource,
+  ]);
   try {
     const dest = await listDestinationKeys(
       `flags/${inputArgs.projKeyDest}?summary=true&limit=50&offset=0`,
