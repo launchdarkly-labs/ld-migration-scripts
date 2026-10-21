@@ -11,56 +11,99 @@ Workflow configs orchestrate entire migration workflows from a single file. They
 **Key benefit:** One command runs everything - extract → map → migrate
 
 ### `workflow-full.yaml`
+
 **⭐ RECOMMENDED for most migrations**
 
 Complete end-to-end migration workflow that runs all steps automatically:
+
 1. Extract source project data
 2. Map member IDs between instances
 3. Migrate to destination
 
 **Usage:**
+
 ```bash
 deno task workflow -f examples/workflow-full.yaml
+
+# Or pass the YAML as a positional argument (no -f needed)
+deno task workflow examples/workflow-full.yaml
+
+# Or use the shortcut task
+deno task workflow:full
 ```
 
 **Key feature:** If you don't specify `workflow.steps`, it runs the FULL workflow by default!
 
+**Useful options** (commented out in the file):
+
+- `dryRun: true`: preview everything without writing to the destination. Recommended for the first run.
+- `migrateBigSegments: true`: also copy larger list-based (big) segments by exporting their members as CSV and importing them into the destination.
+- `migrateViews: false`: do not recreate views or link flags and segments to them (`targetView` still applies).
+- `includeFlags` / `excludeFlags`: migrate a subset of flags. Prerequisite flags must be included too; a real run stops before writing if one is missing.
+
+Views and their linked flags and segments are always migrated when the token can read them (`viewView`).
+
+### `workflow-extract-migrate-incremental.yaml`
+
+Re-export source data then sync only changed flags (incremental migration). Big segments with exported members are re-imported on every run.
+
+**Usage:**
+
+```bash
+deno task workflow -f examples/workflow-extract-migrate-incremental.yaml
+
+# Or use the shortcut task
+deno task workflow:incremental
+```
+
 ### `workflow-extract-only.yaml`
+
 Extract source project data without running migration.
 
 **Usage:**
+
 ```bash
 deno task workflow -f examples/workflow-extract-only.yaml
 ```
 
 ### `workflow-migrate-only.yaml`
+
 Run migration with pre-extracted data (skips extract and map steps).
 
+`migrateBigSegments` only works here if the earlier extract also ran with it, so the member CSVs exist.
+
 **Usage:**
+
 ```bash
 deno task workflow -f examples/workflow-migrate-only.yaml
 ```
 
 ### `workflow-third-party.yaml`
+
 Import flags from external JSON/CSV files.
 
 **Usage:**
+
 ```bash
 deno task workflow -f examples/workflow-third-party.yaml
 ```
 
 ### `workflow-custom-steps.yaml`
+
 Custom step combinations - run only the steps you need.
 
 **Usage:**
+
 ```bash
 deno task workflow -f examples/workflow-custom-steps.yaml
 ```
 
 ### `workflow-revert-and-migrate.yaml`
+
 Revert a previous migration and then re-run it with corrected settings.
 
 **Usage:**
+
 ```bash
 # Preview both revert and re-migration
 deno task workflow -f examples/workflow-revert-and-migrate.yaml
@@ -76,6 +119,7 @@ deno task workflow -f examples/workflow-revert-and-migrate.yaml
 **Use these only when you need to run the migrate step separately.**
 
 These configs are for the individual `deno task migrate` command - **not** the workflow orchestrator. Use these when:
+
 - You've already extracted source data manually
 - You want fine-grained control over each step
 - You're running steps in a custom CI/CD pipeline
@@ -83,7 +127,9 @@ These configs are for the individual `deno task migrate` command - **not** the w
 **For most users:** Use workflow configs instead (see above).
 
 ### `migration-config.yaml`
+
 Complete example showing all available migration options:
+
 - Source and destination project keys
 - Maintainer ID mapping
 - Segment migration options
@@ -91,32 +137,41 @@ Complete example showing all available migration options:
 - View organization
 - Environment filtering
 - Environment key mapping
+- Include/exclude flag filtering
+- Parallel migration concurrency
 
 **Usage:**
+
 ```bash
 deno task migrate -f examples/migration-config.yaml
 ```
 
 ### `migration-config-simple.yaml`
+
 Minimal configuration for basic migrations - just source and destination projects with defaults.
 
 **Usage:**
+
 ```bash
 deno task migrate -f examples/migration-config-simple.yaml
 ```
 
 ### `migration-config-advanced.yaml`
+
 Full-featured migration with all options enabled - great as a starting point for complex migrations.
 
 **Usage:**
+
 ```bash
 deno task migrate -f examples/migration-config-advanced.yaml
 ```
 
 ### `migration-config-env-mapping.yaml`
+
 Focused on environment mapping for projects with different naming conventions (e.g., prod → production).
 
 **Usage:**
+
 ```bash
 deno task migrate -f examples/migration-config-env-mapping.yaml
 ```
@@ -124,9 +179,11 @@ deno task migrate -f examples/migration-config-env-mapping.yaml
 ## Revert Configuration Files
 
 ### `revert-migration-example.yaml`
+
 Configuration for reverting a previously executed migration.
 
 **Usage:**
+
 ```bash
 # Preview the revert (recommended first step)
 deno task revert -f examples/revert-migration-example.yaml --dry-run
@@ -136,6 +193,7 @@ deno task revert -f examples/revert-migration-example.yaml
 ```
 
 **What it does:**
+
 - Identifies migrated flags using source data (smart mode)
 - Deletes pending approval requests
 - Unlinks flags from target view
@@ -144,21 +202,53 @@ deno task revert -f examples/revert-migration-example.yaml
 - Optionally deletes views (with `--delete-views` flag)
 
 **When to use:**
+
 - Cleaning up after a failed migration
 - Preparing to re-run a migration with corrected settings
 - Testing migrations in a safe, reversible way
 
+## Custom Role Policy
+
+### `roles/migration-role.json`
+
+Least-privilege custom role policy for a migration token: read-only on the source project (plus big segment export), writes scoped to the destination project. Replace `SOURCE_PROJECT_KEY` and `DEST_PROJECT_KEY`, then paste into the role's Advanced editor:
+
+```bash
+sed -e 's/SOURCE_PROJECT_KEY/my-source-project/g' -e 's/DEST_PROJECT_KEY/my-dest-project/g' examples/roles/migration-role.json
+```
+
+See [docs/launchdarkly-migration-role.md](../docs/launchdarkly-migration-role.md) for what each statement grants.
+
+## Verifying a Migration
+
+After migrating, compare segments, big segment members and views between the two projects:
+
+```bash
+deno run --allow-net --allow-read scripts/verify-segments.ts my-source-project my-dest-project
+```
+
+For a cross-instance or environment-mapped migration, pass the same domains and mapping as the migration:
+
+```bash
+deno run --allow-net --allow-read scripts/verify-segments.ts my-source-project my-dest-project \
+  --dest-domain app.eu.launchdarkly.com --env-map prod:production,dev:development
+```
+
 ## Flag Import Template Files
 
 ### `flags_template.json`
+
 JSON template for importing flags from external sources. Supports all flag types:
+
 - **boolean**: Simple on/off flags
 - **string**: Text-based flags with multiple options
 - **number**: Numeric flags with number variations
 - **json**: Complex configuration flags with JSON objects
 
 ### `flags_template.csv`
+
 CSV template for importing simple flags. Best for:
+
 - **boolean**: True/false variations
 - **string**: Text variations
 - **number**: Numeric variations
@@ -181,6 +271,8 @@ cp examples/workflow-full.yaml my-migration.yaml
 
 # 3. Run complete migration with one command
 deno task workflow -f my-migration.yaml
+# or simply:
+deno task workflow my-migration.yaml
 ```
 
 That's it! The workflow runs all steps automatically.
@@ -232,16 +324,17 @@ That's it! The workflow runs all steps automatically.
 
 **Which config files should I use?**
 
-| Use Case | Config Type | Example File |
-|----------|-------------|--------------|
-| **Complete migration (recommended)** | Workflow | `workflow-full.yaml` |
-| Extract source data only | Workflow | `workflow-extract-only.yaml` |
-| Third-party flag import | Workflow | `workflow-third-party.yaml` |
-| Custom step combinations | Workflow | `workflow-custom-steps.yaml` |
-| **Undo failed migration** | Workflow | `workflow-revert-and-migrate.yaml` |
-| Revert only (no re-migration) | Revert | `revert-migration-example.yaml` |
-| Already have extracted data | Migration | `migration-config.yaml` |
-| Fine-grained CI/CD control | Migration | `migration-config-*.yaml` |
+| Use Case                             | Config Type | Example File                                |
+| ------------------------------------ | ----------- | ------------------------------------------- |
+| **Complete migration (recommended)** | Workflow    | `workflow-full.yaml`                        |
+| Incremental sync (after initial)     | Workflow    | `workflow-extract-migrate-incremental.yaml` |
+| Extract source data only             | Workflow    | `workflow-extract-only.yaml`                |
+| Third-party flag import              | Workflow    | `workflow-third-party.yaml`                 |
+| Custom step combinations             | Workflow    | `workflow-custom-steps.yaml`                |
+| **Undo failed migration**            | Workflow    | `workflow-revert-and-migrate.yaml`          |
+| Revert only (no re-migration)        | Revert      | `revert-migration-example.yaml`             |
+| Already have extracted data          | Migration   | `migration-config.yaml`                     |
+| Fine-grained CI/CD control           | Migration   | `migration-config-*.yaml`                   |
 
 **Rule of thumb:** Use workflow configs unless you have a specific reason not to.
 

@@ -35,11 +35,11 @@
     "description": "Complex configuration object for advanced features",
     "kind": "json",
     "variations": [
-      {"enabled": true, "timeout": 5000, "retries": 3},
-      {"enabled": false, "timeout": 3000, "retries": 1}
+      { "enabled": true, "timeout": 5000, "retries": 3 },
+      { "enabled": false, "timeout": 3000, "retries": 1 }
     ],
-    "defaultOnVariation": {"enabled": true, "timeout": 5000, "retries": 3},
-    "defaultOffVariation": {"enabled": false, "timeout": 3000, "retries": 1},
+    "defaultOnVariation": { "enabled": true, "timeout": 5000, "retries": 3 },
+    "defaultOffVariation": { "enabled": false, "timeout": 3000, "retries": 1 },
     "tags": ["advanced", "configuration"]
   },
   {

@@ -5,10 +5,16 @@ This directory contains scripts for importing data from external sources into La
 ## Scripts
 
 - **`import_flags_from_external.ts`** - Imports feature flags from JSON or CSV files
+- **`source_from_split.ts`** - Extracts a Split (Harness FME) workspace into the LD-to-LD source-data format for full-fidelity migration
+
+## Split (Harness FME) Migration
+
+Split (Harness FME) migration: see [split-readme.md](./split-readme.md).
 
 ## Data Structure
 
 Data is stored in `data/third-party-migrations/`:
+
 - `import-files/` - Template files and user-provided import files
 - `reports/` - Import operation reports and logs
 
@@ -49,6 +55,7 @@ Place your import files in the designated directory for the best experience.
 ## Template Files
 
 Template files are provided in the `examples/` folder:
+
 - `examples/flags_template.json` - JSON template with examples of different flag types
 - `examples/flags_template.csv` - CSV template with examples of different flag types
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env -S deno run --allow-net --allow-env --allow-read
 
-import { parseArgs } from "jsr:@std/cli/parse-args";
+import { parseArgs } from "jsr:@std/cli@^1.0.6/parse-args";
 import { type DiffFormat, diffPayloads, fetchSDKPayload } from "./mod.ts";
 
 const DEFAULT_KEYS_FILE = new URL(
@@ -11,19 +11,25 @@ const DEFAULT_KEYS_FILE = new URL(
 interface ServerSideSdkKeys {
   sdkKeyA: string;
   sdkKeyB: string;
+  /** Optional per-side polling base URLs, e.g. US for A and EU for B. */
+  baseUrlA?: string;
+  baseUrlB?: string;
 }
 
-async function loadKeysFromFile(keysPath: URL | string): Promise<ServerSideSdkKeys> {
-  const configUrl =
-    keysPath instanceof URL
-      ? keysPath
-      : keysPath.startsWith("/") || keysPath.match(/^[A-Za-z]:/)
-        ? new URL(`file://${keysPath}`)
-        : new URL(keysPath, `file://${Deno.cwd()}/`);
+async function loadKeysFromFile(
+  keysPath: URL | string,
+): Promise<ServerSideSdkKeys> {
+  const configUrl = keysPath instanceof URL
+    ? keysPath
+    : keysPath.startsWith("/") || keysPath.match(/^[A-Za-z]:/)
+    ? new URL(`file://${keysPath}`)
+    : new URL(keysPath, `file://${Deno.cwd()}/`);
   const pathLabel = keysPath instanceof URL ? configUrl.pathname : keysPath;
   const text = await Deno.readTextFile(configUrl).catch((err) => {
     throw new Error(
-      `Could not read keys file ${pathLabel}: ${err instanceof Error ? err.message : String(err)}`,
+      `Could not read keys file ${pathLabel}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
     );
   });
   const data = JSON.parse(text) as Record<string, unknown>;
@@ -34,11 +40,17 @@ async function loadKeysFromFile(keysPath: URL | string): Promise<ServerSideSdkKe
       "Keys file must contain sdkKeyA and sdkKeyB (strings). See config/server_side_sdk_keys.json.example.",
     );
   }
-  return { sdkKeyA, sdkKeyB };
+  const baseUrlA = typeof data.baseUrlA === "string"
+    ? data.baseUrlA
+    : undefined;
+  const baseUrlB = typeof data.baseUrlB === "string"
+    ? data.baseUrlB
+    : undefined;
+  return { sdkKeyA, sdkKeyB, baseUrlA, baseUrlB };
 }
 
 const args = parseArgs(Deno.args, {
-  string: ["base-url", "format", "keys-file"],
+  string: ["base-url", "base-url-a", "base-url-b", "format", "keys-file"],
   boolean: ["help", "include-segments"],
   alias: { h: "help", f: "format" },
   default: { format: "console", "include-segments": true },
@@ -64,12 +76,15 @@ Options:
                           jsonpatch  RFC 6902 ops array — {op, path, value}
                           delta      Raw jsondiffpatch delta — compact
   --no-include-segments  Exclude segments from the diff
-  --base-url            SDK polling base URL (default: https://sdk.launchdarkly.com)
+  --base-url            SDK polling base URL for both sides (default: https://sdk.launchdarkly.com)
+  --base-url-a          SDK polling base URL for key A (overrides --base-url; e.g. US)
+  --base-url-b          SDK polling base URL for key B (overrides --base-url; e.g. https://sdk.eu.launchdarkly.com)
   --keys-file           Path to JSON file with sdkKeyA and sdkKeyB (default: config/server_side_sdk_keys.json)
   --help, -h            Show this help message
 
 Environment variables:
   LD_BASE_URL            Alternative to --base-url
+  LD_BASE_URL_A / LD_BASE_URL_B  Alternatives to --base-url-a / --base-url-b
 
 Config file (when no two positionals given):
   Default path: config/server_side_sdk_keys.json
@@ -86,6 +101,7 @@ Examples:
 }
 
 let sdkKeyA!: string;
+let keysFile: ServerSideSdkKeys | undefined;
 let sdkKeyB!: string;
 
 if (args._.length >= 2) {
@@ -95,10 +111,14 @@ if (args._.length >= 2) {
   const keysPath: URL | string = args["keys-file"] ?? DEFAULT_KEYS_FILE;
   try {
     const keys = await loadKeysFromFile(keysPath);
+    keysFile = keys;
     sdkKeyA = keys.sdkKeyA;
     sdkKeyB = keys.sdkKeyB;
   } catch (err) {
-    console.error("Error loading SDK keys:", err instanceof Error ? err.message : String(err));
+    console.error(
+      "Error loading SDK keys:",
+      err instanceof Error ? err.message : String(err),
+    );
     Deno.exit(1); // never returns
   }
 }
@@ -114,6 +134,10 @@ if (format !== "jsonpatch" && format !== "delta" && format !== "console") {
 const baseUrl = args["base-url"] ||
   Deno.env.get("LD_BASE_URL") ||
   "https://sdk.launchdarkly.com";
+const baseUrlA = args["base-url-a"] || Deno.env.get("LD_BASE_URL_A") ||
+  keysFile?.baseUrlA || baseUrl;
+const baseUrlB = args["base-url-b"] || Deno.env.get("LD_BASE_URL_B") ||
+  keysFile?.baseUrlB || baseUrl;
 
 const includeSegments = args["include-segments"] as boolean;
 
@@ -121,8 +145,8 @@ const includeSegments = args["include-segments"] as boolean;
 console.error("Fetching payload A...");
 console.error("Fetching payload B...");
 const [payloadA, payloadB] = await Promise.all([
-  fetchSDKPayload(sdkKeyA, baseUrl),
-  fetchSDKPayload(sdkKeyB, baseUrl),
+  fetchSDKPayload(sdkKeyA, baseUrlA),
+  fetchSDKPayload(sdkKeyB, baseUrlB),
 ]);
 
 const flagsA = (payloadA.flags ?? {}) as Record<string, unknown>;

@@ -1,7 +1,7 @@
 // deno-lint-ignore-file no-explicit-any
 /**
  * LaunchDarkly Migration Workflow Orchestrator
- * 
+ *
  * Supports running complete migration workflows from a single YAML config file.
  * Default behavior: Runs full workflow (extract → map → migrate)
  */
@@ -13,70 +13,72 @@ import {
   agentControlExtractCliArgs,
   agentControlMigrateCliArgs,
 } from "../../utils/agent_control.ts";
-
-// ==================== Type Definitions ====================
-
-interface WorkflowConfig {
-  workflow?: {
-    steps?: string[];
-  };
-  source: {
-    projectKey: string;
-    domain?: string;
-  };
-  destination?: {
-    projectKey: string;
-    domain?: string;
-  };
-  extraction?: {
-    includeSegments?: boolean;
-    includeAgentControl?: boolean;
-  };
-  memberMapping?: {
-    outputFile?: string;
-  };
-  migration?: {
-    assignMaintainerIds?: boolean;
-    migrateSegments?: boolean;
-    migrateAgentControl?: boolean;
-    conflictPrefix?: string;
-    targetView?: string;
-    environments?: string[];
-    environmentMapping?: Record<string, string>;
-    dryRun?: boolean;
-    incremental?: boolean;
-    since?: string;
-  };
-  thirdPartyImport?: {
-    inputFile: string;
-    targetProject: string;
-    dryRun?: boolean;
-    upsert?: boolean;
-    reportOutput?: string;
-  };
-  revert?: {
-    dryRun?: boolean;
-    deleteViews?: boolean;
-    viewKeys?: string[];
-  };
-}
+import {
+  coerceProjectKey,
+  computeMergeCollisions,
+  effectiveConflictPolicy,
+  findMergedDestinations,
+  hasMergeCollisions,
+  loadMergeKeys,
+  type MergeCollisions,
+  type MergeKeys,
+  mergeSelectionFromConfig,
+  normalizeWorkflowConfig,
+  partitionWorkflowSteps,
+  type ProjectPair,
+  resolveProjectPairs,
+  simulatePrefixedMerge,
+  SOURCE_DATA_DIR,
+  usesProjectKeyMapping,
+  usesProjectKeysList,
+  withProjectPair,
+  type WorkflowConfig,
+  type WorkflowStepName,
+} from "../../utils/workflow_config.ts";
+import { assertNotSelfMigration } from "../../utils/account_guard.ts";
 
 interface Arguments {
-  config: string;
+  config?: string;
 }
 
-type StepName = 'extract-source' | 'map-members' | 'migrate' | 'third-party-import' | 'revert';
+type StepName = WorkflowStepName;
 type CommandOptions = { args: string[]; stdout: "inherit"; stderr: "inherit" };
 
 // ==================== Configuration ====================
 
-const DEFAULT_WORKFLOW_STEPS: StepName[] = ["extract-source", "map-members", "migrate"];
+const DEFAULT_WORKFLOW_STEPS: StepName[] = [
+  "extract-source",
+  "map-members",
+  "migrate",
+];
 
 const inputArgs: Arguments = yargs(Deno.args)
   .alias("f", "config")
-  .demandOption(["config"])
+  .option("config", {
+    type: "string",
+    description: "Path to workflow configuration YAML file",
+  })
   .describe("f", "Path to workflow configuration YAML file")
   .parse() as Arguments;
+
+// Allow positional YAML path: deno task workflow examples/workflow-full.yaml
+const configPath = inputArgs.config ??
+  (Deno.args.length > 0 && !Deno.args[0].startsWith("-") &&
+      /\.(yaml|yml)$/i.test(Deno.args[0])
+    ? Deno.args[0]
+    : undefined);
+if (!configPath) {
+  console.log(
+    Colors.red(
+      "Error: No workflow config specified. Use -f <file> or pass the YAML file path.",
+    ),
+  );
+  console.log(
+    Colors.gray("  deno task workflow -f examples/workflow-full.yaml"),
+  );
+  console.log(Colors.gray("  deno task workflow examples/workflow-full.yaml"));
+  Deno.exit(1);
+}
 
 // ==================== Config Loading ====================
 
@@ -86,10 +88,12 @@ const inputArgs: Arguments = yargs(Deno.args)
 const loadConfig = async (configPath: string): Promise<WorkflowConfig> => {
   try {
     const configContent = await Deno.readTextFile(configPath);
-    return parseYaml(configContent) as WorkflowConfig;
+    return normalizeWorkflowConfig(parseYaml(configContent) as WorkflowConfig);
   } catch (error) {
     console.log(Colors.red(
-      `Error loading config file: ${error instanceof Error ? error.message : String(error)}`
+      `Error loading config file: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
     ));
     Deno.exit(1);
   }
@@ -103,14 +107,17 @@ const loadConfig = async (configPath: string): Promise<WorkflowConfig> => {
 const createCommandOptions = (args: string[]): CommandOptions => ({
   args,
   stdout: "inherit",
-  stderr: "inherit"
+  stderr: "inherit",
 });
 
 /**
  * Executes a Deno command and handles errors
  */
-const executeCommand = async (args: string[], stepName: string): Promise<void> => {
-  console.log(Colors.gray(`Executing: deno ${args.join(' ')}\n`));
+const executeCommand = async (
+  args: string[],
+  stepName: string,
+): Promise<void> => {
+  console.log(Colors.gray(`Executing: deno ${args.join(" ")}\n`));
 
   const command = new Deno.Command("deno", createCommandOptions(args));
   const { code } = await command.output();
@@ -143,23 +150,32 @@ const printStepCompletion = (message: string): void => {
 /**
  * Builds base Deno run command args
  */
-const buildBaseRunArgs = (scriptPath: string, permissions: string[]): string[] => [
+const buildBaseRunArgs = (
+  scriptPath: string,
+  permissions: string[],
+): string[] => [
   "run",
   ...permissions,
-  scriptPath
+  scriptPath,
 ];
 
 /**
  * Conditionally adds arguments if value exists
  */
-const addOptionalArg = (args: string[], flag: string, value?: string): string[] =>
-  value ? [...args, flag, value] : args;
+const addOptionalArg = (
+  args: string[],
+  flag: string,
+  value?: string,
+): string[] => value ? [...args, flag, value] : args;
 
 /**
  * Conditionally adds a boolean flag if true
  */
-const addBooleanFlag = (args: string[], flag: string, condition?: boolean): string[] =>
-  condition ? [...args, flag] : args;
+const addBooleanFlag = (
+  args: string[],
+  flag: string,
+  condition?: boolean,
+): string[] => condition ? [...args, flag] : args;
 
 // ==================== Extract Source Step ====================
 
@@ -169,21 +185,19 @@ const addBooleanFlag = (args: string[], flag: string, condition?: boolean): stri
 const buildExtractSourceArgs = (config: WorkflowConfig): string[] => {
   const baseArgs = buildBaseRunArgs(
     "src/scripts/launchdarkly-migrations/source_from_ld.ts",
-    ["--allow-net", "--allow-read", "--allow-write"]
+    ["--allow-net", "--allow-read", "--allow-write"],
   );
 
-  let args = [...baseArgs, "-p", config.source.projectKey];
+  let args = [...baseArgs, "-p", coerceProjectKey(config.source.projectKey)!];
   args = addOptionalArg(args, "--domain", config.source.domain);
-  
+
   // Only extract segments if explicitly enabled OR migration will use them
-  const shouldExtractSegments =
-    config.extraction?.includeSegments === true ||
+  const shouldExtractSegments = config.extraction?.includeSegments === true ||
     config.migration?.migrateSegments === true;
 
   if (shouldExtractSegments) {
     args = [...args, "--extract-segments=true"];
   }
-
   args = [
     ...args,
     ...agentControlExtractCliArgs({
@@ -191,6 +205,15 @@ const buildExtractSourceArgs = (config: WorkflowConfig): string[] => {
       migrateAgentControl: config.migration?.migrateAgentControl,
     }),
   ];
+  if (config.extraction?.includeArchived) {
+    args = [...args, "--include-archived=true"];
+  }
+  if (config.migration?.migrateBigSegments === true) {
+    args = [...args, "--extract-segments=true", "--extract-big-segments=true"];
+  }
+  if (config.migration?.migrateViews === false) {
+    args = [...args, "--extract-views=false"];
+  }
 
   return args;
 };
@@ -200,9 +223,80 @@ const buildExtractSourceArgs = (config: WorkflowConfig): string[] => {
  */
 const runExtractSource = async (config: WorkflowConfig): Promise<void> => {
   printStepHeader("STEP 1", "Extract Source Project Data");
+  if (!coerceProjectKey(config.source.projectKey)) {
+    console.log(
+      Colors.red(
+        "Error: Source project key is required for extract-source step (source.projectKey or source.projectKeys)",
+      ),
+    );
+    Deno.exit(1);
+  }
   const args = buildExtractSourceArgs(config);
   await executeCommand(args, "Extract source step");
   printStepCompletion("Source data extraction completed");
+};
+
+// ==================== Split Extract Step ====================
+
+/**
+ * Validates Split extract configuration
+ */
+const validateSplitExtractConfig = (config: WorkflowConfig): void => {
+  if (!config.splitExtract?.workspace) {
+    console.log(
+      Colors.red(
+        "Error: splitExtract.workspace is required for the split-extract step",
+      ),
+    );
+    Deno.exit(1);
+  }
+};
+
+/**
+ * Builds arguments for the Split extract command
+ */
+const buildSplitExtractArgs = (config: WorkflowConfig): string[] => {
+  const split = config.splitExtract!;
+  const projectKey = coerceProjectKey(config.source.projectKey);
+  if (!projectKey) {
+    console.log(
+      Colors.red(
+        "Error: Source project key is required for the split-extract step",
+      ),
+    );
+    Deno.exit(1);
+  }
+  const baseArgs = buildBaseRunArgs(
+    "src/scripts/third-party-migrations/source_from_split.ts",
+    ["--allow-net", "--allow-read", "--allow-write", "--allow-env"],
+  );
+
+  let args = [...baseArgs, "-w", split.workspace, "-p", projectKey];
+  args = addOptionalArg(args, "-t", split.tag);
+  args = addOptionalArg(args, "-e", split.environments?.join(","));
+  args = addOptionalArg(args, "--split-base-url", split.baseUrl);
+  args = addOptionalArg(args, "--ld-tag", split.ldTag);
+
+  if (split.environmentMapping) {
+    args = addOptionalArg(
+      args,
+      "--env-map",
+      formatEnvMapping(split.environmentMapping),
+    );
+  }
+
+  return args;
+};
+
+/**
+ * Runs the Split workspace extract step
+ */
+const runSplitExtract = async (config: WorkflowConfig): Promise<void> => {
+  printStepHeader("STEP", "Extract Split Workspace");
+  validateSplitExtractConfig(config);
+  const args = buildSplitExtractArgs(config);
+  await executeCommand(args, "Split extract step");
+  printStepCompletion("Split extraction completed");
 };
 
 // ==================== Map Members Step ====================
@@ -213,12 +307,24 @@ const runExtractSource = async (config: WorkflowConfig): Promise<void> => {
 const buildMapMembersArgs = (config: WorkflowConfig): string[] => {
   const baseArgs = buildBaseRunArgs(
     "src/scripts/launchdarkly-migrations/map_members_between_ld_instances.ts",
-    ["--allow-net", "--allow-read", "--allow-write"]
+    ["--allow-net", "--allow-read", "--allow-write"],
   );
 
-  const withOutput = addOptionalArg(baseArgs, "-o", config.memberMapping?.outputFile);
-  const withSourceDomain = addOptionalArg(withOutput, "--source-domain", config.source.domain);
-  return addOptionalArg(withSourceDomain, "--dest-domain", config.destination?.domain);
+  const withOutput = addOptionalArg(
+    baseArgs,
+    "-o",
+    config.memberMapping?.outputFile,
+  );
+  const withSourceDomain = addOptionalArg(
+    withOutput,
+    "--source-domain",
+    config.source.domain,
+  );
+  return addOptionalArg(
+    withSourceDomain,
+    "--dest-domain",
+    config.destination?.domain,
+  );
 };
 
 /**
@@ -237,8 +343,18 @@ const runMapMembers = async (config: WorkflowConfig): Promise<void> => {
  * Validates migration prerequisites
  */
 const validateMigrationConfig = (config: WorkflowConfig): void => {
-  if (!config.destination?.projectKey) {
-    console.log(Colors.red("Error: Destination project key is required for migration step"));
+  if (!coerceProjectKey(config.source.projectKey)) {
+    console.log(
+      Colors.red("Error: Source project key is required for migration step"),
+    );
+    Deno.exit(1);
+  }
+  if (!coerceProjectKey(config.destination?.projectKey)) {
+    console.log(
+      Colors.red(
+        "Error: Destination project key is required for migration step",
+      ),
+    );
     Deno.exit(1);
   }
 };
@@ -260,16 +376,65 @@ const buildMigrationArgs = (config: WorkflowConfig): string[] => {
 
   args = addBooleanFlag(args, "-m", migration.assignMaintainerIds);
   args = addBooleanFlag(args, "-s=false", migration.migrateSegments === false);
-  args = [...args, ...agentControlMigrateCliArgs(migration.migrateAgentControl)];
+  args = [
+    ...args,
+    ...agentControlMigrateCliArgs(migration.migrateAgentControl),
+  ];
+  args = addBooleanFlag(
+    args,
+    "--migrate-big-segments",
+    migration.migrateBigSegments,
+  );
+  args = addBooleanFlag(
+    args,
+    "--migrate-views=false",
+    migration.migrateViews === false,
+  );
+  args = addBooleanFlag(args, "--adopt-unresolved", migration.adoptUnresolved);
   args = addBooleanFlag(args, "--dry-run", migration.dryRun);
   args = addBooleanFlag(args, "--incremental", migration.incremental);
+  args = addBooleanFlag(args, "--create-project", migration.createProject);
+  args = addBooleanFlag(
+    args,
+    "--create-environments",
+    migration.createEnvironments,
+  );
+  args = addOptionalArg(
+    args,
+    "--tags",
+    migration.tags?.length ? migration.tags.join(",") : undefined,
+  );
   args = addOptionalArg(args, "-c", migration.conflictPrefix);
+  args = addOptionalArg(args, "--on-conflict", migration.onConflict);
   args = addOptionalArg(args, "-v", migration.targetView);
   args = addOptionalArg(args, "-e", migration.environments?.join(","));
   args = addOptionalArg(args, "--since", migration.since);
+  args = addOptionalArg(
+    args,
+    "--include-flags",
+    migration.includeFlags?.length
+      ? migration.includeFlags.join(",")
+      : undefined,
+  );
+  args = addOptionalArg(
+    args,
+    "--exclude-flags",
+    migration.excludeFlags?.length
+      ? migration.excludeFlags.join(",")
+      : undefined,
+  );
+  args = addOptionalArg(
+    args,
+    "--concurrency",
+    migration.concurrency != null ? String(migration.concurrency) : undefined,
+  );
 
   if (migration.environmentMapping) {
-    args = addOptionalArg(args, "--env-map", formatEnvMapping(migration.environmentMapping));
+    args = addOptionalArg(
+      args,
+      "--env-map",
+      formatEnvMapping(migration.environmentMapping),
+    );
   }
 
   return args;
@@ -281,17 +446,24 @@ const buildMigrationArgs = (config: WorkflowConfig): string[] => {
 const buildMigrateArgs = (config: WorkflowConfig): string[] => {
   const baseArgs = buildBaseRunArgs(
     "src/scripts/launchdarkly-migrations/migrate_between_ld_instances.ts",
-    ["--allow-net", "--allow-read", "--allow-write"]
+    ["--allow-net", "--allow-read", "--allow-write"],
   );
 
   const withProjects = [
     ...baseArgs,
-    "-p", config.source.projectKey,
-    "-d", config.destination!.projectKey
+    "-p",
+    coerceProjectKey(config.source.projectKey)!,
+    "-d",
+    coerceProjectKey(config.destination!.projectKey)!,
   ];
 
   const withMigrationOpts = [...withProjects, ...buildMigrationArgs(config)];
-  return addOptionalArg(withMigrationOpts, "--domain", config.destination?.domain);
+  const withName = addOptionalArg(
+    withMigrationOpts,
+    "--dest-project-name",
+    coerceProjectKey(config.destination?.projectName),
+  );
+  return addOptionalArg(withName, "--domain", config.destination?.domain);
 };
 
 /**
@@ -312,7 +484,9 @@ const runMigrate = async (config: WorkflowConfig): Promise<void> => {
  */
 const validateThirdPartyConfig = (config: WorkflowConfig): void => {
   if (!config.thirdPartyImport) {
-    console.log(Colors.red("Error: thirdPartyImport configuration is required"));
+    console.log(
+      Colors.red("Error: thirdPartyImport configuration is required"),
+    );
     Deno.exit(1);
   }
 };
@@ -322,21 +496,31 @@ const validateThirdPartyConfig = (config: WorkflowConfig): void => {
  */
 const buildThirdPartyImportArgs = (config: WorkflowConfig): string[] => {
   const importConfig = config.thirdPartyImport!;
-  
+
   const baseArgs = buildBaseRunArgs(
     "src/scripts/third-party-migrations/import_flags_from_external.ts",
-    ["--allow-net", "--allow-read", "--allow-write", "--allow-env"]
+    ["--allow-net", "--allow-read", "--allow-write", "--allow-env"],
   );
 
   const withRequiredArgs = [
     ...baseArgs,
-    "-f", importConfig.inputFile,
-    "-p", importConfig.targetProject
+    "-f",
+    importConfig.inputFile,
+    "-p",
+    importConfig.targetProject,
   ];
 
-  const withDryRun = addBooleanFlag(withRequiredArgs, "-d", importConfig.dryRun);
+  const withDryRun = addBooleanFlag(
+    withRequiredArgs,
+    "-d",
+    importConfig.dryRun,
+  );
   const withUpsert = addBooleanFlag(withDryRun, "-u", importConfig.upsert);
-  const withOutput = addOptionalArg(withUpsert, "-o", importConfig.reportOutput);
+  const withOutput = addOptionalArg(
+    withUpsert,
+    "-o",
+    importConfig.reportOutput,
+  );
   return addOptionalArg(withOutput, "--domain", config.destination?.domain);
 };
 
@@ -357,8 +541,10 @@ const runThirdPartyImport = async (config: WorkflowConfig): Promise<void> => {
  * Validates revert configuration
  */
 const validateRevertConfig = (config: WorkflowConfig): void => {
-  if (!config.destination?.projectKey) {
-    console.log(Colors.red("Error: Destination project key is required for revert step"));
+  if (!coerceProjectKey(config.destination?.projectKey)) {
+    console.log(
+      Colors.red("Error: Destination project key is required for revert step"),
+    );
     Deno.exit(1);
   }
 };
@@ -368,24 +554,31 @@ const validateRevertConfig = (config: WorkflowConfig): void => {
  */
 const buildRevertArgs = (config: WorkflowConfig): string[] => {
   const revertConfig = config.revert || {};
-  
+
   const baseArgs = buildBaseRunArgs(
     "src/scripts/launchdarkly-migrations/revert_migration.ts",
-    ["--allow-net", "--allow-read", "--allow-write"]
+    ["--allow-net", "--allow-read", "--allow-write"],
   );
 
-  // Use the config file itself as the -f parameter (revert reads from it)
-  const withConfigFile = [...baseArgs, "-f", inputArgs.config];
-  
+  // Use the config file itself as the -f parameter (revert reads from it).
+  // Pin the current project so revert doesn't loop over source.projectKeys itself.
+  const withConfigFile = [...baseArgs, "-f", configPath];
+  let args = addOptionalArg(
+    withConfigFile,
+    "-p",
+    coerceProjectKey(config.destination?.projectKey),
+  );
+  args = addOptionalArg(args, "-s", coerceProjectKey(config.source.projectKey));
+
   // Add optional flags
-  let args = addBooleanFlag(withConfigFile, "--dry-run", revertConfig.dryRun);
+  args = addBooleanFlag(args, "--dry-run", revertConfig.dryRun);
   args = addBooleanFlag(args, "--delete-views", revertConfig.deleteViews);
-  
+
   // Add view keys if specified
   if (revertConfig.viewKeys && revertConfig.viewKeys.length > 0) {
     args = addOptionalArg(args, "-v", revertConfig.viewKeys.join(","));
   }
-  
+
   return args;
 };
 
@@ -408,19 +601,23 @@ type StepExecutor = (config: WorkflowConfig) => Promise<void>;
  * Maps step names to their executor functions
  */
 const STEP_EXECUTORS: Record<StepName, StepExecutor> = {
-  'extract-source': runExtractSource,
-  'map-members': runMapMembers,
-  'migrate': runMigrate,
-  'third-party-import': runThirdPartyImport,
-  'revert': runRevert
+  "extract-source": runExtractSource,
+  "split-extract": runSplitExtract,
+  "map-members": runMapMembers,
+  "migrate": runMigrate,
+  "third-party-import": runThirdPartyImport,
+  "revert": runRevert,
 };
 
 /**
  * Executes a single workflow step
  */
-const executeStep = async (step: string, config: WorkflowConfig): Promise<void> => {
+const executeStep = async (
+  step: string,
+  config: WorkflowConfig,
+): Promise<void> => {
   const executor = STEP_EXECUTORS[step as StepName];
-  
+
   if (executor) {
     await executor(config);
   } else {
@@ -428,12 +625,247 @@ const executeStep = async (step: string, config: WorkflowConfig): Promise<void> 
   }
 };
 
+const printProjectBanner = (
+  index: number,
+  total: number,
+  pair: ProjectPair,
+): void => {
+  const divider = "=".repeat(60);
+  const label = pair.source === pair.destination
+    ? pair.source
+    : `${pair.source} -> ${pair.destination}`;
+  console.log(Colors.magenta(`\n${divider}`));
+  console.log(Colors.magenta(`Project ${index + 1}/${total}: ${label}`));
+  console.log(Colors.magenta(`${divider}\n`));
+};
+
 /**
- * Executes all workflow steps in sequence
+ * Resolves source/destination pairs for project-scoped steps, exiting on a missing key
+ * or an invalid destination.projectKeyMapping.
  */
-const executeWorkflowSteps = async (steps: string[], config: WorkflowConfig): Promise<void> => {
-  for (const step of steps) {
+const resolveProjectPairsOrExit = (config: WorkflowConfig): ProjectPair[] => {
+  try {
+    return resolveProjectPairs(config);
+  } catch (error) {
+    console.log(
+      Colors.red(error instanceof Error ? error.message : String(error)),
+    );
+    Deno.exit(1);
+  }
+};
+
+/**
+ * Exits before migrating when source and destination tokens are in the same account
+ * and a project would migrate onto its own key.
+ */
+const runAccountGuard = async (
+  steps: string[],
+  config: WorkflowConfig,
+): Promise<void> => {
+  if (!steps.includes("migrate")) {
+    return;
+  }
+  let pairs: ProjectPair[];
+  try {
+    pairs = resolveProjectPairs(config);
+  } catch {
+    // Missing keys are reported by the steps themselves
+    return;
+  }
+  try {
+    await assertNotSelfMigration(
+      pairs,
+      config.source.domain,
+      config.destination?.domain,
+    );
+  } catch (error) {
+    console.log(
+      Colors.red(
+        `Error: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    );
+    Deno.exit(1);
+  }
+};
+
+const printCollisions = (
+  collisions: MergeCollisions,
+  color: (s: string) => string,
+): void => {
+  if (collisions.flags.length > 0) {
+    console.log(color(`  flags: ${collisions.flags.join(", ")}`));
+  }
+  for (const [env, keys] of Object.entries(collisions.segments)) {
+    console.log(color(`  segments (${env}): ${keys.join(", ")}`));
+  }
+};
+
+/**
+ * Exits when this pair's source shares flag or segment keys, among the resources being migrated,
+ * with earlier sources merged into the same destination, unless the migrate step's conflict
+ * policy keeps the earlier copies: `prefix` with a prefix that resolves every collision, or `skip`.
+ */
+const runMergePreflight = async (
+  pair: ProjectPair,
+  earlierSources: string[],
+  config: WorkflowConfig,
+): Promise<void> => {
+  if (earlierSources.length === 0) {
+    return;
+  }
+  const selection = mergeSelectionFromConfig(config);
+  let current: MergeKeys;
+  let earlier: MergeKeys[];
+  try {
+    current = await loadMergeKeys(pair.source, SOURCE_DATA_DIR, selection);
+    earlier = await Promise.all(
+      earlierSources.map((s) => loadMergeKeys(s, SOURCE_DATA_DIR, selection)),
+    );
+  } catch (error) {
+    console.log(
+      Colors.red(
+        `Error: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+    );
+    Deno.exit(1);
+  }
+  const others = earlierSources.join(", ");
+  const noCollisions = () =>
+    console.log(Colors.gray(
+      `Merge check: no migrated flag or segment keys shared with ${others} in ${pair.destination}`,
+    ));
+
+  const { policy, prefix } = effectiveConflictPolicy(config);
+  if (policy === "prefix") {
+    if (!prefix) {
+      console.log(
+        Colors.red(
+          `Error: migration.onConflict is "prefix" but migration.conflictPrefix is not set`,
+        ),
+      );
+      Deno.exit(1);
+    }
+    // Earlier sources hold prefixed copies of their own collisions, so compare against those, not raw keys
+    const { collisions, unresolvable } = simulatePrefixedMerge(
+      current,
+      earlier,
+      prefix,
+    );
+    if (hasMergeCollisions(unresolvable)) {
+      console.log(Colors.red(
+        `Error: ${pair.source} shares keys with ${others} in ${pair.destination} that prefix "${prefix}" cannot resolve: ` +
+          `the prefixed key is taken as well (a second source already shares the key, or a resource has the prefixed key), ` +
+          `so the migrate step would overwrite it:`,
+      ));
+      printCollisions(unresolvable, Colors.red);
+      console.log(Colors.red(
+        `Exclude these keys (migration.includeFlags / excludeFlags), rename them in the source, or merge fewer projects into ${pair.destination}.`,
+      ));
+      Deno.exit(1);
+    }
+    if (!hasMergeCollisions(collisions)) {
+      noCollisions();
+      return;
+    }
+    console.log(Colors.yellow(
+      `Warning: ${pair.source} shares keys with ${others} in ${pair.destination}; these will be created with prefix "${prefix}":`,
+    ));
+    printCollisions(collisions, Colors.yellow);
+    return;
+  }
+
+  const collisions = computeMergeCollisions(current, earlier);
+  if (!hasMergeCollisions(collisions)) {
+    noCollisions();
+    return;
+  }
+  if (policy === "skip") {
+    console.log(Colors.yellow(
+      `Warning: ${pair.source} shares keys with ${others} in ${pair.destination}; with onConflict: skip, ` +
+        `these keep the targeting migrated from the earlier source(s) and ${pair.source}'s copies are not migrated:`,
+    ));
+    printCollisions(collisions, Colors.yellow);
+    return;
+  }
+  const consequence = policy === "abort"
+    ? `the migrate step would stop at the first shared key, after writing the keys before it`
+    : policy === "prompt"
+    ? `${pair.source} would overwrite their targeting (prompt can choose overwrite, and falls back to it outside a TTY or in a dry run)`
+    : `${pair.source} would overwrite their targeting`;
+  console.log(Colors.red(
+    `Error: ${pair.source} shares keys with ${others}, which also migrate into ${pair.destination}. ` +
+      `With onConflict: ${policy}, ${consequence}:`,
+  ));
+  printCollisions(collisions, Colors.red);
+  console.log(Colors.red(
+    `Set migration.conflictPrefix with migration.onConflict: prefix to migrate prefixed copies, or onConflict: skip to keep the earlier copies.`,
+  ));
+  Deno.exit(1);
+};
+
+/**
+ * Executes all workflow steps.
+ * Single project: steps run in listed order against the config as written.
+ * source.projectKeys: account-level steps run once, then project steps run per
+ * source/destination pair (destination.projectKeyMapping, else the same key).
+ */
+const executeWorkflowSteps = async (
+  steps: string[],
+  config: WorkflowConfig,
+): Promise<void> => {
+  if (!usesProjectKeysList(config) && usesProjectKeyMapping(config)) {
+    console.log(Colors.yellow(
+      `Warning: destination.projectKeyMapping is ignored without source.projectKeys; use destination.projectKey for a single project`,
+    ));
+  }
+
+  await runAccountGuard(steps, config);
+
+  if (!usesProjectKeysList(config)) {
+    for (const step of steps) {
+      await executeStep(step, config);
+    }
+    return;
+  }
+
+  const { accountSteps, projectSteps, unknownSteps } = partitionWorkflowSteps(
+    steps,
+  );
+
+  for (const step of unknownSteps) {
+    console.log(Colors.yellow(`Warning: Unknown step "${step}", skipping...`));
+  }
+
+  if (coerceProjectKey(config.destination?.projectName)) {
+    console.log(Colors.yellow(
+      `Warning: destination.projectName is ignored with source.projectKeys; use destination.projectNames ` +
+        `(destination key -> name), otherwise created projects use each source project's name`,
+    ));
+  }
+
+  const pairs = resolveProjectPairsOrExit(config);
+
+  for (const step of accountSteps) {
     await executeStep(step, config);
+  }
+
+  if (projectSteps.length === 0) {
+    return;
+  }
+
+  for (let i = 0; i < pairs.length; i++) {
+    const pair = pairs[i];
+    printProjectBanner(i, pairs.length, pair);
+    const projectConfig = withProjectPair(config, pair);
+    const earlierSources = pairs.slice(0, i)
+      .filter((p) => p.destination === pair.destination)
+      .map((p) => p.source);
+    for (const step of projectSteps) {
+      if (step === "migrate") {
+        await runMergePreflight(pair, earlierSources, config);
+      }
+      await executeStep(step, projectConfig);
+    }
   }
 };
 
@@ -444,17 +876,64 @@ const executeWorkflowSteps = async (steps: string[], config: WorkflowConfig): Pr
  */
 const printWorkflowHeader = (config: WorkflowConfig, steps: string[]): void => {
   const divider = "=".repeat(60);
-  
+
   console.log(Colors.blue(`\n🚀 LaunchDarkly Migration Workflow`));
   console.log(Colors.blue(`${divider}\n`));
-  console.log(Colors.cyan(`Configuration loaded: ${inputArgs.config}`));
-  console.log(Colors.cyan(`Source Project: ${config.source.projectKey}`));
-  
-  if (config.destination?.projectKey) {
-    console.log(Colors.cyan(`Destination Project: ${config.destination.projectKey}`));
+  console.log(Colors.cyan(`Configuration loaded: ${configPath}`));
+
+  if (usesProjectKeysList(config)) {
+    const pairs = resolveProjectPairsOrExit(config);
+    console.log(
+      Colors.cyan(
+        `Projects: ${pairs.length} (${pairs.map((p) => p.source).join(", ")})`,
+      ),
+    );
+    if (pairs.every((p) => p.source === p.destination)) {
+      console.log(
+        Colors.gray(`  Same project key used on destination for each project`),
+      );
+    } else {
+      for (const { source, destination } of pairs) {
+        console.log(Colors.gray(`  ${source} -> ${destination}`));
+      }
+    }
+    for (const [destination, sources] of findMergedDestinations(pairs)) {
+      console.log(
+        Colors.cyan(
+          `  Merged destination: ${destination} <- ${sources.join(", ")}`,
+        ),
+      );
+    }
+
+    const { accountSteps, projectSteps } = partitionWorkflowSteps(steps);
+    if (accountSteps.length > 0) {
+      console.log(
+        Colors.cyan(`Account steps (once): ${accountSteps.join(" → ")}`),
+      );
+    }
+    if (projectSteps.length > 0) {
+      console.log(
+        Colors.cyan(`Project steps (per project): ${projectSteps.join(" → ")}`),
+      );
+    }
+  } else {
+    const sourceKey = coerceProjectKey(config.source.projectKey);
+    const destKey = coerceProjectKey(config.destination?.projectKey);
+    if (sourceKey) {
+      console.log(Colors.cyan(`Source Project: ${sourceKey}`));
+    } else {
+      console.log(
+        Colors.yellow(
+          `Source Project: not set (use source.projectKey or source.projectKeys)`,
+        ),
+      );
+    }
+    if (destKey) {
+      console.log(Colors.cyan(`Destination Project: ${destKey}`));
+    }
+    console.log(Colors.cyan(`Steps to execute: ${steps.join(" → ")}`));
   }
-  
-  console.log(Colors.cyan(`Steps to execute: ${steps.join(" → ")}\n`));
+  console.log("");
 };
 
 /**
@@ -479,9 +958,9 @@ const getWorkflowSteps = (config: WorkflowConfig): string[] =>
  * Main workflow orchestration function
  */
 const main = async (): Promise<void> => {
-  const config = await loadConfig(inputArgs.config);
+  const config = await loadConfig(configPath);
   const steps = getWorkflowSteps(config);
-  
+
   printWorkflowHeader(config, steps);
   await executeWorkflowSteps(steps, config);
   printWorkflowCompletion();

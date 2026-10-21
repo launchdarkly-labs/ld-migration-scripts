@@ -1,7 +1,10 @@
+// deno-lint-ignore-file require-await
+// The mock HTTP client methods are async to satisfy the AgentControlHttpClient interface.
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   AGENT_CONTROL_MIGRATE_ORDER,
   agentControlExtractCliArgs,
+  type AgentControlHttpClient,
   agentControlMigrateCliArgs,
   agentControlRoot,
   buildSourceVariationRefsFromTargeting,
@@ -22,7 +25,6 @@ import {
   targetingPath,
   upsertAgentControlResource,
   variationPath,
-  type AgentControlHttpClient,
 } from "./agent_control.ts";
 
 Deno.test("sanitizeAgentControlPayload strips read-only fields", () => {
@@ -176,9 +178,15 @@ Deno.test("buildTargetingInstructionsForEnvironment remaps variation indexes", (
 });
 
 Deno.test("critical targeting warnings detected", () => {
-  assertEquals(isCriticalTargetingWarning("Could not map fallthrough variation"), true);
+  assertEquals(
+    isCriticalTargetingWarning("Could not map fallthrough variation"),
+    true,
+  );
   assertEquals(isCriticalTargetingWarning("Could not map off variation"), true);
-  assertEquals(isCriticalTargetingWarning("Skipping target with unmapped variation"), true);
+  assertEquals(
+    isCriticalTargetingWarning("Skipping target with unmapped variation"),
+    true,
+  );
   assertEquals(isCriticalTargetingWarning("something else"), false);
 });
 
@@ -225,7 +233,10 @@ Deno.test("AGENT_CONTROL_MIGRATE_ORDER is models → configs → variations → 
 Deno.test("path builders match ai-configs layout", () => {
   const root = "/tmp/proj";
   assertEquals(agentControlRoot(root), "/tmp/proj/ai-configs");
-  assertEquals(modelConfigsPath(root), "/tmp/proj/ai-configs/model-configs.json");
+  assertEquals(
+    modelConfigsPath(root),
+    "/tmp/proj/ai-configs/model-configs.json",
+  );
   assertEquals(configsPath(root), "/tmp/proj/ai-configs/configs.json");
   assertEquals(
     variationPath(root, "cfg", "var1"),
@@ -408,7 +419,9 @@ Deno.test("migrateAgentControlFromExtract dry-run makes no write calls", async (
         key: "var-1",
         name: "v1",
         _id: "file-var-id-different",
-        value: { _ldMeta: { modelKey: "OpenAI.gpt-4.1", variationKey: "var-1" } },
+        value: {
+          _ldMeta: { modelKey: "OpenAI.gpt-4.1", variationKey: "var-1" },
+        },
       }),
     );
     await Deno.writeTextFile(

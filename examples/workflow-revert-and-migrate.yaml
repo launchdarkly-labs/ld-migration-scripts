@@ -9,8 +9,8 @@
 
 workflow:
   steps:
-    - revert      # First, clean up the previous migration
-    - migrate     # Then, run the migration again
+    - revert # First, clean up the previous migration
+    - migrate # Then, run the migration again
 
 source:
   projectKey: source-project
@@ -24,10 +24,10 @@ destination:
 revert:
   # Preview the revert first (recommended!)
   dryRun: true
-  
+
   # Delete the view after unlinking flags
   # deleteViews: true
-  
+
   # Optional: Only process specific views
   # viewKeys:
   #   - migration-view-1
@@ -37,18 +37,18 @@ migration:
   assignMaintainerIds: true
   migrateSegments: true
   targetView: "migration-2024"
-  
+
   # Preview the migration (recommended after revert preview!)
   dryRun: true
-  
+
   # Optional: Add conflict prefix
   # conflictPrefix: "migrated-"
-  
+
   # Optional: Limit to specific environments
   # environments:
   #   - production
   #   - staging
-  
+
   # Optional: Map environment keys
   # environmentMapping:
   #   prod: production
@@ -57,6 +57,5 @@ migration:
 # Workflow execution order:
 # 1. Revert (with dryRun: true) - Preview cleanup
 # 2. Migrate (with dryRun: true) - Preview re-migration
-# 
+#
 # Then change both dryRun values to false and run again to execute
-

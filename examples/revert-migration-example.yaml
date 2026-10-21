@@ -1,5 +1,5 @@
 # Example: Revert a Failed Migration
-# 
+#
 # This config file can be used with the revert tool to undo a migration.
 # The revert tool will:
 # 1. Use the source data to know exactly which flags were migrated (faster!)
@@ -34,4 +34,3 @@ migration:
 # --dry-run              Preview the revert without making changes
 # --delete-views         Also delete the view after unlinking flags
 # --no-use-source-data   Disable smart mode (scan all flags instead)
-

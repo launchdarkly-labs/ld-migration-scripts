@@ -1,0 +1,41 @@
+# Format, lint, type-check and test on every PR and on main.
+# Required status check: "checks" (see CONTRIBUTING.md).
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version-file: .deno-version
+          cache: true
+
+      - name: Format
+        run: deno fmt --check
+
+      - name: Lint
+        run: deno lint
+
+      # --frozen fails when deno.lock would change: commit the refreshed lock.
+      - name: Type-check
+        run: deno check --frozen src/ scripts/
+
+      - name: Test
+        run: deno test --frozen --allow-read --allow-write src/

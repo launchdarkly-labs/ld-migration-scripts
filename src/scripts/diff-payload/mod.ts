@@ -1,6 +1,6 @@
-import { create } from "npm:jsondiffpatch";
-import { format as jsonpatchFormat } from "npm:jsondiffpatch/formatters/jsonpatch";
-import { format as consoleFormat } from "npm:jsondiffpatch/formatters/console";
+import { create } from "npm:jsondiffpatch@0.7.6";
+import { format as jsonpatchFormat } from "npm:jsondiffpatch@0.7.6/formatters/jsonpatch";
+import { format as consoleFormat } from "npm:jsondiffpatch@0.7.6/formatters/console";
 
 // --- Noise field configuration ---
 const RECURSIVE_NOISE = new Set(["_id", "id"]);
