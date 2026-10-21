@@ -45,6 +45,65 @@ export interface SyncManifestSegment {
   destEnv?: string;
 }
 
+/**
+ * What `migrate` recorded for one AgentControl (AI Configs) resource. `hash` fingerprints the inputs of the
+ * last successful write (--incremental skips the resource while it is unchanged); a failed write clears it
+ * so the next --incremental run retries. `destKey` is the destination key when it differs from the source
+ * key (conflict prefix).
+ */
+export interface SyncManifestAgentControlEntry {
+  hash?: string;
+  destKey?: string;
+}
+
+export interface SyncManifestAgentControlConfig
+  extends SyncManifestAgentControlEntry {
+  /** variations[variationKey] */
+  variations: Record<string, { hash?: string }>;
+  /** targeting[sourceEnvironmentKey] */
+  targeting: Record<string, { hash?: string }>;
+}
+
+/** The AgentControl inventory; modelConfigs and configs are keyed by source key. */
+export interface SyncManifestAgentControl {
+  modelConfigs: Record<string, SyncManifestAgentControlEntry>;
+  configs: Record<string, SyncManifestAgentControlConfig>;
+}
+
+export function emptyAgentControlManifest(): SyncManifestAgentControl {
+  return {
+    modelConfigs: emptyRecord<SyncManifestAgentControlEntry>(),
+    configs: emptyRecord<SyncManifestAgentControlConfig>(),
+  };
+}
+
+/**
+ * A deep copy of an AgentControl manifest section (null-prototype records, so a resource named
+ * "__proto__" stays an own entry). A missing or partial section (an older manifest, or hand-edited JSON)
+ * yields an empty one.
+ */
+export function cloneAgentControlManifest(
+  source: Partial<SyncManifestAgentControl> | undefined | null,
+): SyncManifestAgentControl {
+  const copy = emptyAgentControlManifest();
+  for (const [key, entry] of Object.entries(source?.modelConfigs ?? {})) {
+    copy.modelConfigs[key] = { ...entry };
+  }
+  for (const [key, entry] of Object.entries(source?.configs ?? {})) {
+    const variations = emptyRecord<{ hash?: string }>();
+    for (const [k, v] of Object.entries(entry.variations ?? {})) {
+      variations[k] = { ...v };
+    }
+    const targeting = emptyRecord<{ hash?: string }>();
+    for (const [k, v] of Object.entries(entry.targeting ?? {})) {
+      targeting[k] = { ...v };
+    }
+    const { variations: _v, targeting: _t, ...rest } = entry;
+    copy.configs[key] = { ...rest, variations, targeting };
+  }
+  return copy;
+}
+
 export interface SyncManifest {
   lastSyncTimestamp: string;
   sourceProject: string;
@@ -53,9 +112,16 @@ export interface SyncManifest {
   destDomain?: string;
   /** Destination account the manifest was written for (caller-identity), when the token could read it */
   destAccountId?: string;
+  /**
+   * The destination project's ID. A deleted and recreated project has the same key but a new ID, so a
+   * mismatch means the recorded entries describe resources that no longer exist.
+   */
+  destProjectId?: string;
   flags: Record<string, SyncManifestFlag>;
   /** segments[sourceEnvKey][segmentKey] */
   segments?: Record<string, Record<string, SyncManifestSegment>>;
+  /** AgentControl (AI Configs) inventory; present once a run migrated them, absent in older manifests */
+  agentControl?: SyncManifestAgentControl;
   /**
    * Set when the writing run stopped early (--on-conflict abort, unexpected phase error) or when its
    * failed writes left resources without an entry: the inventory is not exhaustive. Cleared by a later
@@ -418,6 +484,30 @@ export function stampIdentity(
     destDomain: identity.domain,
     ...(accountId ? { destAccountId: accountId } : {}),
   };
+}
+
+/**
+ * True when the manifest was written for a different destination project than the one that exists now:
+ * the project was deleted and recreated, so the resources the manifest records are gone. A manifest from
+ * an older version records no project ID and is never reported as changed.
+ */
+export function destinationProjectRecreated(
+  previous: SyncManifest | null,
+  currentProjectId: string | undefined,
+): boolean {
+  return Boolean(
+    previous?.destProjectId && currentProjectId &&
+      previous.destProjectId !== currentProjectId,
+  );
+}
+
+/** The project ID to record: the current one, else the previous manifest's (a dry run may not see a project). */
+export function stampProjectId(
+  previous: SyncManifest | null,
+  currentProjectId: string | undefined,
+): Pick<SyncManifest, "destProjectId"> {
+  const id = currentProjectId ?? previous?.destProjectId;
+  return id ? { destProjectId: id } : {};
 }
 
 /**

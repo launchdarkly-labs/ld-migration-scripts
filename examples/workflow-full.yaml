@@ -20,6 +20,7 @@ destination:
 # Optional: Control what data to extract from source
 # extraction:
 #   includeSegments: true  # Uncomment to extract segments (only needed if migrateSegments: true)
+#   includeAgentControl: true  # Uncomment for AgentControl / AI Configs (or set migrateAgentControl: true)
 
 # Optional: Configure member mapping output location
 memberMapping:
@@ -32,6 +33,9 @@ migration:
 
   # Include segments
   migrateSegments: true
+
+  # AgentControl (AI Configs) — opt-in; see examples/workflow-agent-control.yaml
+  # migrateAgentControl: true
 
   # Copy big (larger list-based) segment members via CSV export/import (optional, default: false).
   # Needs createSegmentExport on the source token (see docs/launchdarkly-migration-role.md).

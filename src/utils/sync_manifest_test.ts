@@ -7,6 +7,7 @@ import {
   abortMarker,
   adoptUnresolved,
   assertManifestComplete,
+  destinationProjectRecreated,
   emptyRecord,
   legacySegmentEntries,
   manifestDestinationFlagKeys,
@@ -18,6 +19,7 @@ import {
   retireDeletedFlags,
   segmentEnvironmentMismatches,
   stampIdentity,
+  stampProjectId,
   type SyncManifest,
   syncManifestPath,
   withExtraDestKeys,
@@ -923,4 +925,22 @@ Deno.test("an unverified legacy segment entry neither resolves nor adopts a gap 
     segments: { prod: { seg: { version: 1, destEnv: "prod" } } },
   };
   assertEquals(retainIncompleteMarker(previous, clean, verified), undefined);
+});
+
+Deno.test("destinationProjectRecreated compares the recorded project ID with the current one", () => {
+  const recorded = { ...manifest, destProjectId: "id-1" };
+  assertEquals(destinationProjectRecreated(recorded, "id-1"), false);
+  assertEquals(destinationProjectRecreated(recorded, "id-2"), true);
+  // not verifiable: no current ID (dry run before creation), no recorded ID (older manifest), no manifest
+  assertEquals(destinationProjectRecreated(recorded, undefined), false);
+  assertEquals(destinationProjectRecreated(manifest, "id-2"), false);
+  assertEquals(destinationProjectRecreated(null, "id-2"), false);
+});
+
+Deno.test("stampProjectId records the current project ID, else keeps the previous one", () => {
+  const recorded = { ...manifest, destProjectId: "id-1" };
+  assertEquals(stampProjectId(recorded, "id-2"), { destProjectId: "id-2" });
+  assertEquals(stampProjectId(recorded, undefined), { destProjectId: "id-1" });
+  assertEquals(stampProjectId(manifest, "id-3"), { destProjectId: "id-3" });
+  assertEquals(stampProjectId(null, undefined), {});
 });

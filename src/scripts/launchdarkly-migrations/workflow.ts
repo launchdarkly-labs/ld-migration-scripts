@@ -10,6 +10,10 @@ import yargs from "https://deno.land/x/yargs@v17.7.2-deno/deno.ts";
 import { parse as parseYaml } from "https://deno.land/std@0.224.0/yaml/parse.ts";
 import * as Colors from "https://deno.land/std@0.149.0/fmt/colors.ts";
 import {
+  agentControlExtractCliArgs,
+  agentControlMigrateCliArgs,
+} from "../../utils/agent_control.ts";
+import {
   coerceProjectKey,
   computeMergeCollisions,
   effectiveConflictPolicy,
@@ -187,13 +191,20 @@ const buildExtractSourceArgs = (config: WorkflowConfig): string[] => {
   let args = [...baseArgs, "-p", coerceProjectKey(config.source.projectKey)!];
   args = addOptionalArg(args, "--domain", config.source.domain);
 
-  // Only extract segments if explicitly enabled AND migration will use them
+  // Only extract segments if explicitly enabled OR migration will use them
   const shouldExtractSegments = config.extraction?.includeSegments === true ||
     config.migration?.migrateSegments === true;
 
   if (shouldExtractSegments) {
     args = [...args, "--extract-segments=true"];
   }
+  args = [
+    ...args,
+    ...agentControlExtractCliArgs({
+      includeAgentControl: config.extraction?.includeAgentControl,
+      migrateAgentControl: config.migration?.migrateAgentControl,
+    }),
+  ];
   if (config.extraction?.includeArchived) {
     args = [...args, "--include-archived=true"];
   }
@@ -365,6 +376,10 @@ const buildMigrationArgs = (config: WorkflowConfig): string[] => {
 
   args = addBooleanFlag(args, "-m", migration.assignMaintainerIds);
   args = addBooleanFlag(args, "-s=false", migration.migrateSegments === false);
+  args = [
+    ...args,
+    ...agentControlMigrateCliArgs(migration.migrateAgentControl),
+  ];
   args = addBooleanFlag(
     args,
     "--migrate-big-segments",

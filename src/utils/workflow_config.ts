@@ -24,6 +24,8 @@ export interface WorkflowConfig {
   extraction?: {
     includeSegments?: boolean;
     includeArchived?: boolean;
+    /** Extract AgentControl (AI Configs); also implied by migration.migrateAgentControl */
+    includeAgentControl?: boolean;
   };
   memberMapping?: {
     outputFile?: string;
@@ -45,6 +47,8 @@ export interface WorkflowConfig {
   migration?: {
     assignMaintainerIds?: boolean;
     migrateSegments?: boolean;
+    /** Migrate AgentControl (AI Configs); default false */
+    migrateAgentControl?: boolean;
     tags?: string[] | null;
     migrateBigSegments?: boolean;
     conflictPrefix?: string;

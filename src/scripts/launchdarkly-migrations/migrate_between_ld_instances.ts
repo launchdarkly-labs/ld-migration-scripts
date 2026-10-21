@@ -24,12 +24,14 @@ import {
 import * as Colors from "https://deno.land/std@0.149.0/fmt/colors.ts";
 import { parse as parseYaml } from "https://deno.land/std@0.224.0/yaml/parse.ts";
 import { getDestinationApiKey } from "../../utils/api_keys.ts";
+import { migrateAgentControlFromExtract } from "../../utils/agent_control.ts";
 import { resolveDestinationProjectName } from "../../utils/workflow_config.ts";
 import { mergeTags } from "../../utils/tags.ts";
 import {
   abortMarker,
   adoptUnresolved,
   type DestinationIdentity,
+  destinationProjectRecreated,
   emptyRecord,
   legacySegmentEntries,
   markerAfterRun,
@@ -39,7 +41,9 @@ import {
   type RunOutcome,
   segmentEnvironmentMismatches,
   stampIdentity,
+  stampProjectId,
   type SyncManifest,
+  type SyncManifestAgentControl,
   type SyncManifestEnv,
   type SyncManifestFlag,
   syncManifestPath as syncManifestPathFor,
@@ -59,6 +63,7 @@ interface Arguments {
   destProjectName?: string;
   assignMaintainerIds: boolean;
   migrateSegments: boolean;
+  migrateAgentControl: boolean;
   migrateBigSegments?: boolean;
   conflictPrefix?: string;
   tags?: string;
@@ -95,6 +100,7 @@ interface MigrationConfig {
   options?: {
     assignMaintainerIds?: boolean;
     migrateSegments?: boolean;
+    migrateAgentControl?: boolean;
     tags?: string[] | null;
     migrateBigSegments?: boolean;
     conflictPrefix?: string;
@@ -219,6 +225,22 @@ async function getProjectStatus(
   const req = ldAPIRequest(apiKey, domain, `projects/${projectKey}`);
   const response = await rateLimitRequest(req, "projects");
   return response.status;
+}
+
+// The destination project's ID (undefined when it cannot be read). Unlike its key, it changes when the
+// project is deleted and recreated.
+async function getProjectId(
+  apiKey: string,
+  domain: string,
+  projectKey: string,
+): Promise<string | undefined> {
+  const response = await rateLimitRequest(
+    ldAPIRequest(apiKey, domain, `projects/${projectKey}`),
+    "projects",
+  );
+  if (response.status !== 200) return undefined;
+  const id = (await response.json())?._id;
+  return typeof id === "string" && id ? id : undefined;
 }
 
 // Add function to get existing project environments
@@ -384,12 +406,14 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .string("dest-project-name")
   .boolean("m")
   .boolean("s")
+  .boolean("migrate-agent-control")
   .boolean("dry-run")
   .boolean("incremental")
   .boolean("create-project")
   .boolean("create-environments")
   .default("m", false)
   .default("s", true)
+  .default("migrate-agent-control", false)
   .describe(
     "c",
     "Prefix to use when resolving key conflicts (e.g., 'imported-')",
@@ -420,6 +444,10 @@ const cliArgs: Arguments = (yargs(Deno.args)
     "Path to YAML config file. CLI arguments override config file values.",
   )
   .describe("dry-run", "Preview migration without making any changes")
+  .describe(
+    "migrate-agent-control",
+    "Whether to migrate AgentControl (AI Configs) resources (default: false)",
+  )
   .describe(
     "incremental",
     "Skip flags unchanged since last sync (version-based)",
@@ -477,6 +505,10 @@ if (cliArgs.config) {
           cliArgs.migrateSegments !== true
         ? cliArgs.migrateSegments
         : opts?.migrateSegments ?? true,
+      migrateAgentControl: cliArgs.migrateAgentControl !== undefined &&
+          cliArgs.migrateAgentControl !== false
+        ? cliArgs.migrateAgentControl
+        : opts?.migrateAgentControl ?? false,
       migrateBigSegments: cliArgs.migrateBigSegments ??
         opts?.migrateBigSegments ?? false,
       conflictPrefix: cliArgs.conflictPrefix || opts?.conflictPrefix,
@@ -554,6 +586,9 @@ console.log(
   Colors.gray(`  Assign Maintainers: ${inputArgs.assignMaintainerIds}`),
 );
 console.log(Colors.gray(`  Migrate Segments: ${inputArgs.migrateSegments}`));
+console.log(
+  Colors.gray(`  Migrate AgentControl: ${inputArgs.migrateAgentControl}`),
+);
 console.log(
   Colors.gray(
     `  Migrate Big Segment Members: ${inputArgs.migrateBigSegments || false}`,
@@ -731,7 +766,7 @@ let promptLock: Promise<unknown> = Promise.resolve();
  * options); outside a TTY or in dry-run mode, prompt falls back to overwrite.
  */
 async function resolveConflictAction(
-  resourceType: "flag" | "segment",
+  resourceType: "flag" | "segment" | "ai-config" | "model-config",
   key: string,
 ): Promise<ConflictAction> {
   if (onConflictMode !== "prompt") return onConflictMode as ConflictAction;
@@ -996,6 +1031,12 @@ const updatedManifestFlags = emptyRecord<SyncManifestFlag>();
 const updatedManifestSegments = emptyRecord<
   Record<string, SyncManifestSegment>
 >();
+// AgentControl inventory of this run; stays null when AgentControl was not migrated, so the previous
+// manifest's section is carried forward untouched
+let updatedManifestAgentControl: SyncManifestAgentControl | null = null;
+// Destination keys the AgentControl phase left in place, for reconciliation against the destination
+let agentControlExpected: { modelConfigs: string[]; configs: string[] } | null =
+  null;
 let incrementalSkipCount = 0;
 let incrementalEnvSkipCount = 0;
 let incrementalSegmentSkipCount = 0;
@@ -1269,6 +1310,30 @@ if (projStatus === 401 || projStatus === 403) {
   console.log(
     Colors.gray(`  Found existing environments: ${existingEnvs.join(", ")}`),
   );
+}
+
+// The project key says nothing about the project's identity: a deleted and recreated project has the same
+// key and none of the resources the manifest records. Compare the project ID with the one it was written for.
+// (A dry run that would create the project sees none; the previous ID is then kept.)
+const destProjectId = await getProjectId(
+  apiKey,
+  domain,
+  inputArgs.projKeyDest,
+).catch(() => undefined);
+if (destinationProjectRecreated(previousManifest, destProjectId)) {
+  console.log(Colors.yellow(
+    `\n⚠ Destination project "${inputArgs.projKeyDest}" is not the project the sync manifest was written for ` +
+      `(project ID ${destProjectId} instead of ${
+        previousManifest!.destProjectId
+      }): it was deleted and recreated.`,
+  ));
+  console.log(Colors.yellow(
+    `  The resources the manifest records no longer exist, so this run syncs everything again` +
+      (inputArgs.incremental
+        ? ` instead of skipping unchanged resources (--incremental ignored).`
+        : `.`),
+  ));
+  inputArgs.incremental = false;
 }
 
 /**
@@ -2333,6 +2398,59 @@ if (inputArgs.migrateSegments) {
   }
 } else {
   console.log(Colors.gray("  Segment migration disabled, skipping..."));
+}
+
+// Migrate AgentControl (AI Configs) if enabled
+if (inputArgs.migrateAgentControl) {
+  try {
+    let aicAbort: { resourceType: string; key: string } | null = null;
+    const aicResult = await migrateAgentControlFromExtract({
+      apiKey,
+      domain,
+      sourceProjectKey: inputArgs.projKeySource,
+      destProjectKey: inputArgs.projKeyDest,
+      dryRun: inputArgs.dryRun === true,
+      envMapping,
+      // Same --incremental / --on-conflict / --tags / maintainer behavior as flags and segments. --since
+      // does not apply: AgentControl resources are compared by content hash instead.
+      incremental: inputArgs.incremental === true,
+      previousManifest: previousManifest?.agentControl,
+      onConflict: onConflictMode as ConflictAction,
+      conflictPrefix: inputArgs.conflictPrefix,
+      resolveConflict: resolveConflictAction,
+      onConflictRenamed: (resourceType, originalKey, resolvedKey) => {
+        if (!inputArgs.conflictPrefix) return;
+        conflictTracker.addResolution({
+          originalKey,
+          resolvedKey,
+          resourceType,
+          conflictPrefix: inputArgs.conflictPrefix,
+        });
+      },
+      onAbort: (resourceType, key) => {
+        aicAbort = { resourceType, key };
+      },
+      tags: migrationTags,
+      maintainerMapping,
+      assignMaintainerIds: inputArgs.assignMaintainerIds,
+    });
+    updatedManifestAgentControl = aicResult.manifest;
+    agentControlExpected = aicResult.expected;
+    if (aicResult.aborted && aicAbort) {
+      const { resourceType, key } = aicAbort;
+      requestAbort(resourceType, key);
+      await finalizeAbort();
+    }
+  } catch (error) {
+    console.log(Colors.red(
+      `  ✗ AgentControl migration error: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    ));
+    console.log(Colors.yellow("  Continuing with flag migration..."));
+  }
+} else {
+  console.log(Colors.gray("\n  AgentControl migration disabled, skipping..."));
 }
 
 // ==================== Semantic Patch Conversion ====================
@@ -4260,7 +4378,14 @@ async function writeSyncManifestFile(
     sourceProject: inputArgs.projKeySource,
     destProject: inputArgs.projKeyDest,
     ...stampIdentity(previousManifest, destIdentity),
+    ...stampProjectId(previousManifest, destProjectId),
     ...entries,
+    ...((updatedManifestAgentControl ?? previousManifest?.agentControl)
+      ? {
+        agentControl: updatedManifestAgentControl ??
+          previousManifest!.agentControl,
+      }
+      : {}),
     ...(marker ? { incomplete: marker } : {}),
   };
   // A dry run changes nothing, so recording it would make a later --incremental run skip unsynced resources
@@ -4514,6 +4639,15 @@ const printMigrationSummary = (
   printNonMigratedSettingsSection(skippedFields);
   printErrorsSection(flagsWithErrors);
   printSegmentErrorsSection(segmentsWithErrors);
+  if (agentControlMissing.length > 0) {
+    console.log(
+      Colors.red("\n❌ AGENTCONTROL RESOURCES MISSING IN DESTINATION"),
+    );
+    agentControlMissing.forEach((k) => console.log(Colors.red(`  ✗ ${k}`)));
+    console.log(Colors.gray(
+      "  → Re-run (with --incremental the missing ones are recreated)",
+    ));
+  }
   if (reconciliationErrors.length > 0) {
     console.log(Colors.red("\n❌ RECONCILIATION NOT COMPLETED"));
     reconciliationErrors.forEach((e) => console.log(Colors.red(`  ✗ ${e}`)));
@@ -4527,7 +4661,7 @@ const printMigrationSummary = (
   const { message, color } = getMigrationStatusMessage(
     approvals.length,
     flagsWithErrors.size + segmentsWithErrors.size +
-      reconciliationErrors.length,
+      agentControlMissing.length + reconciliationErrors.length,
   );
 
   console.log(Colors.blue(`\n${divider}`));
@@ -4582,6 +4716,8 @@ async function listDestinationKeys(path: string): Promise<Set<string>> {
 }
 
 const reconciliationErrors: string[] = [];
+// AgentControl resources the run expected in the destination and did not find
+const agentControlMissing: string[] = [];
 
 async function reconcileDestination(): Promise<void> {
   if (inputArgs.dryRun) return;
@@ -4676,7 +4812,71 @@ async function reconcileDestination(): Promise<void> {
   }
 }
 
+/**
+ * AgentControl reconciliation: configs are compared with the destination's config list; model configs
+ * (a catalog of over a thousand, nearly all built in) are checked one by one, as only a handful are expected.
+ */
+async function reconcileAgentControl(): Promise<void> {
+  if (inputArgs.dryRun || !agentControlExpected) return;
+  const { configs, modelConfigs } = agentControlExpected;
+  if (configs.length === 0 && modelConfigs.length === 0) return;
+  console.log(Colors.blue("\n🔎 RECONCILIATION (AgentControl)"));
+  try {
+    const dest = await listDestinationKeys(
+      `projects/${inputArgs.projKeyDest}/ai-configs?limit=50&offset=0`,
+    );
+    const missing = configs.filter((k) => !dest.has(k));
+    console.log(
+      `  configs: expected ${configs.length} → destination ${dest.size} (missing ${missing.length})`,
+    );
+    for (const k of missing) {
+      console.log(Colors.red(`    ✗ config missing in destination: ${k}`));
+      agentControlMissing.push(`config ${k}`);
+    }
+  } catch (err) {
+    const msg = `agent control configs: ${
+      err instanceof Error ? err.message : String(err)
+    }`;
+    console.log(Colors.red(`  ✗ Could not reconcile ${msg}`));
+    reconciliationErrors.push(msg);
+  }
+  let modelMissing = 0;
+  for (const key of modelConfigs) {
+    try {
+      const resp = await rateLimitRequest(
+        ldAPIRequest(
+          apiKey,
+          domain,
+          `projects/${inputArgs.projKeyDest}/ai-configs/model-configs/${key}`,
+        ),
+        "ai-configs",
+      );
+      if (resp.status === 404) {
+        console.log(
+          Colors.red(`    ✗ model config missing in destination: ${key}`),
+        );
+        agentControlMissing.push(`model config ${key}`);
+        modelMissing++;
+      } else if (resp.status !== 200) {
+        throw new Error(`HTTP ${resp.status}`);
+      }
+    } catch (err) {
+      const msg = `agent control model config ${key}: ${
+        err instanceof Error ? err.message : String(err)
+      }`;
+      console.log(Colors.red(`  ✗ Could not reconcile ${msg}`));
+      reconciliationErrors.push(msg);
+    }
+  }
+  if (modelConfigs.length > 0) {
+    console.log(
+      `  model configs: expected ${modelConfigs.length} (missing ${modelMissing})`,
+    );
+  }
+}
+
 await reconcileDestination();
+await reconcileAgentControl();
 
 // Print the migration summary
 printMigrationSummary(
@@ -4688,7 +4888,8 @@ printMigrationSummary(
 
 if (
   flagsWithErrors.size > 0 || segmentsWithErrors.size > 0 ||
-  reconciliationErrors.length > 0 || viewLinkingFailed || manifestWriteFailed
+  agentControlMissing.length > 0 || reconciliationErrors.length > 0 ||
+  viewLinkingFailed || manifestWriteFailed
 ) {
   Deno.exit(1);
 }

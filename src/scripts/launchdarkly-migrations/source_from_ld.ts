@@ -9,6 +9,7 @@ import {
   rateLimitRequest,
   writeSourceData,
 } from "../../utils/utils.ts";
+import { extractAgentControlResources } from "../../utils/agent_control.ts";
 import { Semaphore } from "../../utils/semaphore.ts";
 import { getSourceApiKey } from "../../utils/api_keys.ts";
 import {
@@ -22,6 +23,7 @@ interface Arguments {
   projKey: string;
   domain?: string;
   extractSegments?: boolean;
+  extractAgentControl?: boolean;
   extractBigSegments?: boolean;
   includeArchived?: boolean;
   extractViews?: boolean;
@@ -36,6 +38,12 @@ const inputArgs: Arguments = yargs(Deno.args)
   .describe(
     "extract-segments",
     "Whether to extract segment data (default: false)",
+  )
+  .boolean("extract-agent-control")
+  .default("extract-agent-control", false)
+  .describe(
+    "extract-agent-control",
+    "Whether to extract AgentControl (AI Configs) data (default: false)",
   )
   .boolean("extract-big-segments")
   .default("extract-big-segments", false)
@@ -302,6 +310,29 @@ if (inputArgs.extractSegments && allEnvironments.length > 0) {
   }
 } else if (!inputArgs.extractSegments) {
   console.log("\nSkipping segment extraction (disabled in config)");
+}
+
+// AgentControl (AI Configs) Data //
+if (inputArgs.extractAgentControl) {
+  await extractAgentControlResources({
+    apiKey,
+    domain,
+    projectKey: inputArgs.projKey,
+    projPath,
+    writeJson: async (filePathWithoutExt, data) => {
+      const lastSlash = filePathWithoutExt.lastIndexOf("/");
+      const dir = lastSlash >= 0
+        ? filePathWithoutExt.slice(0, lastSlash)
+        : projPath;
+      const fileName = lastSlash >= 0
+        ? filePathWithoutExt.slice(lastSlash + 1)
+        : filePathWithoutExt;
+      await writeSourceData(dir, fileName, data);
+    },
+    ensureDir: (path) => ensureDirSync(path),
+  });
+} else {
+  console.log("\nSkipping AgentControl extraction (disabled in config)");
 }
 
 // Get List of all Flags
