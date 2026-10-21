@@ -496,7 +496,9 @@ migration: # Optional - for migrate step
   assignMaintainerIds: boolean
   migrateSegments: boolean
   migrateAgentControl: boolean # Migrate AgentControl / AI Configs (default: false)
-  tags: string[] | null # Optional tags added to migrated flags and segments
+  tags: string[] | null # Optional tags added to migrated flags, segments, AgentControl configs and model configs
+  incremental: boolean # Skip resources unchanged since the last sync (flags/segments by version, AgentControl by content hash)
+  onConflict: string # overwrite | skip | prefix | abort | prompt (default: prefix when conflictPrefix is set, else overwrite)
   migrateBigSegments: boolean # Copy big segment members via CSV export/import (default: false)
   migrateViews: boolean # Recreate views and link flags/segments to them (default: true)
   adoptUnresolved: boolean # Record resources an incomplete sync manifest lists as untracked as this migration's copies
@@ -571,7 +573,17 @@ data/launchdarkly-migrations/source/project/{projectKey}/
 
 By default, segments are **not** extracted unless explicitly needed, preventing unnecessary API calls and storage.
 
-**AgentControl (AI Configs):** Extracted when `extraction.includeAgentControl` **or** `migration.migrateAgentControl` is `true` (same pattern as segments). Migrate is opt-in (`migrateAgentControl` defaults to `false`). Order: model-configs → configs → variations → targeting. Targeting uses `GET/PATCH .../ai-configs/{configKey}/targeting` (semantic patch) with variation keys resolved from `value._ldMeta.variationKey` (and `disabled` for off variations). Only model configs referenced by extracted variations are migrated (provider catalogs are skipped). On `403`/`404` (not entitled / missing), the step logs a skip and continues. Incomplete targeting maps are reported as errors, not success. Product name is AgentControl; API paths remain `/api/v2/projects/{projectKey}/ai-configs...`.
+**AgentControl (AI Configs):** Extracted when `extraction.includeAgentControl` **or** `migration.migrateAgentControl` is `true` (same pattern as segments). Migrate is opt-in (`migrateAgentControl` defaults to `false`). Order: model-configs → configs → variations → targeting. Targeting uses `GET/PATCH .../ai-configs/{configKey}/targeting` (semantic patch) with variation keys resolved from `value._ldMeta.variationKey` (`disabled` for the off variation, `enabled` for the built-in variation of a config without authored variations). Destination variation IDs are read from the destination's `/targeting` resource, which lists the built-in `disabled`/`enabled` variations the config detail omits. Only model configs referenced by extracted variations are migrated (provider catalogs are skipped), and built-in (`global`) and restricted model configs are skipped without a write. On `403`/`404` (not entitled / missing), the step logs a skip and continues. Incomplete targeting maps are reported as errors, not success. Product name is AgentControl; API paths remain `/api/v2/projects/{projectKey}/ai-configs...`.
+
+AgentControl follows the same options as flags and segments:
+
+- **Conflicts (`--on-conflict`, `-c`).** A config or model config that already exists in the destination and is not recorded in the [sync manifest](#sync-manifest) follows the policy: `overwrite` (default without `-c`), `skip`, `prefix` (default with `-c`), `abort` or `prompt`. With `prefix`, the config is created as `<prefix><key>` (and `<prefix><name>`), and its variations and targeting follow it. Model configs are referenced by key, so an existing model config is reused rather than renamed. A config skipped by the policy, or that failed, skips its variations and targeting. A copy recorded by an earlier run is updated in place without consulting the policy. Prefix renames appear in the conflict report as `ai-config` entries. A resource known to exist is updated directly (a create for an existing judge config is rejected with a `400`, not a `409`).
+- **Tags (`--tags`).** The migration tags are merged with the source tags and, on update, the destination's existing tags, on configs and model configs. Variations take no tags.
+- **Maintainers (`--assign-maintainer-ids`).** A member maintainer is mapped through `maintainer_mapping.json`; with no mapping, or without the option, no maintainer is sent (a source member ID means nothing in the destination account). Team maintainers are not carried over.
+- **Sync manifest and `--incremental`.** The manifest has an `agentControl` section (see [Sync Manifest](#sync-manifest)). Under `--incremental`, a model config, config, variation or targeting environment is skipped when a hash of its write inputs matches the manifest; `--since` does not apply to AgentControl. A config or model config is skipped only if it still exists in the destination, otherwise it is rewritten together with its variations and targeting.
+- **Reconciliation.** After a real run, the expected configs are compared with the destination's config list and the expected model configs are checked one by one. Missing resources are reported and the run exits with code 1.
+
+Limits: `revert` does not remove AgentControl resources, and there is no multi-project merge handling. Prompt snippets, skills and tools are separate resources and are not migrated. A variation's `modelConfigVersion` and `evaluationMetricKey` may not map across projects. The writes are covered by mocked tests and a live run against a test project; try a dry run and a small project before a production migration.
 
 ```bash
 deno task source-from-ld -- -p PROJECT --extract-agent-control=true
@@ -1052,6 +1064,8 @@ deno task migrate \
 After every real run, `migrate` writes `data/launchdarkly-migrations/sync-manifest-<source>-<dest>.json`: the inventory of what the migration wrote, used by `--incremental`, by view linking and by `revert`.
 
 - **What it records.** For every migrated flag and segment, the source version (so `--incremental` can skip unchanged resources) and the destination key when it differs from the source key (conflict prefix). Segments also record their destination environment. The file records the destination domain and account it was written for.
+- **AgentControl.** When AgentControl is migrated, an `agentControl` section holds, per model config and config (keyed by source key), a hash of the inputs last written and the destination key when a conflict prefix renamed it; per config, a hash for each variation and each targeting environment. `--incremental` skips resources whose hash is unchanged. A failed write keeps its entry with the hash cleared, so the next run retries it. A dry run records nothing. Manifests from older versions have no section and load unchanged.
+- **Destination project.** The manifest records the destination project's ID. If the project was deleted and recreated, the recorded resources no longer exist: the run warns and ignores `--incremental`, syncing everything again.
 - **Cumulative.** A run rewrites the entries of the resources it attempted and keeps the others (`includeFlags` / `excludeFlags`, `--since`, unselected environments, `migrateSegments: false`). A resource whose write failed keeps its entry with its versions cleared, so the next `--incremental` run retries it.
 - **Reruns update recorded copies.** A flag or segment with an entry is updated under its recorded destination key, whatever `--on-conflict` says; `conflictPrefix` and the conflict policy apply only to resources the manifest does not know. A rerun with a prefix therefore does not create a second prefixed copy.
 - **Trusted only for its destination.** `migrate` and `revert` refuse a manifest that records another project pair, destination domain or account; migrating the same projects to another destination needs its own working directory. A rerun whose `environmentMapping` sends a source environment elsewhere than recorded stops before writing. Manifests written by older versions carry neither identity nor segment environments: they are accepted with a warning and stamped by the next run, and their segment entries are looked up in the destination first (found ones are kept, missing ones dropped).
@@ -1321,7 +1335,8 @@ don't need to specify them manually.
   true. Set to false to skip segment migration.
 - `--migrate-agent-control`: (Optional) Whether to migrate AgentControl (AI Configs)
   resources, defaults to `false`. When enabled, upserts in order: model-configs →
-  configs → variations → targeting. Skips on `403`/`404`.
+  configs → variations → targeting. Honors `--on-conflict`, `-c`, `--tags`,
+  `--assign-maintainer-ids` and `--incremental`. Skips on `403`/`404`.
 - `-c, --conflictPrefix`: (Optional) Prefix to use when resolving key conflicts
   (e.g., 'imported-'). When a resource with a conflicting key is detected, it
   will be created with this prefix automatically. A rerun updates the copies

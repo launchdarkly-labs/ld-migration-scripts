@@ -1046,7 +1046,7 @@ export const getViewsFromProject = async (
 export interface ConflictResolution {
   originalKey: string;
   resolvedKey: string;
-  resourceType: "flag" | "segment" | "project";
+  resourceType: "flag" | "segment" | "project" | "ai-config" | "model-config";
   conflictPrefix: string;
 }
 

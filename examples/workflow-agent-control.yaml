@@ -4,6 +4,10 @@
 # Extract runs when includeAgentControl OR migrateAgentControl is true.
 # Migrate is opt-in (default false) and runs:
 #   model-configs → configs → variations → targeting
+#
+# Run:  deno task workflow -f examples/workflow-agent-control.yaml
+# Start with dryRun: true; a dry run reads the destination but writes nothing
+# and does not write the sync manifest.
 
 source:
   projectKey: replace-with-project-key
@@ -12,6 +16,7 @@ source:
 destination:
   projectKey: replace-with-project-key
   domain: app.launchdarkly.com
+  # projectName: Display Name # Used only when createProject creates the project
 
 extraction:
   includeSegments: false
@@ -20,5 +25,33 @@ extraction:
 migration:
   migrateSegments: false
   migrateAgentControl: true
+  dryRun: true # Preview AgentControl writes without applying; set to false to apply
+
+  # Create the destination project / environments when missing
+  # createProject: true
+  # createEnvironments: true
+
+  # Skip configs, variations and targeting whose content is unchanged since the last sync
+  # (compared by content hash in the sync manifest; --since does not apply to AgentControl).
+  # A config the destination no longer has is rewritten.
+  # incremental: true
+
+  # What to do with a config or model config that already exists in the destination and was not
+  # written by an earlier run: overwrite | skip | prefix | abort | prompt.
+  # Default: prefix when conflictPrefix is set, otherwise overwrite.
+  # With prefix, a config becomes <prefix><key> and its variations and targeting follow it;
+  # an existing model config is reused (variations refer to it by key).
+  # onConflict: skip
+  # conflictPrefix: "mig-"
+
+  # Tags added to migrated configs and model configs (variations take no tags)
+  # tags:
+  #   - migrated
+
+  # Map member maintainers through maintainer_mapping.json (run the map-members step first);
+  # unmapped maintainers and team maintainers are not carried over
   assignMaintainerIds: false
-  # dryRun: true  # Uncomment to preview AgentControl writes without applying
+
+  # Map source environment keys to destination environment keys for targeting
+  # environmentMapping:
+  #   production: prod

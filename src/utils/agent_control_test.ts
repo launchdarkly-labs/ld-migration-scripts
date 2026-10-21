@@ -477,20 +477,28 @@ Deno.test("migrateAgentControlFromExtract dry-run makes no write calls", async (
       },
     };
 
-    const summary = await migrateAgentControlFromExtract({
-      apiKey: "test",
-      domain: "app.launchdarkly.com",
-      sourceProjectKey: sourceKey,
-      destProjectKey: "dest",
-      dryRun: true,
-      client,
-    });
+    const { summary, manifest, aborted } = await migrateAgentControlFromExtract(
+      {
+        apiKey: "test",
+        domain: "app.launchdarkly.com",
+        sourceProjectKey: sourceKey,
+        destProjectKey: "dest",
+        dryRun: true,
+        client,
+      },
+    );
 
-    assertEquals(calls, []);
+    // Existence lookups are reads; nothing is written
+    assertEquals(calls.filter((c) => !c.startsWith("GET ")), []);
     assertEquals(summary.errors, 0);
-    // Only referenced model + config + variation created; targeting updated
-    assertEquals(summary.created, 3);
-    assertEquals(summary.updated, 1);
+    assertEquals(aborted, false);
+    // The mock reports every config and model config as existing, so a dry run reports them as updates;
+    // only the variation (not looked up individually) is reported as created
+    assertEquals(summary.created, 1);
+    assertEquals(summary.updated, 3);
+    // A dry run records nothing, so a later --incremental run cannot skip unsynced work
+    assertEquals(Object.keys(manifest.modelConfigs), []);
+    assertEquals(Object.keys(manifest.configs), []);
   } finally {
     await Deno.remove(sourceRoot, { recursive: true }).catch(() => {});
   }
@@ -498,7 +506,7 @@ Deno.test("migrateAgentControlFromExtract dry-run makes no write calls", async (
 
 Deno.test("migrateAgentControlFromExtract empty extract is a no-op", async () => {
   const sourceKey = `ac-empty-${crypto.randomUUID().slice(0, 8)}`;
-  const summary = await migrateAgentControlFromExtract({
+  const { summary, aborted } = await migrateAgentControlFromExtract({
     apiKey: "test",
     domain: "app.launchdarkly.com",
     sourceProjectKey: sourceKey,
@@ -514,6 +522,7 @@ Deno.test("migrateAgentControlFromExtract empty extract is a no-op", async () =>
     },
   });
   assertEquals(summary, emptyAgentControlSummary());
+  assertEquals(aborted, false);
 });
 
 Deno.test("migrateAgentControlFromExtract upserts via injected client", async () => {
@@ -545,7 +554,7 @@ Deno.test("migrateAgentControlFromExtract upserts via injected client", async ()
       },
     };
 
-    const summary = await migrateAgentControlFromExtract({
+    const { summary } = await migrateAgentControlFromExtract({
       apiKey: "test",
       domain: "app.launchdarkly.com",
       sourceProjectKey: sourceKey,

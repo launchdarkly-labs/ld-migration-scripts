@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Migrate order: model-configs → configs → variations → targeting
   - Graceful skip on `403`/`404` when AgentControl is not available
   - On-disk tree under `ai-configs/`; example: `examples/workflow-agent-control.yaml`
+  - Sync manifest `agentControl` section with content-hash `--incremental` skipping (a config the destination no longer has is rewritten); `--on-conflict` / `-c` (prefix carries to variations and targeting, existing model configs are reused), `--tags` and maintainer mapping now apply to AgentControl; post-run reconciliation of configs and model configs
+  - Sync manifest records the destination project ID; a deleted and recreated destination project ignores `--incremental` with a warning (all resources)
+  - Targeting reads destination variation IDs from `/targeting` (includes the built-in `disabled`/`enabled` variations); existing configs are updated directly; global model configs are skipped (the API field is `global`)
 
 ## [3.4.2] - 2026-10-20
 

@@ -10,7 +10,16 @@ import {
   ldAPIPostRequest,
   ldAPIRequest,
   rateLimitRequest,
+  sha256HexUtf8,
 } from "./utils.ts";
+import { mergeTags } from "./tags.ts";
+import {
+  cloneAgentControlManifest,
+  ownEntry,
+  recordedDestination,
+  type SyncManifestAgentControl,
+  type SyncManifestAgentControlConfig,
+} from "./sync_manifest.ts";
 
 export const AGENT_CONTROL_DIR = "ai-configs";
 
@@ -62,6 +71,12 @@ const READ_ONLY_FIELDS = new Set([
   "_archivedAt",
   "usedInCount",
   "experiments",
+  // Read-only on model configs / configs (POST bodies take maintainerId / maintainerTeamKey instead)
+  "_maintainer",
+  "global",
+  "isGlobal",
+  "isRestricted",
+  "dependencies",
   // targeting-adjacent read-only / migrated separately
   "variations",
   "targeting",
@@ -95,6 +110,10 @@ const VARIATION_STRIP_FIELDS = new Set([
   "updatedAt",
   "_access",
   "_site",
+  // Lifecycle state the variation POST body does not take
+  "state",
+  "_publishedAt",
+  "_archivedAt",
 ]);
 
 export function sanitizeVariationPayload(
@@ -130,6 +149,8 @@ export function resolveVariationKey(
       return ldMeta.variationKey.trim();
     }
     if (ldMeta.enabled === false) return "disabled";
+    // Agent-mode configs without authored variations expose a single built-in "enabled" variation
+    if (ldMeta.enabled === true) return "enabled";
   }
   const name = typeof variation.name === "string" ? variation.name.trim() : "";
   if (name.toLowerCase() === "disabled") return "disabled";
@@ -511,6 +532,12 @@ export async function upsertAgentControlResource(
   dryRun: boolean,
   options?: {
     sanitize?: (r: Record<string, unknown>) => Record<string, unknown>;
+    /**
+     * The resource is known to exist (looked up beforehand): go straight to the update. A POST for an
+     * existing judge config is rejected with a 400 ("could not find the enabled variation") rather than
+     * a 409, so it cannot be relied on to signal the conflict.
+     */
+    knownExisting?: boolean;
   },
 ): Promise<UpsertOutcome> {
   const sanitize = options?.sanitize ?? sanitizeAgentControlPayload;
@@ -522,7 +549,9 @@ export async function upsertAgentControlResource(
     return "created";
   }
 
-  const createResp = await client.post(createPath, body);
+  const createResp = options?.knownExisting
+    ? { status: 409 as number, body: undefined }
+    : await client.post(createPath, body);
   if (createResp.status >= 200 && createResp.status < 300) {
     return "created";
   }
@@ -556,6 +585,15 @@ export async function upsertAgentControlResource(
   return "error";
 }
 
+/** What to do with a model config or config whose key already exists in the destination. */
+export type AgentControlConflictAction =
+  | "overwrite"
+  | "skip"
+  | "prefix"
+  | "abort";
+
+export type AgentControlResourceType = "model-config" | "ai-config";
+
 export interface MigrateAgentControlOptions {
   apiKey: string;
   domain: string;
@@ -566,6 +604,158 @@ export interface MigrateAgentControlOptions {
   envMapping?: Record<string, string>;
   /** Optional injected client for tests */
   client?: AgentControlHttpClient;
+  /** Skip resources whose inputs are unchanged since the recorded sync (needs previousManifest) */
+  incremental?: boolean;
+  /** The AgentControl section of the previous sync manifest: this migration's own earlier copies */
+  previousManifest?: SyncManifestAgentControl;
+  /** --on-conflict policy; default is prefix when conflictPrefix is set, else overwrite */
+  onConflict?: string;
+  conflictPrefix?: string;
+  /** Decides per resource (prompt mode); defaults to the onConflict policy, with prompt treated as overwrite */
+  resolveConflict?: (
+    resourceType: AgentControlResourceType,
+    key: string,
+  ) => Promise<AgentControlConflictAction>;
+  /** Called when a conflict is resolved by renaming (conflict report) */
+  onConflictRenamed?: (
+    resourceType: AgentControlResourceType,
+    originalKey: string,
+    resolvedKey: string,
+  ) => void;
+  /** Called once when the abort policy meets an existing resource; processing stops after it */
+  onAbort?: (resourceType: AgentControlResourceType, key: string) => void;
+  /** Migration tags added to configs and model configs (variations take no tags) */
+  tags?: string[];
+  /** Source member ID -> destination member ID (maintainer_mapping.json) */
+  maintainerMapping?: Record<string, string | null>;
+  assignMaintainerIds?: boolean;
+}
+
+export interface AgentControlMigrationResult {
+  summary: AgentControlSummary;
+  /**
+   * The cumulative AgentControl manifest section to write: the previous entries, with those this run
+   * wrote added or refreshed and those whose write failed kept with their hash cleared. Unchanged from
+   * the previous one on a dry run.
+   */
+  manifest: SyncManifestAgentControl;
+  /** True when the abort policy stopped the run at an existing resource */
+  aborted: boolean;
+  /**
+   * Destination keys this run left in place (written, or unchanged and confirmed present): what a
+   * reconciliation against the destination should find. Excludes resources skipped by the conflict
+   * policy, failed ones (already reported as errors) and global model configs.
+   */
+  expected: { modelConfigs: string[]; configs: string[] };
+}
+
+/** JSON with object keys sorted, so equal content fingerprints equally whatever the key order. */
+export function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${
+      Object.keys(record).sort()
+        .filter((k) => record[k] !== undefined)
+        .map((k) => `${JSON.stringify(k)}:${stableStringify(record[k])}`)
+        .join(",")
+    }}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/** Fingerprint of the inputs of one write (what --incremental compares). */
+export async function hashAgentControlInput(value: unknown): Promise<string> {
+  return await sha256HexUtf8(stableStringify(value));
+}
+
+/** The source member a model config or config names as maintainer (`_maintainer` on reads), if it is a member. */
+export function sourceMaintainerMemberId(
+  source: Record<string, unknown>,
+): string | undefined {
+  const maintainer = source._maintainer;
+  if (maintainer && typeof maintainer === "object") {
+    const id = (maintainer as Record<string, unknown>)._id;
+    if (typeof id === "string" && id) return id;
+  }
+  return typeof source.maintainerId === "string" && source.maintainerId
+    ? source.maintainerId
+    : undefined;
+}
+
+/**
+ * The destination member ID to send as `maintainerId`, only when assigning maintainers was requested and
+ * the mapping has a destination member for the source member. Anything else sends no maintainer: a
+ * source-account member ID means nothing in the destination account. Team maintainers are not carried
+ * over (teams are not migrated by this workflow).
+ */
+export function resolveAgentControlMaintainerId(
+  source: Record<string, unknown>,
+  mapping: Record<string, string | null> | undefined,
+  assignMaintainerIds: boolean | undefined,
+): string | undefined {
+  if (!assignMaintainerIds) return undefined;
+  const sourceId = sourceMaintainerMemberId(source);
+  if (!sourceId || !mapping || !Object.hasOwn(mapping, sourceId)) {
+    return undefined;
+  }
+  const mapped = mapping[sourceId];
+  return typeof mapped === "string" && mapped ? mapped : undefined;
+}
+
+const stringTags = (value: unknown): string[] =>
+  Array.isArray(value)
+    ? value.filter((t): t is string => typeof t === "string")
+    : [];
+
+/**
+ * The POST/PATCH body for a model config or config: read-only fields removed, the destination key (and
+ * name) applied, tags merged (source, migration, and the destination's current tags when it is updated),
+ * and a maintainer only when one maps to the destination account.
+ */
+export function buildAgentControlPayload(
+  source: Record<string, unknown>,
+  options: {
+    destKey: string;
+    destName?: string;
+    migrationTags?: string[];
+    existingTags?: string[];
+    maintainerMapping?: Record<string, string | null>;
+    assignMaintainerIds?: boolean;
+  },
+): Record<string, unknown> {
+  const payload = sanitizeAgentControlPayload(source);
+  delete payload.tags;
+  delete payload.maintainerId;
+  delete payload.maintainerTeamKey;
+  payload.key = options.destKey;
+  if (options.destName !== undefined && typeof source.name === "string") {
+    payload.name = options.destName;
+  }
+  const tags = mergeTags(
+    stringTags(source.tags),
+    options.migrationTags,
+    options.existingTags,
+  );
+  if (tags.length > 0) payload.tags = tags;
+  const maintainerId = resolveAgentControlMaintainerId(
+    source,
+    options.maintainerMapping,
+    options.assignMaintainerIds,
+  );
+  if (maintainerId) payload.maintainerId = maintainerId;
+  return payload;
+}
+
+/** The conflict policy when no resolver is injected: --on-conflict, else prefix with a prefix, else overwrite. */
+export function defaultConflictAction(
+  onConflict: string | undefined,
+  conflictPrefix: string | undefined,
+): AgentControlConflictAction {
+  const mode = onConflict ?? (conflictPrefix ? "prefix" : "overwrite");
+  return mode === "skip" || mode === "prefix" || mode === "abort"
+    ? mode
+    : "overwrite";
 }
 
 function ldAPISemanticPatchRequest(
@@ -886,10 +1076,53 @@ export function buildTargetingInstructionsForEnvironment(
   return { instructions, warnings };
 }
 
+type ExistingResource =
+  | { state: "exists"; json: Record<string, unknown> }
+  | { state: "missing" }
+  | { state: "unknown" };
+
+/**
+ * Looks the resource up in the destination. "unknown" (no GET available, or an unexpected status) lets
+ * the caller fall back to POST, with a 409 handled as an overwrite.
+ */
+async function fetchExisting(
+  client: AgentControlHttpClient,
+  path: string,
+): Promise<ExistingResource> {
+  if (!client.get) return { state: "unknown" };
+  try {
+    const resp = await client.get(path);
+    if (resp.status >= 200 && resp.status < 300) {
+      const json = resp.json && typeof resp.json === "object"
+        ? resp.json as Record<string, unknown>
+        : {};
+      return { state: "exists", json };
+    }
+    if (resp.status === 404) return { state: "missing" };
+  } catch {
+    // fall through: treated as unknown
+  }
+  return { state: "unknown" };
+}
+
+type WritePlan =
+  | {
+    kind: "write";
+    destKey: string;
+    destName?: string;
+    /** The destination's current tags, merged into the written ones */
+    existingTags: string[];
+    /** A copy already exists in the destination (a dry run reports an update, not a create) */
+    exists: boolean;
+  }
+  | { kind: "skip" }
+  | { kind: "abort" }
+  | { kind: "error" };
+
 /** Migrate extracted AgentControl resources to destination project. */
 export async function migrateAgentControlFromExtract(
   options: MigrateAgentControlOptions,
-): Promise<AgentControlSummary> {
+): Promise<AgentControlMigrationResult> {
   const summary = emptyAgentControlSummary();
   const sourceRoot =
     `./data/launchdarkly-migrations/source/project/${options.sourceProjectKey}`;
@@ -898,6 +1131,40 @@ export async function migrateAgentControlFromExtract(
     defaultHttpClient(options.apiKey, options.domain);
   const dest = options.destProjectKey;
   const envMapping = options.envMapping ?? {};
+  const previous = options.previousManifest;
+  const migrationTags = options.tags ?? [];
+  const resolveConflict = options.resolveConflict ??
+    (() =>
+      Promise.resolve(
+        defaultConflictAction(options.onConflict, options.conflictPrefix),
+      ));
+
+  // Cumulative inventory: previous entries are kept; this run refreshes the ones it wrote. A dry run
+  // never records (the manifest is not written), so a later --incremental run cannot skip unsynced work.
+  const manifest = cloneAgentControlManifest(previous);
+  let aborted = false;
+  const expected = {
+    modelConfigs: new Set<string>(),
+    configs: new Set<string>(),
+  };
+  const finish = (): AgentControlMigrationResult => ({
+    summary,
+    manifest,
+    aborted,
+    expected: {
+      modelConfigs: [...expected.modelConfigs],
+      configs: [...expected.configs],
+    },
+  });
+  const ensureConfig = (key: string): SyncManifestAgentControlConfig => {
+    if (!Object.hasOwn(manifest.configs, key)) {
+      manifest.configs[key] = {
+        variations: Object.create(null),
+        targeting: Object.create(null),
+      };
+    }
+    return manifest.configs[key];
+  };
 
   console.log(Colors.cyan("\n🤖 Starting AgentControl migration..."));
   if (options.dryRun) {
@@ -906,6 +1173,124 @@ export async function migrateAgentControlFromExtract(
     );
   }
 
+  const stop = (type: AgentControlResourceType, key: string): void => {
+    aborted = true;
+    options.onAbort?.(type, key);
+  };
+
+  /**
+   * Where a model config or config goes in the destination. This migration's own earlier copy (recorded
+   * in the manifest) is updated in place; an existing copy it did not create follows the conflict policy.
+   */
+  const planWrite = async (
+    resourceType: AgentControlResourceType,
+    key: string,
+    name: string | undefined,
+    basePath: string,
+    previousEntry: { destKey?: string } | undefined,
+  ): Promise<WritePlan> => {
+    const recorded = previousEntry !== undefined;
+    let destKey = key;
+    let destName = name;
+    if (previousEntry) {
+      const own = recordedDestination(
+        previousEntry,
+        { key, name: name ?? key },
+        options.conflictPrefix,
+      );
+      destKey = own.key;
+      destName = name === undefined ? undefined : own.name;
+    }
+    const existing = await fetchExisting(client, `${basePath}/${destKey}`);
+    const existingTags = existing.state === "exists"
+      ? stringTags(existing.json.tags)
+      : [];
+    if (recorded || existing.state !== "exists") {
+      return {
+        kind: "write",
+        destKey,
+        destName,
+        existingTags,
+        exists: existing.state === "exists",
+      };
+    }
+
+    const label = resourceType === "model-config" ? "Model config" : "Config";
+    const action = await resolveConflict(resourceType, key);
+    if (action === "abort") {
+      console.log(
+        Colors.red(`  ✗ ${label} ${key}: exists (--on-conflict abort)`),
+      );
+      stop(resourceType, key);
+      return { kind: "abort" };
+    }
+    if (action === "skip") {
+      console.log(
+        Colors.gray(`  → ${label} ${key}: exists, skipping (--on-conflict)`),
+      );
+      return { kind: "skip" };
+    }
+    if (action === "prefix") {
+      if (resourceType === "model-config") {
+        // Variations refer to model configs by key, so a model config is never renamed: the existing one is reused
+        console.log(Colors.yellow(
+          `  ⚠ ${label} ${key}: exists; reusing it (model configs are referenced by key and are not prefixed)`,
+        ));
+        return { kind: "skip" };
+      }
+      const prefix = options.conflictPrefix;
+      if (!prefix) {
+        console.log(Colors.yellow(
+          `  ⚠ ${label} ${key}: exists but no conflict prefix is set; skipping`,
+        ));
+        return { kind: "skip" };
+      }
+      const prefixedKey = `${prefix}${key}`;
+      const taken = await fetchExisting(client, `${basePath}/${prefixedKey}`);
+      if (taken.state === "exists") {
+        console.log(Colors.red(
+          `  ✗ ${label} ${key}: exists, and so does the prefixed key ${prefixedKey}; not overwriting it`,
+        ));
+        return { kind: "error" };
+      }
+      console.log(Colors.yellow(
+        `  ⚠ ${label} ${key}: exists, writing it as ${prefixedKey}`,
+      ));
+      options.onConflictRenamed?.(resourceType, key, prefixedKey);
+      return {
+        kind: "write",
+        destKey: prefixedKey,
+        destName: name === undefined ? undefined : `${prefix}${name}`,
+        existingTags: [],
+        exists: false,
+      };
+    }
+    // overwrite
+    console.log(Colors.gray(`  ⚠ ${label} ${key}: exists, updating it`));
+    return {
+      kind: "write",
+      destKey,
+      destName,
+      existingTags,
+      exists: true,
+    };
+  };
+
+  const payloadFor = (
+    source: Record<string, unknown>,
+    destKey: string,
+    destName: string | undefined,
+    existingTags?: string[],
+  ) =>
+    buildAgentControlPayload(source, {
+      destKey,
+      destName,
+      migrationTags,
+      existingTags,
+      maintainerMapping: options.maintainerMapping,
+      assignMaintainerIds: options.assignMaintainerIds,
+    });
+
   // Stage 1: model-configs
   const modelData = await getJson(modelConfigsPath(sourceRoot)) as
     | { items?: Record<string, unknown>[] }
@@ -913,7 +1298,7 @@ export async function migrateAgentControlFromExtract(
   const modelItems = modelData?.items ?? [];
   if (modelItems.length === 0 && !(await directoryExists(aiRoot))) {
     console.log(Colors.gray("  No AgentControl extract found, skipping"));
-    return summary;
+    return finish();
   }
 
   // Prefer only model configs referenced by extracted variations/targeting.
@@ -939,29 +1324,105 @@ export async function migrateAgentControlFromExtract(
     );
   }
 
+  const modelBase = `projects/${dest}/ai-configs/model-configs`;
   for (const model of modelsToMigrate) {
+    if (aborted) break;
     const key = String(model.key ?? "");
     if (!key) {
       recordOutcome(summary, "skipped");
       continue;
     }
-    // Skip clearly global/restricted built-ins without attempting write
-    if (model.isGlobal === true || model.isRestricted === true) {
+    // Built-in (global) and restricted models cannot be created in the destination; skip without a write.
+    // The API reports the flag as `global`; `isGlobal` is accepted for older extracts.
+    if (
+      model.global === true || model.isGlobal === true ||
+      model.isRestricted === true
+    ) {
       console.log(
         Colors.yellow(`  ⚠ Model config ${key}: skipped (global/restricted)`),
       );
       recordOutcome(summary, "skipped");
       continue;
     }
-    const outcome = await upsertAgentControlResource(
-      client,
-      `projects/${dest}/ai-configs/model-configs`,
-      `projects/${dest}/ai-configs/model-configs/${key}`,
-      model,
-      options.dryRun,
+    const name = typeof model.name === "string" ? model.name : undefined;
+    const previousEntry = ownEntry(previous?.modelConfigs, key);
+
+    // --incremental: a recorded copy whose inputs are unchanged needs no request at all
+    if (options.incremental && previousEntry?.hash) {
+      const own = recordedDestination(
+        previousEntry,
+        { key, name: name ?? key },
+        options.conflictPrefix,
+      );
+      const hash = await hashAgentControlInput(
+        payloadFor(model, own.key, name === undefined ? undefined : own.name),
+      );
+      if (hash === previousEntry.hash) {
+        // The manifest only says what was written once: a destination that was since deleted or
+        // recreated no longer has it, so confirm it is still there before skipping
+        const there = await fetchExisting(client, `${modelBase}/${own.key}`);
+        if (there.state !== "missing") {
+          console.log(
+            Colors.gray(
+              `  → Model config ${key}: unchanged, skipping (--incremental)`,
+            ),
+          );
+          recordOutcome(summary, "skipped");
+          expected.modelConfigs.add(own.key);
+          continue;
+        }
+        console.log(Colors.yellow(
+          `  ⚠ Model config ${key}: recorded in the sync manifest but missing in the destination, recreating`,
+        ));
+      }
+    }
+
+    const plan = await planWrite(
+      "model-config",
+      key,
+      name,
+      modelBase,
+      previousEntry,
     );
+    if (plan.kind === "abort") break;
+    if (plan.kind === "skip") {
+      recordOutcome(summary, "skipped");
+      continue;
+    }
+    if (plan.kind === "error") {
+      recordOutcome(summary, "error");
+      if (!options.dryRun && previousEntry) {
+        delete manifest.modelConfigs[key].hash;
+      }
+      continue;
+    }
+
+    const hash = await hashAgentControlInput(
+      payloadFor(model, plan.destKey, plan.destName),
+    );
+    let outcome = await upsertAgentControlResource(
+      client,
+      modelBase,
+      `${modelBase}/${plan.destKey}`,
+      payloadFor(model, plan.destKey, plan.destName, plan.existingTags),
+      options.dryRun,
+      { sanitize: (r) => r, knownExisting: plan.exists },
+    );
+    if (options.dryRun && outcome === "created" && plan.exists) {
+      outcome = "updated";
+    }
     logStageOutcome("Model config", key, outcome);
     recordOutcome(summary, outcome);
+    if (options.dryRun) continue;
+    if (outcome === "created" || outcome === "updated") {
+      expected.modelConfigs.add(plan.destKey);
+      manifest.modelConfigs[key] = {
+        hash,
+        ...(plan.destKey !== key ? { destKey: plan.destKey } : {}),
+      };
+    } else if (outcome === "error" && previousEntry) {
+      delete manifest.modelConfigs[key].hash;
+    }
   }
 
   // Stage 2: configs
@@ -970,22 +1431,108 @@ export async function migrateAgentControlFromExtract(
     | undefined;
   const configItems = configData?.items ?? [];
   console.log(Colors.gray(`  Migrating ${configItems.length} config(s)...`));
+  // Where each source config lives in the destination, and whether its variations and targeting may be
+  // written (not when the config was skipped by the conflict policy, failed, or is unavailable)
+  const configPlans = new Map<string, { destKey: string; blocked: boolean }>();
+  const configBase = `projects/${dest}/ai-configs`;
+  const recreatedConfigs = new Set<string>();
   for (const config of configItems) {
+    if (aborted) break;
     const key = String(config.key ?? "");
     if (!key) {
       recordOutcome(summary, "skipped");
       continue;
     }
-    const outcome = await upsertAgentControlResource(
-      client,
-      `projects/${dest}/ai-configs`,
-      `projects/${dest}/ai-configs/${key}`,
-      config,
-      options.dryRun,
+    const name = typeof config.name === "string" ? config.name : undefined;
+    const previousEntry = ownEntry(previous?.configs, key);
+
+    if (options.incremental && previousEntry?.hash) {
+      const own = recordedDestination(
+        previousEntry,
+        { key, name: name ?? key },
+        options.conflictPrefix,
+      );
+      const hash = await hashAgentControlInput(
+        payloadFor(config, own.key, name === undefined ? undefined : own.name),
+      );
+      if (hash === previousEntry.hash) {
+        // Confirm the destination still has it (it may have been deleted or recreated since the sync)
+        const there = await fetchExisting(client, `${configBase}/${own.key}`);
+        if (there.state !== "missing") {
+          console.log(
+            Colors.gray(
+              `  → Config ${key}: unchanged, skipping (--incremental)`,
+            ),
+          );
+          recordOutcome(summary, "skipped");
+          expected.configs.add(own.key);
+          // Its variations and targeting are still checked individually
+          configPlans.set(key, { destKey: own.key, blocked: false });
+          continue;
+        }
+        console.log(Colors.yellow(
+          `  ⚠ Config ${key}: recorded in the sync manifest but missing in the destination, recreating`,
+        ));
+      }
+    }
+
+    const plan = await planWrite(
+      "ai-config",
+      key,
+      name,
+      configBase,
+      previousEntry,
     );
+    if (plan.kind === "abort") break;
+    if (plan.kind === "skip") {
+      recordOutcome(summary, "skipped");
+      configPlans.set(key, { destKey: key, blocked: true });
+      continue;
+    }
+    if (plan.kind === "error") {
+      recordOutcome(summary, "error");
+      configPlans.set(key, { destKey: key, blocked: true });
+      if (!options.dryRun && previousEntry) delete manifest.configs[key].hash;
+      continue;
+    }
+
+    // A recorded config that is gone from the destination comes back empty: its variations and targeting
+    // must be written again even though their inputs are unchanged
+    if (previousEntry && !plan.exists) recreatedConfigs.add(key);
+    const hash = await hashAgentControlInput(
+      payloadFor(config, plan.destKey, plan.destName),
+    );
+    let outcome = await upsertAgentControlResource(
+      client,
+      configBase,
+      `${configBase}/${plan.destKey}`,
+      payloadFor(config, plan.destKey, plan.destName, plan.existingTags),
+      options.dryRun,
+      { sanitize: (r) => r, knownExisting: plan.exists },
+    );
+    if (options.dryRun && outcome === "created" && plan.exists) {
+      outcome = "updated";
+    }
     logStageOutcome("Config", key, outcome);
     recordOutcome(summary, outcome);
+    configPlans.set(key, {
+      destKey: plan.destKey,
+      blocked: outcome === "skipped" || outcome === "error",
+    });
+    if (options.dryRun) continue;
+    if (outcome === "created" || outcome === "updated") {
+      expected.configs.add(plan.destKey);
+      const entry = ensureConfig(key);
+      entry.hash = hash;
+      if (plan.destKey !== key) entry.destKey = plan.destKey;
+      else delete entry.destKey;
+    } else if (outcome === "error" && previousEntry) {
+      delete manifest.configs[key].hash;
+    }
   }
+  // Variations and targeting of configs that were not part of configs.json keep their own key
+  const planFor = (configKey: string) =>
+    configPlans.get(configKey) ?? { destKey: configKey, blocked: false };
 
   // Stage 3: variations
   const variationFiles = await listVariationFiles(aiRoot);
@@ -993,6 +1540,15 @@ export async function migrateAgentControlFromExtract(
     Colors.gray(`  Migrating ${variationFiles.length} variation(s)...`),
   );
   for (const { configKey, variationKey, filePath } of variationFiles) {
+    if (aborted) break;
+    const configPlan = planFor(configKey);
+    if (configPlan.blocked) {
+      console.log(Colors.gray(
+        `  → Variation ${configKey}/${variationKey}: skipped (its config was not written)`,
+      ));
+      recordOutcome(summary, "skipped");
+      continue;
+    }
     const variation = await getJson(filePath) as
       | Record<string, unknown>
       | undefined;
@@ -1000,16 +1556,44 @@ export async function migrateAgentControlFromExtract(
       recordOutcome(summary, "error");
       continue;
     }
+    const hash = await hashAgentControlInput({
+      destConfigKey: configPlan.destKey,
+      variation: sanitizeVariationPayload(variation),
+    });
+    const previousHash = ownEntry(
+      ownEntry(previous?.configs, configKey)?.variations,
+      variationKey,
+    )?.hash;
+    if (
+      options.incremental && previousHash === hash &&
+      !recreatedConfigs.has(configKey)
+    ) {
+      console.log(Colors.gray(
+        `  → Variation ${configKey}/${variationKey}: unchanged, skipping (--incremental)`,
+      ));
+      recordOutcome(summary, "skipped");
+      continue;
+    }
     const outcome = await upsertAgentControlResource(
       client,
-      `projects/${dest}/ai-configs/${configKey}/variations`,
-      `projects/${dest}/ai-configs/${configKey}/variations/${variationKey}`,
+      `projects/${dest}/ai-configs/${configPlan.destKey}/variations`,
+      `projects/${dest}/ai-configs/${configPlan.destKey}/variations/${variationKey}`,
       variation,
       options.dryRun,
       { sanitize: sanitizeVariationPayload },
     );
     logStageOutcome("Variation", `${configKey}/${variationKey}`, outcome);
     recordOutcome(summary, outcome);
+    if (options.dryRun) continue;
+    if (outcome === "created" || outcome === "updated") {
+      ensureConfig(configKey).variations[variationKey] = { hash };
+    } else if (
+      outcome === "error" &&
+      Object.hasOwn(manifest.configs, configKey) &&
+      Object.hasOwn(manifest.configs[configKey].variations, variationKey)
+    ) {
+      delete manifest.configs[configKey].variations[variationKey].hash;
+    }
   }
 
   // Stage 4: targeting via semantic patch on /targeting
@@ -1018,6 +1602,15 @@ export async function migrateAgentControlFromExtract(
     Colors.gray(`  Migrating ${targetingFiles.length} targeting file(s)...`),
   );
   for (const { configKey, filePath } of targetingFiles) {
+    if (aborted) break;
+    const configPlan = planFor(configKey);
+    if (configPlan.blocked) {
+      console.log(Colors.gray(
+        `  → Targeting ${configKey}: skipped (its config was not written)`,
+      ));
+      recordOutcome(summary, "skipped");
+      continue;
+    }
     const targeting = await getJson(filePath) as
       | Record<string, unknown>
       | undefined;
@@ -1029,11 +1622,27 @@ export async function migrateAgentControlFromExtract(
     const outcome = await migrateConfigTargeting(
       client,
       dest,
+      configPlan.destKey,
       configKey,
       targeting,
       aiRoot,
       envMapping,
       options.dryRun,
+      {
+        incremental: options.incremental && !recreatedConfigs.has(configKey),
+        previousHashes: ownEntry(previous?.configs, configKey)?.targeting,
+        record: (sourceEnv, hash) => {
+          if (options.dryRun) return;
+          if (hash) {
+            ensureConfig(configKey).targeting[sourceEnv] = { hash };
+          } else if (
+            Object.hasOwn(manifest.configs, configKey) &&
+            Object.hasOwn(manifest.configs[configKey].targeting, sourceEnv)
+          ) {
+            delete manifest.configs[configKey].targeting[sourceEnv].hash;
+          }
+        },
+      },
     );
     logStageOutcome("Targeting", configKey, outcome);
     recordOutcome(summary, outcome);
@@ -1044,8 +1653,11 @@ export async function migrateAgentControlFromExtract(
   console.log(Colors.gray(`  Updated: ${summary.updated}`));
   console.log(Colors.gray(`  Skipped: ${summary.skipped}`));
   console.log(Colors.gray(`  Errors: ${summary.errors}`));
+  if (aborted) {
+    console.log(Colors.red("  Stopped early: --on-conflict abort"));
+  }
 
-  return summary;
+  return finish();
 }
 
 function logStageOutcome(
@@ -1064,21 +1676,35 @@ function logStageOutcome(
   }
 }
 
+interface TargetingTracking {
+  incremental?: boolean;
+  /** Per source environment key, from the previous sync manifest */
+  previousHashes?: Record<string, { hash?: string }>;
+  /** Called with the hash after a successful patch, or undefined when the environment failed or was not patched */
+  record?: (sourceEnvKey: string, hash: string | undefined) => void;
+}
+
+/**
+ * Semantic-patch a config's per-environment targeting. `configKey` is the source key (names the extract
+ * files); `destConfigKey` is where the config lives in the destination, which differs after a prefix.
+ */
 async function migrateConfigTargeting(
   client: AgentControlHttpClient,
   dest: string,
+  destConfigKey: string,
   configKey: string,
   targeting: Record<string, unknown>,
   aiRoot: string,
   envMapping: Record<string, string>,
   dryRun: boolean,
+  tracking: TargetingTracking = {},
 ): Promise<UpsertOutcome> {
   const environments = (targeting.environments ?? {}) as Record<
     string,
     Record<string, unknown>
   >;
-  const envKeys = Object.keys(environments);
-  if (envKeys.length === 0) {
+  const allEnvKeys = Object.keys(environments);
+  if (allEnvKeys.length === 0) {
     return "skipped";
   }
 
@@ -1087,18 +1713,45 @@ async function migrateConfigTargeting(
     configKey,
     targeting,
   );
+
+  // --incremental: environments whose inputs are unchanged since the last sync are not patched again
+  const hashes = new Map<string, string>();
+  const envKeys: string[] = [];
+  for (const sourceEnvKey of allEnvKeys) {
+    const destEnvKey = envMapping[sourceEnvKey] ?? sourceEnvKey;
+    const hash = await hashAgentControlInput({
+      destConfigKey,
+      destEnvKey,
+      environment: environments[sourceEnvKey],
+      variations: sourceVariations,
+    });
+    hashes.set(sourceEnvKey, hash);
+    if (
+      tracking.incremental &&
+      ownEntry(tracking.previousHashes, sourceEnvKey)?.hash === hash
+    ) {
+      console.log(Colors.gray(
+        `    → ${configKey}/${sourceEnvKey}: targeting unchanged, skipping (--incremental)`,
+      ));
+      continue;
+    }
+    envKeys.push(sourceEnvKey);
+  }
+  if (envKeys.length === 0) return "skipped";
+
   const destVariationIdByKey = await loadDestVariationIdByKey(
     client,
     dest,
-    configKey,
+    destConfigKey,
     sourceVariations,
     dryRun,
   );
 
   if (destVariationIdByKey.size === 0 && !dryRun) {
     console.log(Colors.yellow(
-      `    ⚠ No destination variations found for ${configKey}; skipping targeting`,
+      `    ⚠ No destination variations found for ${destConfigKey}; skipping targeting`,
     ));
+    for (const k of envKeys) tracking.record?.(k, undefined);
     return "skipped";
   }
 
@@ -1118,12 +1771,13 @@ async function migrateConfigTargeting(
     }
     if (instructions.length === 0) {
       anyError = true;
+      tracking.record?.(sourceEnvKey, undefined);
       continue;
     }
 
     if (dryRun) {
       console.log(Colors.gray(
-        `    [DRY RUN] Would semantic-patch targeting ${configKey} env=${destEnvKey} (${instructions.length} instruction(s))`,
+        `    [DRY RUN] Would semantic-patch targeting ${destConfigKey} env=${destEnvKey} (${instructions.length} instruction(s))`,
       ));
       if (!warnings.some(isCriticalTargetingWarning)) {
         anyUpdated = true;
@@ -1134,16 +1788,18 @@ async function migrateConfigTargeting(
     if (!client.semanticPatch) {
       console.log(Colors.red("    ✗ semanticPatch client not available"));
       anyError = true;
+      tracking.record?.(sourceEnvKey, undefined);
       continue;
     }
 
     // Do not apply a partial targeting patch when critical mappings failed
     if (warnings.some(isCriticalTargetingWarning)) {
+      tracking.record?.(sourceEnvKey, undefined);
       continue;
     }
 
     const resp = await client.semanticPatch(
-      `projects/${dest}/ai-configs/${configKey}/targeting`,
+      `projects/${dest}/ai-configs/${destConfigKey}/targeting`,
       {
         environmentKey: destEnvKey,
         comment: "Migrated by ld-migration-scripts AgentControl",
@@ -1153,16 +1809,18 @@ async function migrateConfigTargeting(
 
     if (resp.status >= 200 && resp.status < 300) {
       anyUpdated = true;
+      tracking.record?.(sourceEnvKey, hashes.get(sourceEnvKey));
     } else if (isAgentControlUnavailable(resp.status)) {
       return "skipped";
     } else {
       logUpsertFailure(
         "SEMANTIC PATCH targeting",
-        `${configKey}/${destEnvKey}`,
+        `${destConfigKey}/${destEnvKey}`,
         resp.status,
         resp.body,
       );
       anyError = true;
+      tracking.record?.(sourceEnvKey, undefined);
     }
   }
 
@@ -1219,18 +1877,25 @@ async function loadDestVariationIdByKey(
   }
   if (!client.get) return map;
 
-  const resp = await client.get(`projects/${dest}/ai-configs/${configKey}`);
-  if (resp.status < 200 || resp.status >= 300 || !resp.json) {
-    return map;
-  }
-  const detail = resp.json as Record<string, unknown>;
-  const variations = Array.isArray(detail.variations)
-    ? detail.variations as Record<string, unknown>[]
-    : [];
-  for (const v of variations) {
-    const key = resolveVariationKey(v) || String(v.key ?? "");
-    const id = String(v._id ?? "");
-    if (key && id) map.set(key, id);
+  // The targeting resource lists every variation targeting can name, including the built-in "disabled"
+  // (and "enabled") ones that the config detail omits; the config detail fills any gap.
+  for (
+    const path of [
+      `projects/${dest}/ai-configs/${configKey}/targeting`,
+      `projects/${dest}/ai-configs/${configKey}`,
+    ]
+  ) {
+    const resp = await client.get(path);
+    if (resp.status < 200 || resp.status >= 300 || !resp.json) continue;
+    const detail = resp.json as Record<string, unknown>;
+    const variations = Array.isArray(detail.variations)
+      ? detail.variations as Record<string, unknown>[]
+      : [];
+    for (const v of variations) {
+      const key = resolveVariationKey(v) || String(v.key ?? "");
+      const id = String(v._id ?? "");
+      if (key && id && !map.has(key)) map.set(key, id);
+    }
   }
   return map;
 }
