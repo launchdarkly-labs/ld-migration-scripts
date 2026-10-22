@@ -1465,6 +1465,8 @@ const segmentsWithErrors: Set<string> = new Set();
 const flagsWithErrors: Set<string> = new Set();
 // Checks that could not be completed (reconciliation, source archival); also fail the run
 const reconciliationErrors: string[] = [];
+// --adopt-unresolved ran for this run (see stageAdoptedCopies)
+let adoptionStaged = false;
 // Declared with the shared tracking state so the flag phase and reconciliation both see it
 const flagsSkippedByDate: Set<string> = new Set(); // --since: never attempted, excluded from reconciliation
 // --on-conflict skip: the destination copy stays as it is, so the previous manifest entry is kept
@@ -4329,8 +4331,8 @@ if (usableViews.size > 0) {
 
 // --adopt-unresolved: the user verified the untracked resources are the aborted run's writes; record them
 // as this migration's extra copies so the marker can clear and revert removes them too. Idempotent:
-// adoption runs once, after carry-forward, before archival propagation and the manifest write.
-let adoptionStaged = false;
+// adoption runs once, after carry-forward, before archival propagation and the manifest write
+// (adoptionStaged is declared with the shared tracking state, above every call site).
 function stageAdoptedCopies(): void {
   if (
     adoptionStaged || !inputArgs.adoptUnresolved ||
