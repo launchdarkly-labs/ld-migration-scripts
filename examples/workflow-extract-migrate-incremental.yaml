@@ -41,8 +41,8 @@ migration:
   # Migrate up to N flags in parallel (optional, default: 10)
   # concurrency: 10
 
-  incremental: true # Only sync flags/segments changed since last run
+  # A flag archived in the source since it was migrated is archived in the destination too
+  # (default: true). Flags deleted in the source are reported; their copies are kept.
+  # propagateArchived: false
 
-# A flag archived in the source since it was migrated is archived in the destination too
-# (default: true). Flags deleted in the source are reported; their copies are kept.
-# propagateArchived: false
+  incremental: true # Only sync flags/segments changed since last run

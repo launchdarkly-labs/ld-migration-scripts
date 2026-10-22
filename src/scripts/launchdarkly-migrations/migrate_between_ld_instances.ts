@@ -33,6 +33,7 @@ import {
   emptyRecord,
   legacySegmentEntries,
   markerAfterRun,
+  ownedKeys,
   ownEntry,
   readSyncManifest,
   recordedDestination,
@@ -4005,10 +4006,12 @@ try {
 // (archived-flags.json); every recorded flag that is no longer in the flag list and is archived in the
 // source is archived in the destination too. A recorded flag that is neither live nor archived in the
 // source was deleted there; its destination copy is kept and reported, never deleted.
-// Destination keys of the recorded flags found archived in the source (archived now or already), so
-// reconciliation does not report them as extra
+// Destination copies of recorded flags whose source flag is archived and that exist in the destination:
+// expected by reconciliation (archived or not), so they are not reported as extra
+const archivedSourceDestKeys: string[] = [];
+// Destination copies archived this run, or found archived already; a failed patch is in flagsWithErrors instead
 const flagsArchivedInSource: string[] = [];
-// Source keys of recorded flags deleted in the source, whose destination copy is kept
+// Destination copies of recorded flags deleted in the source, kept in the destination
 const flagsDeletedInSource: string[] = [];
 
 async function propagateSourceArchival(): Promise<void> {
@@ -4025,95 +4028,108 @@ async function propagateSourceArchival(): Promise<void> {
     );
     return;
   }
+  const manifestFlags = previousManifest.flags ?? {};
   const { archived, deleted } = classifyVanishedFlags({
-    manifestKeys: Object.keys(previousManifest.flags ?? {}),
+    manifestKeys: Object.keys(manifestFlags),
     extractedKeys: sourceIndexByKey.keys(),
     archivedKeys,
     includeFlags: inputArgs.includeFlags,
     excludeFlags: inputArgs.excludeFlags,
   });
-  flagsDeletedInSource.push(...deleted);
   if (archived.length === 0 && deleted.length === 0) return;
   console.log(
     Colors.cyan(
       `\n🗄  Recorded flags no longer in the source flag list: ${archived.length} archived in the source, ${deleted.length} deleted in the source`,
     ),
   );
+  // Every destination copy an entry owns (primary and adopted) is handled on its own
   for (const key of archived) {
-    const destKey = ownEntry(previousManifest.flags, key)?.destKey ?? key;
-    const fail = (detail: string) => {
-      console.log(Colors.red(`\t✗ ${destKey}: ${detail}`));
-      flagsWithErrors.add(key);
-      flagErrorDetails.set(
-        key,
-        `archived in the source, but the destination copy could not be archived: ${
-          detail.slice(0, 300)
-        }`,
-      );
-    };
-    try {
-      const destResp = await rateLimitRequest(
-        ldAPIRequest(
+    const entry = ownEntry(manifestFlags, key);
+    if (!entry) continue;
+    for (const destKey of ownedKeys(key, entry)) {
+      const copy = destKey !== key ? ` (source ${key})` : "";
+      const fail = (detail: string) => {
+        console.log(Colors.red(`\t✗ ${destKey}${copy}: ${detail}`));
+        flagsWithErrors.add(destKey);
+        flagErrorDetails.set(
+          destKey,
+          `source flag ${key} is archived, but this destination copy could not be archived: ${
+            detail.slice(0, 300)
+          }`,
+        );
+      };
+      try {
+        const destResp = await rateLimitRequest(
+          ldAPIRequest(
+            apiKey,
+            domain,
+            `flags/${inputArgs.projKeyDest}/${destKey}`,
+          ),
+          "flags",
+        );
+        if (destResp.status === 404) {
+          console.log(
+            Colors.gray(
+              `\t- ${destKey}${copy}: archived in the source, no copy in the destination`,
+            ),
+          );
+          continue;
+        }
+        if (destResp.status !== 200) {
+          fail(`could not read the destination flag (HTTP ${destResp.status})`);
+          continue;
+        }
+        archivedSourceDestKeys.push(destKey);
+        const destFlag = await destResp.json();
+        if (destFlag.archived === true) {
+          console.log(
+            Colors.gray(
+              `\t✓ ${destKey}${copy}: already archived in the destination`,
+            ),
+          );
+          flagsArchivedInSource.push(destKey);
+          continue;
+        }
+        const patchResp = await dryRunAwarePatch(
+          inputArgs.dryRun || false,
           apiKey,
           domain,
           `flags/${inputArgs.projKeyDest}/${destKey}`,
-        ),
-        "flags",
-      );
-      if (destResp.status === 404) {
-        console.log(
-          Colors.gray(
-            `\t- ${destKey}: archived in the source, no copy in the destination`,
-          ),
+          [buildPatch("archived", "replace", true)],
+          false,
+          "flags",
+          "archived in the source",
         );
-        continue;
+        if (patchResp.status >= 200 && patchResp.status < 300) {
+          flagsArchivedInSource.push(destKey);
+          console.log(
+            Colors.green(
+              `\t✓ ${destKey}${copy}: ${
+                inputArgs.dryRun ? "would be archived" : "archived"
+              } in the destination (archived in the source)`,
+            ),
+          );
+        } else {
+          fail(`HTTP ${patchResp.status}: ${await patchResp.text()}`);
+        }
+      } catch (err) {
+        fail(err instanceof Error ? err.message : String(err));
       }
-      if (destResp.status !== 200) {
-        fail(`could not read the destination flag (HTTP ${destResp.status})`);
-        continue;
-      }
-      flagsArchivedInSource.push(destKey);
-      const destFlag = await destResp.json();
-      if (destFlag.archived === true) {
-        console.log(
-          Colors.gray(`\t✓ ${destKey}: already archived in the destination`),
-        );
-        continue;
-      }
-      const patchResp = await dryRunAwarePatch(
-        inputArgs.dryRun || false,
-        apiKey,
-        domain,
-        `flags/${inputArgs.projKeyDest}/${destKey}`,
-        [buildPatch("archived", "replace", true)],
-        false,
-        "flags",
-        "archived in the source",
-      );
-      if (patchResp.status >= 200 && patchResp.status < 300) {
-        console.log(
-          Colors.green(
-            `\t✓ ${destKey}: ${
-              inputArgs.dryRun ? "would be archived" : "archived"
-            } in the destination (archived in the source${
-              destKey !== key ? ` as ${key}` : ""
-            })`,
-          ),
-        );
-      } else {
-        fail(`HTTP ${patchResp.status}: ${await patchResp.text()}`);
-      }
-    } catch (err) {
-      fail(err instanceof Error ? err.message : String(err));
     }
   }
   for (const key of deleted) {
-    const destKey = ownEntry(previousManifest.flags, key)?.destKey ?? key;
-    console.log(
-      Colors.yellow(
-        `\t⚠ ${destKey}: deleted in the source; the destination copy is kept`,
-      ),
-    );
+    const entry = ownEntry(manifestFlags, key);
+    if (!entry) continue;
+    for (const destKey of ownedKeys(key, entry)) {
+      flagsDeletedInSource.push(
+        destKey !== key ? `${destKey} (source ${key})` : destKey,
+      );
+      console.log(
+        Colors.yellow(
+          `\t⚠ ${destKey}: source flag ${key} was deleted; the destination copy is kept`,
+        ),
+      );
+    }
   }
 }
 
@@ -4577,7 +4593,8 @@ const printNonMigratedSettingsSection = (
 };
 
 /**
- * Prints the flags whose source counterpart left the flag list since they were migrated
+ * Prints the destination copies whose source flag left the flag list since they were migrated.
+ * Copies whose archival failed are not listed here; they are in the errors section.
  */
 const printSourceLifecycleSection = (): void => {
   if (flagsArchivedInSource.length === 0 && flagsDeletedInSource.length === 0) {
@@ -4587,8 +4604,8 @@ const printSourceLifecycleSection = (): void => {
   if (flagsArchivedInSource.length > 0) {
     console.log(
       Colors.gray(
-        `  Archived in the source since they were migrated; archived in the destination too${
-          inputArgs.dryRun ? " (dry run: not applied)" : ""
+        `  Source flag archived since the migration; destination copy ${
+          inputArgs.dryRun ? "would be archived (dry run)" : "archived"
         }:`,
       ),
     );
@@ -4597,7 +4614,7 @@ const printSourceLifecycleSection = (): void => {
   if (flagsDeletedInSource.length > 0) {
     console.log(
       Colors.yellow(
-        `  Deleted in the source; the destination copy is kept (delete it by hand if it should go):`,
+        `  Source flag deleted; this destination copy is kept (delete it by hand if it should go):`,
       ),
     );
     flagsDeletedInSource.forEach((k) => console.log(Colors.yellow(`    ${k}`)));
@@ -4772,8 +4789,8 @@ async function reconcileDestination(): Promise<void> {
       .map((k: string) =>
         ownEntry(updatedManifestFlags, k)?.destKey ?? resolved.get(k) ?? k
       ),
-    // Recorded copies whose source flag is archived stay in the destination, archived
-    ...flagsArchivedInSource,
+    // Recorded copies whose source flag is archived stay in the destination (archived, or listed as an error)
+    ...archivedSourceDestKeys,
   ]);
   try {
     const dest = await listDestinationKeys(
