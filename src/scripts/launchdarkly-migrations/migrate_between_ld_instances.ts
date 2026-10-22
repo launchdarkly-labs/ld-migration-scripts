@@ -4129,7 +4129,10 @@ async function propagateSourceArchival(): Promise<void> {
   const extraCopies = archivedInList.flatMap((key) => {
     const entry = ownEntry(manifestFlags, key);
     return entry
-      ? ownedKeys(key, entry).slice(1).map((destKey) => [key, destKey])
+      ? ownedKeys(key, entry).slice(1).map((destKey): [string, string] => [
+        key,
+        destKey,
+      ])
       : [];
   });
   if (
@@ -4150,7 +4153,7 @@ async function propagateSourceArchival(): Promise<void> {
     if (!entry) continue;
     for (const destKey of ownedKeys(key, entry)) copies.push([key, destKey]);
   }
-  copies.push(...(extraCopies as Array<[string, string]>));
+  copies.push(...extraCopies);
   for (const [key, destKey] of copies) {
     await archiveDestinationCopy(key, destKey);
   }
