@@ -206,8 +206,8 @@ export type ManifestEntries = Pick<SyncManifest, "flags" | "segments">;
 
 type DestEntry = { destKey?: string; extraDestKeys?: string[] };
 
-/** Every destination key an entry owns: its main copy and any adopted extra copies. */
-const ownedKeys = (
+/** Every destination key an entry owns: its primary copy (destKey, else the source key) and adopted extra copies. */
+export const ownedKeys = (
   key: string,
   entry: DestEntry,
 ): string[] => [entry.destKey ?? key, ...(entry.extraDestKeys ?? [])];

@@ -64,6 +64,8 @@ export interface WorkflowConfig {
     migrateViews?: boolean;
     /** Record the resources an incomplete sync manifest lists as untracked as this migration's copies */
     adoptUnresolved?: boolean;
+    /** false: a recorded flag archived in the source since it was migrated is not archived in the destination (default: true) */
+    propagateArchived?: boolean;
   };
   thirdPartyImport?: {
     inputFile: string;

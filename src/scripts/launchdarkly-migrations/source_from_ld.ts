@@ -355,9 +355,18 @@ async function listFlagKeys(
 }
 
 const flags: string[] = await listFlagKeys("", "live");
+// The archived keys are always listed (a few summary pages) and recorded separately, so migrate can
+// tell a recorded flag that was archived in the source since the last run from one that was deleted.
+const archived = await listFlagKeys("&filter=state:archived", "archived");
+console.log(`Found ${archived.length} archived flags`);
+// Written directly rather than through writeSourceData, which logs a write error and carries on: a stale
+// or missing inventory would make migrate take newly archived flags for deleted ones (and leave their
+// destination copies live), so the extraction fails instead
+await Deno.writeTextFile(
+  `${projPath}/archived-flags.json`,
+  JSON.stringify(archived, null, 2),
+);
 if (inputArgs.includeArchived) {
-  const archived = await listFlagKeys("&filter=state:archived", "archived");
-  console.log(`Found ${archived.length} archived flags`);
   flags.push(...archived.filter((k) => !flags.includes(k)));
 }
 
@@ -442,4 +451,5 @@ await writeSourceData(projPath, "extraction", {
   includeArchived: Boolean(inputArgs.includeArchived),
   environments: allEnvironments.map((e: any) => e.key),
   flagCount: flags.length,
+  archivedFlagCount: archived.length,
 });

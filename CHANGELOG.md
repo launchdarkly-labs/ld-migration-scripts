@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.5.0] - 2026-10-21
+
+### Added
+
+- `migrate`: a flag archived in the source after it was migrated is now archived in the destination too. The flags API omits archived flags unless `--include-archived`, so such a flag dropped out of the extracted flag list and the destination copy stayed live, also on `--incremental` runs. `source_from_ld.ts` now always records the source's archived flag keys (`archived-flags.json`, a few summary pages); `migrate` checks the recorded flags missing from the flag list and archives every recorded destination copy (adopted copies included) of each one archived in the source (`migration.propagateArchived`, default true; `--propagate-archived=false` to skip). A recorded flag that is neither live nor archived in the source was deleted there: its destination copy is kept and listed in the summary. Flags archived before the first run and never migrated are not touched; `includeFlags` / `excludeFlags` scope the step; dry runs preview the patches. Found on the SoSafe re-syncs
+
 ## [3.4.2] - 2026-10-20
 
 ### Fixed
