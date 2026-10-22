@@ -39,6 +39,22 @@ Deno.test("classifyVanishedFlags lists archived flags present in the extraction 
   );
 });
 
+Deno.test("classifyVanishedFlags leaves the adopted copies of a date-skipped archived flag alone", () => {
+  // --since skipped the flag in the flag loop, so its primary copy was not archived this run; archiving
+  // only its adopted copies would split the flag's copies, so it is not listed
+  const result = classifyVanishedFlags({
+    manifestKeys: ["skipped", "processed", "gone"],
+    extractedKeys: ["skipped", "processed"],
+    archivedKeys: ["skipped", "processed", "gone"],
+    skippedKeys: ["skipped"],
+  });
+  assertEquals(result, {
+    archived: ["gone"],
+    deleted: [],
+    archivedInList: ["processed"],
+  });
+});
+
 Deno.test("classifyVanishedFlags respects includeFlags and excludeFlags", () => {
   const input = {
     manifestKeys: ["a", "b", "c"],

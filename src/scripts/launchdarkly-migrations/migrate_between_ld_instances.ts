@@ -4015,6 +4015,8 @@ const archivedSourceDestKeys: string[] = [];
 const flagsArchivedInSource: string[] = [];
 // Destination copies of recorded flags deleted in the source, kept in the destination
 const flagsDeletedInSource: string[] = [];
+// Destination copies of recorded flags archived in the source, left as they are (propagateArchived: false)
+const flagsArchivedNotPropagated: string[] = [];
 
 /** Archives one destination copy of a source flag that is archived; failures land in flagsWithErrors. */
 async function archiveDestinationCopy(
@@ -4088,7 +4090,9 @@ async function archiveDestinationCopy(
 }
 
 async function propagateSourceArchival(): Promise<void> {
-  if (!propagateArchived || !previousManifest) return;
+  // The classification and the report of deleted flags run whatever the option says; propagateArchived
+  // only decides whether the copies of archived flags are archived in the destination
+  if (!previousManifest) return;
   // Only a missing file (an extraction from before this version) is tolerated with a warning; an unreadable
   // or malformed one throws to the caller, which records the failure so the run does not exit 0 with
   // recorded flags possibly left live
@@ -4123,6 +4127,8 @@ async function propagateSourceArchival(): Promise<void> {
     archivedKeys,
     includeFlags: inputArgs.includeFlags,
     excludeFlags: inputArgs.excludeFlags,
+    // --since left these untouched in the flag loop (primary copy included), so their copies stay as they are
+    skippedKeys: flagsSkippedByDate,
   });
   // Adopted extra copies of archived flags that are in the flag list: the flag loop only archives the
   // primary copy, so the extra copies are handled here, same as copies of vanished flags
@@ -4155,7 +4161,18 @@ async function propagateSourceArchival(): Promise<void> {
   }
   copies.push(...extraCopies);
   for (const [key, destKey] of copies) {
-    await archiveDestinationCopy(key, destKey);
+    if (propagateArchived) {
+      await archiveDestinationCopy(key, destKey);
+      continue;
+    }
+    flagsArchivedNotPropagated.push(
+      destKey !== key ? `${destKey} (source ${key})` : destKey,
+    );
+    console.log(
+      Colors.gray(
+        `\t- ${destKey}: source flag ${key} is archived; the destination copy is left as it is (propagateArchived: false)`,
+      ),
+    );
   }
   for (const key of deleted) {
     const entry = ownEntry(manifestFlags, key);
@@ -4652,7 +4669,10 @@ const printNonMigratedSettingsSection = (
  * Copies whose archival failed are not listed here; they are in the errors section.
  */
 const printSourceLifecycleSection = (): void => {
-  if (flagsArchivedInSource.length === 0 && flagsDeletedInSource.length === 0) {
+  if (
+    flagsArchivedInSource.length === 0 && flagsDeletedInSource.length === 0 &&
+    flagsArchivedNotPropagated.length === 0
+  ) {
     return;
   }
   console.log(Colors.cyan("\n🗄  FLAGS ARCHIVED OR DELETED IN THE SOURCE"));
@@ -4665,6 +4685,16 @@ const printSourceLifecycleSection = (): void => {
       ),
     );
     flagsArchivedInSource.forEach((k) => console.log(Colors.gray(`    ${k}`)));
+  }
+  if (flagsArchivedNotPropagated.length > 0) {
+    console.log(
+      Colors.gray(
+        `  Source flag archived since the migration; destination copy left as it is (propagateArchived: false):`,
+      ),
+    );
+    flagsArchivedNotPropagated.forEach((k) =>
+      console.log(Colors.gray(`    ${k}`))
+    );
   }
   if (flagsDeletedInSource.length > 0) {
     console.log(

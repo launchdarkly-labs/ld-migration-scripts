@@ -19,6 +19,11 @@ export interface VanishedFlagsInput {
   /** `includeFlags` / `excludeFlags` of this run, as comma-separated lists; a flag outside the scope is left alone */
   includeFlags?: string;
   excludeFlags?: string;
+  /**
+   * Extracted flags this run did not process (`--since` skipped them): their primary copy was not touched,
+   * so their adopted copies are left alone too and they are not listed in `archivedInList`
+   */
+  skippedKeys?: Iterable<string>;
 }
 
 export interface VanishedFlags {
@@ -46,6 +51,7 @@ export function classifyVanishedFlags(
   const archivedInSource = new Set(input.archivedKeys);
   const include = parseKeyList(input.includeFlags);
   const exclude = parseKeyList(input.excludeFlags);
+  const skipped = new Set(input.skippedKeys ?? []);
   const archived: string[] = [];
   const deleted: string[] = [];
   const archivedInList: string[] = [];
@@ -53,7 +59,9 @@ export function classifyVanishedFlags(
     if (include && !include.has(key)) continue;
     if (exclude && exclude.has(key)) continue;
     if (extracted.has(key)) {
-      if (archivedInSource.has(key)) archivedInList.push(key);
+      if (archivedInSource.has(key) && !skipped.has(key)) {
+        archivedInList.push(key);
+      }
       continue;
     }
     (archivedInSource.has(key) ? archived : deleted).push(key);
