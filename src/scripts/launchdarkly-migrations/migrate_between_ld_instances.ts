@@ -4112,7 +4112,9 @@ async function propagateSourceArchival(): Promise<void> {
   ) {
     throw new Error(`${archivedListPath} is not a list of flag keys`);
   }
-  const manifestFlags = previousManifest.flags ?? {};
+  // The cumulative entries: carried forward from the previous manifest, rewritten by this run, and
+  // including copies adopted this run (--adopt-unresolved), so none of them is left live
+  const manifestFlags = updatedManifestFlags;
   const { archived, deleted, archivedInList } = classifyVanishedFlags({
     manifestKeys: Object.keys(manifestFlags),
     extractedKeys: sourceIndexByKey.keys(),
@@ -4166,16 +4168,6 @@ async function propagateSourceArchival(): Promise<void> {
   }
 }
 
-try {
-  await propagateSourceArchival();
-} catch (error) {
-  const msg = error instanceof Error ? error.message : String(error);
-  console.log(
-    Colors.red(`\n❌ Propagating source archival failed unexpectedly: ${msg}`),
-  );
-  reconciliationErrors.push(`archived in source: ${msg}`);
-}
-
 // The manifest is the inventory revert and view linking use to find migrated copies, so it stays
 // cumulative: entries for flags and segments outside this run's scope (include/exclude filters,
 // --since, unselected environments, migrateSegments: false) are carried over. Resources attempted
@@ -4216,6 +4208,19 @@ function carryForwardManifestEntries(): void {
 }
 
 carryForwardManifestEntries();
+// Adoption (--adopt-unresolved) is staged before archival so copies adopted this run are archived too
+stageAdoptedCopies();
+// Runs on the cumulative entries, before the manifest is written: an archival failure clears the
+// entry's cached versions and counts as a failed write for the incomplete marker
+try {
+  await propagateSourceArchival();
+} catch (error) {
+  const msg = error instanceof Error ? error.message : String(error);
+  console.log(
+    Colors.red(`\n❌ Propagating source archival failed unexpectedly: ${msg}`),
+  );
+  reconciliationErrors.push(`archived in source: ${msg}`);
+}
 // Persisted before view linking, so a failure there cannot lose the inventory of what was written
 await writeSyncManifestFile();
 
@@ -4322,6 +4327,41 @@ if (usableViews.size > 0) {
   }
 }
 
+// --adopt-unresolved: the user verified the untracked resources are the aborted run's writes; record them
+// as this migration's extra copies so the marker can clear and revert removes them too. Idempotent:
+// adoption runs once, after carry-forward, before archival propagation and the manifest write.
+let adoptionStaged = false;
+function stageAdoptedCopies(): void {
+  if (
+    adoptionStaged || !inputArgs.adoptUnresolved ||
+    !previousManifest?.incomplete?.unresolved
+  ) return;
+  adoptionStaged = true;
+  const adopted = adoptUnresolved(
+    previousManifest,
+    {
+      flags: updatedManifestFlags,
+      segments: Object.keys(updatedManifestSegments).length > 0
+        ? updatedManifestSegments
+        : undefined,
+    },
+    inputArgs.conflictPrefix,
+  );
+  const list = [...adopted.flags, ...adopted.segments];
+  const verb = inputArgs.dryRun ? "[DRY RUN] Would adopt" : "Adopted";
+  console.log(
+    list.length > 0
+      ? Colors.cyan(
+        `\n${verb} ${list.length} untracked destination resource(s) into the sync manifest: ${
+          list.join(", ")
+        }`,
+      )
+      : Colors.yellow(
+        `\nNo untracked destination resource could be adopted (no matching source resource in this run)`,
+      ),
+  );
+}
+
 // Always write sync manifest so --incremental works on next run
 /**
  * Writes the cumulative manifest. An explicit `incomplete` marks a run that stopped early and skips the
@@ -4354,31 +4394,8 @@ async function writeSyncManifestFile(
       };
     }),
   };
-  // --adopt-unresolved: the user verified the untracked resources are the aborted run's writes; record them
-  // as this migration's extra copies so the marker can clear and revert removes them too
-  if (
-    !incomplete && inputArgs.adoptUnresolved &&
-    previousManifest?.incomplete?.unresolved
-  ) {
-    const adopted = adoptUnresolved(
-      previousManifest,
-      entries,
-      inputArgs.conflictPrefix,
-    );
-    const list = [...adopted.flags, ...adopted.segments];
-    const verb = inputArgs.dryRun ? "[DRY RUN] Would adopt" : "Adopted";
-    console.log(
-      list.length > 0
-        ? Colors.cyan(
-          `\n${verb} ${list.length} untracked destination resource(s) into the sync manifest: ${
-            list.join(", ")
-          }`,
-        )
-        : Colors.yellow(
-          `\nNo untracked destination resource could be adopted (no matching source resource in this run)`,
-        ),
-    );
-  }
+  // --adopt-unresolved: staged once a completed flag phase, before archival; an abort never adopts
+  if (!incomplete) stageAdoptedCopies();
   // Attempted resources without an entry whose outcome is unknown: in flight at an abort, or failed after
   // a create may already have succeeded (a create the API rejected with a 4xx is excluded: nothing exists).
   // Their destination keys (the key being written, plus the prefixed key for a prefix retry) may exist
