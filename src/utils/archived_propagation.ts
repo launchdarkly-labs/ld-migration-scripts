@@ -22,10 +22,15 @@ export interface VanishedFlagsInput {
 }
 
 export interface VanishedFlags {
-  /** Recorded flags archived in the source: archive the destination copy */
+  /** Recorded flags archived in the source and absent from the flag list: archive every destination copy */
   archived: string[];
   /** Recorded flags neither live nor archived in the source: deleted there, destination copy kept */
   deleted: string[];
+  /**
+   * Recorded flags archived in the source that are in the flag list (--include-archived). The flag loop
+   * archives their primary copy; adopted extra copies still need archiving.
+   */
+  archivedInList: string[];
 }
 
 function parseKeyList(list?: string): Set<string> | null {
@@ -43,11 +48,19 @@ export function classifyVanishedFlags(
   const exclude = parseKeyList(input.excludeFlags);
   const archived: string[] = [];
   const deleted: string[] = [];
+  const archivedInList: string[] = [];
   for (const key of input.manifestKeys) {
-    if (extracted.has(key)) continue;
     if (include && !include.has(key)) continue;
     if (exclude && exclude.has(key)) continue;
+    if (extracted.has(key)) {
+      if (archivedInSource.has(key)) archivedInList.push(key);
+      continue;
+    }
     (archivedInSource.has(key) ? archived : deleted).push(key);
   }
-  return { archived: archived.sort(), deleted: deleted.sort() };
+  return {
+    archived: archived.sort(),
+    deleted: deleted.sort(),
+    archivedInList: archivedInList.sort(),
+  };
 }

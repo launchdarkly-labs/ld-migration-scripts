@@ -4014,12 +4014,89 @@ const flagsArchivedInSource: string[] = [];
 // Destination copies of recorded flags deleted in the source, kept in the destination
 const flagsDeletedInSource: string[] = [];
 
+/** Archives one destination copy of a source flag that is archived; failures land in flagsWithErrors. */
+async function archiveDestinationCopy(
+  key: string,
+  destKey: string,
+): Promise<void> {
+  const copy = destKey !== key ? ` (source ${key})` : "";
+  const fail = (detail: string) => {
+    console.log(Colors.red(`\t✗ ${destKey}${copy}: ${detail}`));
+    flagsWithErrors.add(destKey);
+    flagErrorDetails.set(
+      destKey,
+      `source flag ${key} is archived, but this destination copy could not be archived: ${
+        detail.slice(0, 300)
+      }`,
+    );
+  };
+  try {
+    const destResp = await rateLimitRequest(
+      ldAPIRequest(apiKey, domain, `flags/${inputArgs.projKeyDest}/${destKey}`),
+      "flags",
+    );
+    if (destResp.status === 404) {
+      console.log(
+        Colors.gray(
+          `\t- ${destKey}${copy}: archived in the source, no copy in the destination`,
+        ),
+      );
+      return;
+    }
+    if (destResp.status !== 200) {
+      fail(`could not read the destination flag (HTTP ${destResp.status})`);
+      return;
+    }
+    archivedSourceDestKeys.push(destKey);
+    const destFlag = await destResp.json();
+    if (destFlag.archived === true) {
+      console.log(
+        Colors.gray(
+          `\t✓ ${destKey}${copy}: already archived in the destination`,
+        ),
+      );
+      flagsArchivedInSource.push(destKey);
+      return;
+    }
+    const patchResp = await dryRunAwarePatch(
+      inputArgs.dryRun || false,
+      apiKey,
+      domain,
+      `flags/${inputArgs.projKeyDest}/${destKey}`,
+      [buildPatch("archived", "replace", true)],
+      false,
+      "flags",
+      "archived in the source",
+    );
+    if (patchResp.status >= 200 && patchResp.status < 300) {
+      flagsArchivedInSource.push(destKey);
+      console.log(
+        Colors.green(
+          `\t✓ ${destKey}${copy}: ${
+            inputArgs.dryRun ? "would be archived" : "archived"
+          } in the destination (archived in the source)`,
+        ),
+      );
+    } else {
+      fail(`HTTP ${patchResp.status}: ${await patchResp.text()}`);
+    }
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
+}
+
 async function propagateSourceArchival(): Promise<void> {
   if (!propagateArchived || !previousManifest) return;
-  const archivedKeys = await getJson(
-    `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/archived-flags.json`,
-  );
-  if (!Array.isArray(archivedKeys)) {
+  // Only a missing file (an extraction from before this version) is tolerated with a warning; an unreadable
+  // or malformed one throws to the caller, which records the failure so the run does not exit 0 with
+  // recorded flags possibly left live
+  const archivedListPath =
+    `./data/launchdarkly-migrations/source/project/${inputArgs.projKeySource}/archived-flags.json`;
+  let archivedListText: string;
+  try {
+    archivedListText = await Deno.readTextFile(archivedListPath);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
     console.log(
       Colors.yellow(
         `\n⚠ The extracted data does not list the source's archived flags (archived-flags.json; re-extract with this version). ` +
@@ -4028,94 +4105,50 @@ async function propagateSourceArchival(): Promise<void> {
     );
     return;
   }
+  const archivedKeys: unknown = JSON.parse(archivedListText);
+  if (
+    !Array.isArray(archivedKeys) ||
+    !archivedKeys.every((k) => typeof k === "string")
+  ) {
+    throw new Error(`${archivedListPath} is not a list of flag keys`);
+  }
   const manifestFlags = previousManifest.flags ?? {};
-  const { archived, deleted } = classifyVanishedFlags({
+  const { archived, deleted, archivedInList } = classifyVanishedFlags({
     manifestKeys: Object.keys(manifestFlags),
     extractedKeys: sourceIndexByKey.keys(),
     archivedKeys,
     includeFlags: inputArgs.includeFlags,
     excludeFlags: inputArgs.excludeFlags,
   });
-  if (archived.length === 0 && deleted.length === 0) return;
+  // Adopted extra copies of archived flags that are in the flag list: the flag loop only archives the
+  // primary copy, so the extra copies are handled here, same as copies of vanished flags
+  const extraCopies = archivedInList.flatMap((key) => {
+    const entry = ownEntry(manifestFlags, key);
+    return entry
+      ? ownedKeys(key, entry).slice(1).map((destKey) => [key, destKey])
+      : [];
+  });
+  if (
+    archived.length === 0 && deleted.length === 0 && extraCopies.length === 0
+  ) return;
   console.log(
     Colors.cyan(
-      `\n🗄  Recorded flags no longer in the source flag list: ${archived.length} archived in the source, ${deleted.length} deleted in the source`,
+      `\n🗄  Recorded flags no longer in the source flag list: ${archived.length} archived in the source, ${deleted.length} deleted in the source` +
+        (extraCopies.length > 0
+          ? `; ${extraCopies.length} adopted copies of archived flags in the list`
+          : ""),
     ),
   );
   // Every destination copy an entry owns (primary and adopted) is handled on its own
+  const copies: Array<[string, string]> = [];
   for (const key of archived) {
     const entry = ownEntry(manifestFlags, key);
     if (!entry) continue;
-    for (const destKey of ownedKeys(key, entry)) {
-      const copy = destKey !== key ? ` (source ${key})` : "";
-      const fail = (detail: string) => {
-        console.log(Colors.red(`\t✗ ${destKey}${copy}: ${detail}`));
-        flagsWithErrors.add(destKey);
-        flagErrorDetails.set(
-          destKey,
-          `source flag ${key} is archived, but this destination copy could not be archived: ${
-            detail.slice(0, 300)
-          }`,
-        );
-      };
-      try {
-        const destResp = await rateLimitRequest(
-          ldAPIRequest(
-            apiKey,
-            domain,
-            `flags/${inputArgs.projKeyDest}/${destKey}`,
-          ),
-          "flags",
-        );
-        if (destResp.status === 404) {
-          console.log(
-            Colors.gray(
-              `\t- ${destKey}${copy}: archived in the source, no copy in the destination`,
-            ),
-          );
-          continue;
-        }
-        if (destResp.status !== 200) {
-          fail(`could not read the destination flag (HTTP ${destResp.status})`);
-          continue;
-        }
-        archivedSourceDestKeys.push(destKey);
-        const destFlag = await destResp.json();
-        if (destFlag.archived === true) {
-          console.log(
-            Colors.gray(
-              `\t✓ ${destKey}${copy}: already archived in the destination`,
-            ),
-          );
-          flagsArchivedInSource.push(destKey);
-          continue;
-        }
-        const patchResp = await dryRunAwarePatch(
-          inputArgs.dryRun || false,
-          apiKey,
-          domain,
-          `flags/${inputArgs.projKeyDest}/${destKey}`,
-          [buildPatch("archived", "replace", true)],
-          false,
-          "flags",
-          "archived in the source",
-        );
-        if (patchResp.status >= 200 && patchResp.status < 300) {
-          flagsArchivedInSource.push(destKey);
-          console.log(
-            Colors.green(
-              `\t✓ ${destKey}${copy}: ${
-                inputArgs.dryRun ? "would be archived" : "archived"
-              } in the destination (archived in the source)`,
-            ),
-          );
-        } else {
-          fail(`HTTP ${patchResp.status}: ${await patchResp.text()}`);
-        }
-      } catch (err) {
-        fail(err instanceof Error ? err.message : String(err));
-      }
-    }
+    for (const destKey of ownedKeys(key, entry)) copies.push([key, destKey]);
+  }
+  copies.push(...(extraCopies as Array<[string, string]>));
+  for (const [key, destKey] of copies) {
+    await archiveDestinationCopy(key, destKey);
   }
   for (const key of deleted) {
     const entry = ownEntry(manifestFlags, key);

@@ -10,17 +10,33 @@ Deno.test("classifyVanishedFlags splits recorded flags missing from the extracti
   assertEquals(result, {
     archived: ["gone-archived"],
     deleted: ["gone-deleted"],
+    archivedInList: [],
   });
 });
 
-Deno.test("classifyVanishedFlags leaves flags present in the extraction alone even when archived there", () => {
-  // --include-archived puts archived flags in the flag list; the flag loop syncs their lifecycle itself
+Deno.test("classifyVanishedFlags lists archived flags present in the extraction separately", () => {
+  // --include-archived puts archived flags in the flag list; the flag loop archives their primary copy,
+  // so they are not "vanished", but their adopted extra copies still need archiving
   const result = classifyVanishedFlags({
-    manifestKeys: ["archived-but-extracted"],
-    extractedKeys: ["archived-but-extracted"],
+    manifestKeys: ["archived-but-extracted", "live"],
+    extractedKeys: ["archived-but-extracted", "live"],
     archivedKeys: ["archived-but-extracted"],
   });
-  assertEquals(result, { archived: [], deleted: [] });
+  assertEquals(result, {
+    archived: [],
+    deleted: [],
+    archivedInList: ["archived-but-extracted"],
+  });
+  // include/exclude scope applies to that list too
+  assertEquals(
+    classifyVanishedFlags({
+      manifestKeys: ["a", "b"],
+      extractedKeys: ["a", "b"],
+      archivedKeys: ["a", "b"],
+      excludeFlags: "b",
+    }).archivedInList,
+    ["a"],
+  );
 });
 
 Deno.test("classifyVanishedFlags respects includeFlags and excludeFlags", () => {
@@ -58,6 +74,6 @@ Deno.test("classifyVanishedFlags returns sorted keys and handles an empty manife
       extractedKeys: ["a"],
       archivedKeys: [],
     }),
-    { archived: [], deleted: [] },
+    { archived: [], deleted: [], archivedInList: [] },
   );
 });
