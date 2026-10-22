@@ -1943,11 +1943,17 @@ if (inputArgs.migrateSegments) {
             prevSegment.version === segment.version
           ) {
             // Name, description and tags are reconciled on the skipped segment too (one read): migration tags are
-            // not part of the source version, and a run before 3.5.1 recorded the version without syncing them
+            // not part of the source version, and a run before 3.5.1 recorded the version without syncing them.
+            // A prefixed copy keeps its prefixed name.
+            const recorded = recordedDestination(
+              prevSegment,
+              segment,
+              inputArgs.conflictPrefix,
+            );
             const tagNote = await syncExistingSegmentMetadata(
               destEnvKey,
-              prevSegment.destKey ?? segment.key,
-              segment,
+              recorded.key,
+              { ...segment, name: recorded.name },
             );
             console.log(
               Colors.gray(
@@ -2099,10 +2105,11 @@ if (inputArgs.migrateSegments) {
         }
 
         if (segmentCreated && segmentAlreadyExisted) {
+          // segmentName carries the conflict prefix when the copy was prefixed
           const note = await syncExistingSegmentMetadata(
             destEnvKey,
             segmentKey,
-            segment,
+            { ...segment, name: segmentName },
           );
           if (note) console.log(Colors.gray(`    ✓ ${segmentKey}${note}`));
         }
