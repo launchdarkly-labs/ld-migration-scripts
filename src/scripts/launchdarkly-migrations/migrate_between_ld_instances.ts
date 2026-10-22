@@ -4018,8 +4018,12 @@ const flagsDeletedInSource: string[] = [];
 // Destination copies of recorded flags archived in the source, left as they are (propagateArchived: false)
 const flagsArchivedNotPropagated: string[] = [];
 
-/** Archives one destination copy of a source flag that is archived; failures land in flagsWithErrors. */
-async function archiveDestinationCopy(
+/**
+ * Handles one destination copy of a source flag that is archived: an existing copy is expected by
+ * reconciliation either way, and archived unless propagateArchived is off (then it is only listed).
+ * A failed archival lands in flagsWithErrors.
+ */
+async function handleArchivedSourceCopy(
   key: string,
   destKey: string,
 ): Promise<void> {
@@ -4048,11 +4052,31 @@ async function archiveDestinationCopy(
       return;
     }
     if (destResp.status !== 200) {
+      if (!propagateArchived) {
+        // Nothing was to be written; the copy may only show up as extra in the reconciliation
+        console.log(
+          Colors.yellow(
+            `\t⚠ ${destKey}${copy}: could not read the destination flag (HTTP ${destResp.status})`,
+          ),
+        );
+        return;
+      }
       fail(`could not read the destination flag (HTTP ${destResp.status})`);
       return;
     }
     archivedSourceDestKeys.push(destKey);
     const destFlag = await destResp.json();
+    if (!propagateArchived) {
+      flagsArchivedNotPropagated.push(`${destKey}${copy}`);
+      console.log(
+        Colors.gray(
+          `\t- ${destKey}${copy}: source flag is archived; the destination copy is left as it is (propagateArchived: false${
+            destFlag.archived === true ? ", already archived" : ""
+          })`,
+        ),
+      );
+      return;
+    }
     if (destFlag.archived === true) {
       console.log(
         Colors.gray(
@@ -4160,19 +4184,10 @@ async function propagateSourceArchival(): Promise<void> {
     for (const destKey of ownedKeys(key, entry)) copies.push([key, destKey]);
   }
   copies.push(...extraCopies);
+  // One read per copy in both modes: an existing copy is expected by the reconciliation whether or not
+  // it gets archived, so it is never reported as extra
   for (const [key, destKey] of copies) {
-    if (propagateArchived) {
-      await archiveDestinationCopy(key, destKey);
-      continue;
-    }
-    flagsArchivedNotPropagated.push(
-      destKey !== key ? `${destKey} (source ${key})` : destKey,
-    );
-    console.log(
-      Colors.gray(
-        `\t- ${destKey}: source flag ${key} is archived; the destination copy is left as it is (propagateArchived: false)`,
-      ),
-    );
+    await handleArchivedSourceCopy(key, destKey);
   }
   for (const key of deleted) {
     const entry = ownEntry(manifestFlags, key);
