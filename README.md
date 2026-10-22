@@ -685,8 +685,10 @@ migration: # Migration settings (also accepts "options:" as alias)
 
 How existing destination resources are handled depends on whether `migration.tags` is set:
 
-- **With `migration.tags`**: the tags of an existing destination flag or segment are merged with the source tags and the migration tags, so no tag already on the destination is lost. This also applies to flags and segments an `incremental` run skips as unchanged, at the cost of one read per skipped resource (the migration tags are not part of the source version, so they would otherwise never be added on a rerun).
-- **Without `migration.tags`**: an existing flag that is overwritten gets the source tags, replacing whatever tags it had in the destination. An existing segment keeps its destination tags (segment patches only touch targeting).
+- **With `migration.tags`**: the tags of an existing destination flag or segment are merged with the source tags and the migration tags, so no tag already on the destination is lost.
+- **Without `migration.tags`**: an existing flag or segment that is overwritten gets the source tags, replacing whatever tags it had in the destination.
+
+An existing segment also gets the source name and description. Flags and segments an `incremental` run skips as unchanged are checked too, at the cost of one read per skipped resource: the migration tags are not part of the source version, and the segment version may already be recorded by a run that did not sync these fields.
 
 A dry run looks up each segment in the destination and previews the tag patch for the ones that already exist.
 

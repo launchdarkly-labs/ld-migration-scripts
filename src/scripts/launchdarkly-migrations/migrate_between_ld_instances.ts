@@ -48,6 +48,7 @@ import {
   withExtraDestKeys,
 } from "../../utils/sync_manifest.ts";
 import { classifyVanishedFlags } from "../../utils/archived_propagation.ts";
+import { segmentMetadataPatches } from "../../utils/segment_metadata.ts";
 import {
   bigSegmentCsvPath,
   readExportedKeys,
@@ -1691,19 +1692,20 @@ if (contextKinds && contextKinds.length > 0) {
   }
 }
 
-// ==================== Segment Tags ====================
+// ==================== Segment Metadata ====================
 
 /**
- * Merges the source tags and the migration tags into an existing destination segment's tags.
- * Only runs when migration tags are set: without them an existing segment keeps its tags.
- * Returns a short log note, empty when nothing was changed.
+ * Brings the name, description and tags of an existing destination segment in line with the source.
+ * The update path patches targeting only, so without this a tag, name or description changed in the
+ * source after the first run never reached the copy. With migration tags set, the destination tags are
+ * the merge of source tags, migration tags and the tags already there; without them the copy gets the
+ * source tags, as flags do. Returns a short log note, empty when nothing was changed.
  */
-async function syncExistingSegmentTags(
+async function syncExistingSegmentMetadata(
   destEnvKey: string,
   destSegmentKey: string,
-  sourceTags: string[] | undefined,
+  segment: { name?: string; description?: string; tags?: string[] },
 ): Promise<string> {
-  if (migrationTags.length === 0) return "";
   const segmentPath =
     `segments/${inputArgs.projKeyDest}/${destEnvKey}/${destSegmentKey}`;
   const existingResp = await rateLimitRequest(
@@ -1711,40 +1713,40 @@ async function syncExistingSegmentTags(
     "segments",
   );
   if (existingResp.status !== 200) {
-    // Without the current tags the merge cannot run; count it so the run does not report success with tags missing
+    // Without the current copy the comparison cannot run; count it so the run does not report success with metadata unsynced
     console.log(
       Colors.red(
-        `    ✗ Could not read existing tags for segment ${destSegmentKey} (${existingResp.status})`,
+        `    ✗ Could not read existing segment ${destSegmentKey} (${existingResp.status}); name, description and tags not synced`,
       ),
     );
     segmentsWithErrors.add(`${destEnvKey}/${destSegmentKey}`);
     return "";
   }
   const existing = await existingResp.json();
-  const desiredTags = mergeTags(sourceTags, migrationTags, existing.tags);
-  if (JSON.stringify(desiredTags) === JSON.stringify(existing.tags ?? [])) {
-    return "";
-  }
-  const tagResp = await dryRunAwarePatch(
+  const patches = segmentMetadataPatches(segment, existing, migrationTags);
+  if (patches.length === 0) return "";
+  const fields = patches.map((p) => p.path.slice(1)).join(", ");
+  const patchResp = await dryRunAwarePatch(
     inputArgs.dryRun || false,
     apiKey,
     domain,
     segmentPath,
-    [buildPatch("tags", "replace", desiredTags)],
+    patches,
     false,
     "segments",
-    `environment: ${destEnvKey}`,
+    `environment: ${destEnvKey} (${fields})`,
   );
-  if (tagResp.status >= 400) {
+  if (patchResp.status >= 400) {
     console.log(
       Colors.red(
-        `    ✗ Failed to update tags for segment ${destSegmentKey} (${tagResp.status})`,
+        `    ✗ Failed to update ${fields} for segment ${destSegmentKey} (${patchResp.status}): ${await patchResp
+          .text()}`,
       ),
     );
     segmentsWithErrors.add(`${destEnvKey}/${destSegmentKey}`);
     return "";
   }
-  return ", tags synced";
+  return `, synced ${fields}`;
 }
 
 // ==================== Big Segment CSV Import ====================
@@ -1940,11 +1942,18 @@ if (inputArgs.migrateSegments) {
             prevSegment && segment.version !== undefined &&
             prevSegment.version === segment.version
           ) {
-            // Migration tags are not part of the source version, so reconcile them on the skipped segment too
-            const tagNote = await syncExistingSegmentTags(
+            // Name, description and tags are reconciled on the skipped segment too (one read): migration tags are
+            // not part of the source version, and a run before 3.5.1 recorded the version without syncing them.
+            // A prefixed copy keeps its prefixed name.
+            const recorded = recordedDestination(
+              prevSegment,
+              segment,
+              inputArgs.conflictPrefix,
+            );
+            const tagNote = await syncExistingSegmentMetadata(
               destEnvKey,
-              prevSegment.destKey ?? segment.key,
-              segment.tags,
+              recorded.key,
+              { ...segment, name: recorded.name },
             );
             console.log(
               Colors.gray(
@@ -2096,7 +2105,13 @@ if (inputArgs.migrateSegments) {
         }
 
         if (segmentCreated && segmentAlreadyExisted) {
-          await syncExistingSegmentTags(destEnvKey, segmentKey, segment.tags);
+          // segmentName carries the conflict prefix when the copy was prefixed
+          const note = await syncExistingSegmentMetadata(
+            destEnvKey,
+            segmentKey,
+            { ...segment, name: segmentName },
+          );
+          if (note) console.log(Colors.gray(`    ✓ ${segmentKey}${note}`));
         }
 
         // Big segments: load members via the CSV import endpoint instead of patches

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.5.1] - 2026-10-22
+
+### Fixed
+
+- `migrate`: an existing destination segment now gets the source name, description and tags on every run (tags merged with the migration tags when `migration.tags` is set, replaced otherwise, as for flags). The segment update path patched targeting only, so a tag, name or description changed in the source after the first run never reached the copy; `--incremental` runs check these fields on skipped segments too (one read per segment), since the segment version may already be recorded by a run that did not sync them. Found on the SoSafe re-syncs (a tag added to a segment in the source was missing in the destination)
+
 ## [3.5.0] - 2026-10-21
 
 ### Added
