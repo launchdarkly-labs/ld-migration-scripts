@@ -55,6 +55,28 @@ import {
 } from "../../utils/big_segments.ts";
 import { getAccountId } from "../../utils/account_guard.ts";
 import { linkToView, type SourceView } from "../../utils/views.ts";
+import {
+  type DestFlagState,
+  type DestSegmentState,
+  detectFlagEdits,
+  detectSegmentEdit,
+  epochMs,
+  type FlagTargetEdits,
+  nextFlagTargetRecord,
+  nextSegmentTargetRecord,
+  NO_FLAG_EDITS,
+  observeFlag,
+  observeSegment,
+  protectsFlagLevel,
+} from "../../utils/target_guard.ts";
+import {
+  type ProtectedResource,
+  RUN_RECORD_SCHEMA_VERSION,
+  runMode,
+  type RunRecord,
+  writeRunRecord,
+} from "../../utils/run_record.ts";
+import denoConfig from "../../../deno.json" with { type: "json" };
 
 interface Arguments {
   projKeySource: string;
@@ -837,7 +859,10 @@ function requestAbort(resourceType: string, key: string): void {
 /** Persists everything recorded so far, marked incomplete with `reason`, then exits non-zero. */
 async function persistAndExit(reason: string): Promise<never> {
   carryForwardManifestEntries();
+  // Copies written before the stop are read back too, so the next run does not take them for destination edits
+  await recordDestinationState();
   await writeSyncManifestFile({ reason, at: new Date().toISOString() });
+  await writeRunRecordFile(1, reason);
   Deno.exit(1);
 }
 
@@ -1007,6 +1032,8 @@ const syncManifestPath = syncManifestPathFor(
   inputArgs.projKeySource,
   inputArgs.projKeyDest,
 );
+// Recorded in the manifest and the run record; destination writes happen after this point
+const runStartedAt = new Date().toISOString();
 let previousManifest: SyncManifest | null = null;
 // Null-prototype dictionaries: a flag or environment named "__proto__" must be an own entry that serializes
 const updatedManifestFlags = emptyRecord<SyncManifestFlag>();
@@ -1048,6 +1075,10 @@ try {
   );
   Deno.exit(1);
 }
+
+// Destination edits made after the previous run are detected against the state it recorded per copy;
+// entries from before that record existed fall back to the previous run's end (see target_guard.ts)
+const targetEditFallbackSince = epochMs(previousManifest?.lastSyncTimestamp);
 
 if (previousManifest && !previousManifest.destDomain) {
   console.log(Colors.yellow(
@@ -1492,6 +1523,131 @@ const segmentsCreateRejected: Set<string> = new Set(); // "<sourceEnv>/<segmentK
 let manifestWriteFailed = false;
 const flagErrorDetails: Map<string, string> = new Map();
 
+// Destination edits made after the migration wrote a copy (see target_guard.ts): what was found, the
+// copies' observed state, and the copies this run wrote, which are read back before the manifest is
+// written so the next run compares against what this run left behind
+const protectedResources: ProtectedResource[] = [];
+// Declared here rather than with the phases that fill them: an abort writes the run record, which reads them
+const approvalRequestsCreated: Array<
+  { flag: string; env: string; skippedFields: string[] }
+> = [];
+// Destination copies archived this run, or found archived already; a failed patch is in flagsWithErrors instead
+const flagsArchivedInSource: string[] = [];
+// Filled by reconcileDestination; stays empty on dry runs and aborts
+let reconciliationResult: RunRecord["reconciliation"] = {
+  flags: null,
+  segments: [],
+};
+const flagEditsByKey: Map<string, FlagTargetEdits> = new Map(); // source key
+const observedDestFlags: Map<string, DestFlagState> = new Map(); // source key
+const destFlagsWritten: Set<string> = new Set(); // destination key
+const flagsDeletedInTarget: Set<string> = new Set(); // destination key
+const segmentEditsById: Map<string, "none" | "edited" | "deleted"> = new Map(); // "<sourceEnv>/<segmentKey>"
+const observedDestSegments: Map<string, DestSegmentState> = new Map(); // "<sourceEnv>/<segmentKey>"
+const destSegmentsWritten: Set<string> = new Set(); // "<destinationEnv>/<destinationKey>"
+const segmentsDeletedInTarget: Set<string> = new Set(); // "<destinationEnv>/<destinationKey>"
+
+const noteFlagWrite = (destKey: string, status: number): void => {
+  if (!inputArgs.dryRun && status >= 200 && status < 300) {
+    destFlagsWritten.add(destKey);
+  }
+};
+const noteSegmentWrite = (
+  destEnv: string,
+  destKey: string,
+  status: number,
+): void => {
+  if (!inputArgs.dryRun && status >= 200 && status < 300) {
+    destSegmentsWritten.add(`${destEnv}/${destKey}`);
+  }
+};
+const destEnvFor = (sourceEnv: string): string =>
+  inputArgs.envMap && envMapping[sourceEnv] ? envMapping[sourceEnv] : sourceEnv;
+
+/** Records the protected parts of a flag copy and logs them; returns whether flag-level fields are protected. */
+function reportFlagEdits(
+  flag: any,
+  destKey: string,
+  edits: FlagTargetEdits,
+  prevEntry: SyncManifestFlag | undefined,
+): boolean {
+  if (!protectsFlagLevel(edits)) return false;
+  const sourceEnvOf = (destEnv: string) =>
+    envkeys.find((env) => destEnvFor(env) === destEnv);
+  if (edits.deleted) {
+    protectedResources.push({
+      kind: "flag",
+      key: flag.key,
+      destKey,
+      scope: "deleted",
+      sourceChanged: prevEntry?.version !== flag._version,
+    });
+    console.log(Colors.yellow(
+      `\t🛡 ${destKey}: deleted in the destination after the migration wrote it; not recreated`,
+    ));
+    return true;
+  }
+  if (edits.flagLevel) {
+    protectedResources.push({
+      kind: "flag",
+      key: flag.key,
+      destKey,
+      scope: "flag",
+      sourceChanged: prevEntry?.version !== flag._version,
+    });
+  }
+  for (const destEnv of edits.environments) {
+    const sourceEnv = sourceEnvOf(destEnv);
+    const sourceVersion = sourceEnv
+      ? flag.environments?.[sourceEnv]?.version
+      : undefined;
+    protectedResources.push({
+      kind: "flag",
+      key: flag.key,
+      destKey,
+      scope: "environment",
+      env: destEnv,
+      sourceChanged: sourceEnv !== undefined &&
+        prevEntry?.environments?.[sourceEnv]?.version !== sourceVersion,
+    });
+  }
+  console.log(Colors.yellow(
+    edits.environments.length > 0
+      ? `\t🛡 ${destKey}: ${
+        edits.environments.join(", ")
+      } edited in the destination after the migration; ${
+        edits.flagLevel ? "with the flag-level fields edited too, " : ""
+      }those environments and the flag-level fields are left as they are`
+      : `\t🛡 ${destKey}: flag-level fields edited in the destination after the migration; left as they are`,
+  ));
+  return true;
+}
+
+/** Records a protected segment copy and logs it. */
+function reportSegmentEdit(
+  sourceEnv: string,
+  segment: any,
+  destEnv: string,
+  destKey: string,
+  edit: "edited" | "deleted",
+  prevEntry: SyncManifestSegment | undefined,
+): void {
+  protectedResources.push({
+    kind: "segment",
+    key: segment.key,
+    destKey,
+    scope: edit === "deleted" ? "deleted" : "environment",
+    env: destEnv,
+    sourceChanged: prevEntry?.version !== segment.version,
+  });
+  if (edit === "deleted") segmentsDeletedInTarget.add(`${destEnv}/${destKey}`);
+  console.log(Colors.yellow(
+    `    🛡 ${destKey} (${sourceEnv} → ${destEnv}): ${
+      edit === "deleted" ? "deleted" : "edited"
+    } in the destination after the migration wrote it; left as it is`,
+  ));
+}
+
 // Prerequisite check: with include/exclude filters, every prerequisite of a selected flag must be
 // selected too, or already exist in destination. Without filters the whole project is migrated in
 // prerequisite order, so the check is skipped (an archived prerequisite would otherwise block the run).
@@ -1701,28 +1857,94 @@ if (contextKinds && contextKinds.length > 0) {
  * the merge of source tags, migration tags and the tags already there; without them the copy gets the
  * source tags, as flags do. Returns a short log note, empty when nothing was changed.
  */
+/**
+ * Reads this migration's recorded copy of a segment and checks it for destination edits. Returns the
+ * copy (null when it no longer exists) and the edit found; `undefined` copy when it could not be read,
+ * which is recorded as an error so nothing is written over an unchecked copy.
+ */
+async function checkRecordedSegment(
+  sourceEnv: string,
+  segment: any,
+  destEnv: string,
+  destKey: string,
+  prevEntry: SyncManifestSegment,
+): Promise<
+  { copy: any | null | undefined; edit: "none" | "edited" | "deleted" }
+> {
+  const id = `${sourceEnv}/${segment.key}`;
+  const resp = await rateLimitRequest(
+    ldAPIRequest(
+      apiKey,
+      domain,
+      `segments/${inputArgs.projKeyDest}/${destEnv}/${destKey}`,
+    ),
+    "segments",
+  );
+  let copy: any | null;
+  if (resp.status === 200) {
+    copy = await resp.json();
+  } else if (resp.status === 404) {
+    copy = null;
+  } else {
+    console.log(Colors.red(
+      `    ✗ Could not read existing segment ${destKey} (HTTP ${resp.status}); not written, since destination edits could not be checked`,
+    ));
+    segmentsWithErrors.add(`${destEnv}/${destKey}`);
+    return { copy: undefined, edit: "none" };
+  }
+  const observed = copy ? await observeSegment(copy) : undefined;
+  if (observed) observedDestSegments.set(id, observed);
+  const edit = detectSegmentEdit(prevEntry, observed, targetEditFallbackSince);
+  segmentEditsById.set(id, edit);
+  if (edit !== "none") {
+    reportSegmentEdit(sourceEnv, segment, destEnv, destKey, edit, prevEntry);
+  }
+  return { copy, edit };
+}
+
+/** Keeps a protected segment's previous entry, marked as owned by the destination. */
+function keepProtectedSegment(
+  sourceEnv: string,
+  key: string,
+  prevEntry: SyncManifestSegment,
+  edit: "edited" | "deleted",
+): void {
+  if (!updatedManifestSegments[sourceEnv]) {
+    updatedManifestSegments[sourceEnv] = emptyRecord();
+  }
+  updatedManifestSegments[sourceEnv][key] = {
+    ...prevEntry,
+    ...nextSegmentTargetRecord(prevEntry, edit, undefined),
+  };
+}
+
 async function syncExistingSegmentMetadata(
   destEnvKey: string,
   destSegmentKey: string,
   segment: { name?: string; description?: string; tags?: string[] },
+  // The copy as already read by the caller, saving a request
+  existingCopy?: any,
 ): Promise<string> {
   const segmentPath =
     `segments/${inputArgs.projKeyDest}/${destEnvKey}/${destSegmentKey}`;
-  const existingResp = await rateLimitRequest(
-    ldAPIRequest(apiKey, domain, segmentPath),
-    "segments",
-  );
-  if (existingResp.status !== 200) {
-    // Without the current copy the comparison cannot run; count it so the run does not report success with metadata unsynced
-    console.log(
-      Colors.red(
-        `    ✗ Could not read existing segment ${destSegmentKey} (${existingResp.status}); name, description and tags not synced`,
-      ),
+  let existing = existingCopy;
+  if (existing === undefined) {
+    const existingResp = await rateLimitRequest(
+      ldAPIRequest(apiKey, domain, segmentPath),
+      "segments",
     );
-    segmentsWithErrors.add(`${destEnvKey}/${destSegmentKey}`);
-    return "";
+    if (existingResp.status !== 200) {
+      // Without the current copy the comparison cannot run; count it so the run does not report success with metadata unsynced
+      console.log(
+        Colors.red(
+          `    ✗ Could not read existing segment ${destSegmentKey} (${existingResp.status}); name, description and tags not synced`,
+        ),
+      );
+      segmentsWithErrors.add(`${destEnvKey}/${destSegmentKey}`);
+      return "";
+    }
+    existing = await existingResp.json();
   }
-  const existing = await existingResp.json();
   const patches = segmentMetadataPatches(segment, existing, migrationTags);
   if (patches.length === 0) return "";
   const fields = patches.map((p) => p.path.slice(1)).join(", ");
@@ -1736,6 +1958,7 @@ async function syncExistingSegmentMetadata(
     "segments",
     `environment: ${destEnvKey} (${fields})`,
   );
+  noteSegmentWrite(destEnvKey, destSegmentKey, patchResp.status);
   if (patchResp.status >= 400) {
     console.log(
       Colors.red(
@@ -1950,11 +2173,32 @@ if (inputArgs.migrateSegments) {
               segment,
               inputArgs.conflictPrefix,
             );
-            const tagNote = await syncExistingSegmentMetadata(
+            // An unchanged source writes nothing over a destination edit either (not even metadata)
+            const checked = await checkRecordedSegment(
+              env.key,
+              segment,
               destEnvKey,
               recorded.key,
-              { ...segment, name: recorded.name },
+              prevSegment,
             );
+            if (checked.edit !== "none") {
+              incrementalSegmentSkipCount++;
+              keepProtectedSegment(
+                env.key,
+                segment.key,
+                prevSegment,
+                checked.edit,
+              );
+              continue;
+            }
+            const tagNote = checked.copy
+              ? await syncExistingSegmentMetadata(
+                destEnvKey,
+                recorded.key,
+                { ...segment, name: recorded.name },
+                checked.copy,
+              )
+              : "";
             console.log(
               Colors.gray(
                 `    ✓ ${segment.key}: unchanged (v${segment.version})${tagNote}, skipping`,
@@ -1965,7 +2209,7 @@ if (inputArgs.migrateSegments) {
             if (!updatedManifestSegments[env.key]) {
               updatedManifestSegments[env.key] = emptyRecord();
             }
-            updatedManifestSegments[env.key][segment.key] = prevSegment;
+            updatedManifestSegments[env.key][segment.key] = { ...prevSegment };
             continue;
           }
         }
@@ -1982,6 +2226,32 @@ if (inputArgs.migrateSegments) {
         let attemptCount = 0;
         let segmentCreated = false;
         let segmentAlreadyExisted = false;
+
+        // This migration's recorded copy is checked for destination edits before anything is written: an
+        // edited copy is left as it is, a deleted one is not recreated
+        const prevSegmentEntry = ownEntry(
+          ownEntry(previousManifest?.segments, env.key),
+          segment.key,
+        );
+        if (prevSegmentEntry && recordedSegment.recorded) {
+          const checked = await checkRecordedSegment(
+            env.key,
+            segment,
+            destEnvKey,
+            segmentKey,
+            prevSegmentEntry,
+          );
+          if (checked.copy === undefined) continue;
+          if (checked.edit !== "none") {
+            keepProtectedSegment(
+              env.key,
+              segment.key,
+              prevSegmentEntry,
+              checked.edit,
+            );
+            continue;
+          }
+        }
 
         while (!segmentCreated && attemptCount < 2) {
           attemptCount++;
@@ -2012,6 +2282,7 @@ if (inputArgs.migrateSegments) {
           );
 
           let segmentStatus = segmentResp.status;
+          noteSegmentWrite(destEnvKey, segmentKey, segmentStatus);
           if (inputArgs.dryRun && segmentStatus === 201) {
             // The simulated POST always succeeds; look the segment up so conflict handling and the tag patch are previewed
             const probe = await rateLimitRequest(
@@ -2280,6 +2551,7 @@ if (inputArgs.migrateSegments) {
             `environment: ${destEnvKey}`, // Pass environment context for better dry-run logging
           );
 
+          noteSegmentWrite(destEnvKey, segmentKey, patchRules.status);
           const segPatchStatus = patchRules.statusText;
           consoleLogger(
             patchRules.status,
@@ -2318,6 +2590,7 @@ if (inputArgs.migrateSegments) {
                 "segments",
                 `environment: ${destEnvKey}`,
               );
+              noteSegmentWrite(destEnvKey, segmentKey, appendResp.status);
               consoleLogger(
                 appendResp.status,
                 `    Appending ${segmentKey} targets (${batch.label}): ${appendResp.statusText}`,
@@ -2349,6 +2622,8 @@ if (inputArgs.migrateSegments) {
               lastModified: segment.lastModifiedDate,
               ...(segmentKey !== segment.key && { destKey: segmentKey }),
               destEnv: destEnvKey,
+              // Replaced by the copy's state after this run's writes (recordDestinationState)
+              ...(prevSegmentEntry?.dest && { dest: prevSegmentEntry.dest }),
             },
             ownEntry(
               ownEntry(previousManifest?.segments, env.key),
@@ -3008,6 +3283,7 @@ const makePatchCall = async (
   );
 
   const flagPatchStatus = patchFlagReq.status;
+  noteFlagWrite(flagKey, flagPatchStatus);
 
   if (flagPatchStatus === 404 && retryCount < 2) {
     // Environment not ready yet, wait and retry
@@ -3111,9 +3387,6 @@ const makePatchCall = async (
 
 console.log(Colors.blue("\n🚩 Starting flag migration..."));
 // flagsWithErrors and flagsSkippedByDate are declared with the shared tracking state above the segment phase
-const approvalRequestsCreated: Array<
-  { flag: string; env: string; skippedFields: string[] }
-> = [];
 const skippedFieldsByFlag: Map<string, Set<string>> = new Map();
 
 let sinceDate: Date | null = null;
@@ -3233,12 +3506,36 @@ async function processOneFlag(
             `flags/${inputArgs.projKeyDest}/${destKey}`,
           );
           const destResp = await rateLimitRequest(destReq, "flags");
-          if (destResp.status !== 200) {
+          if (destResp.status === 404) {
+            // The recorded copy was deleted in the destination: not recreated
+            const edits = detectFlagEdits(prevEntry, undefined, []);
+            flagEditsByKey.set(flag.key, edits);
+            reportFlagEdits(flag, destKey, edits, prevEntry);
+            flagsDeletedInTarget.add(destKey);
+          } else if (destResp.status !== 200) {
             reconcileFailed(
               `could not read destination flag (HTTP ${destResp.status})`,
             );
           } else {
             const destFlag = await destResp.json();
+            const observed = await observeFlag(
+              destFlag,
+              envkeys.map(destEnvFor),
+            );
+            observedDestFlags.set(flag.key, observed);
+            const edits = detectFlagEdits(
+              prevEntry,
+              observed,
+              envkeys.map(destEnvFor),
+              targetEditFallbackSince,
+            );
+            flagEditsByKey.set(flag.key, edits);
+            const flagLevelProtected = reportFlagEdits(
+              flag,
+              destKey,
+              edits,
+              prevEntry,
+            );
             const changed = (a: any, b: any) =>
               JSON.stringify(a) !== JSON.stringify(b);
             const lifecyclePatches: any[] = [];
@@ -3271,7 +3568,23 @@ async function processOneFlag(
                 );
               }
             }
-            if (lifecyclePatches.length > 0) {
+            if (lifecyclePatches.length > 0 && flagLevelProtected) {
+              // The source changed lifecycle or tags without a version bump while the copy was edited: a conflict
+              const flagItem = protectedResources.find((p) =>
+                p.kind === "flag" && p.key === flag.key &&
+                p.scope !== "environment"
+              );
+              if (flagItem) flagItem.sourceChanged = true;
+              else {
+                protectedResources.push({
+                  kind: "flag",
+                  key: flag.key,
+                  destKey,
+                  scope: "flag",
+                  sourceChanged: true,
+                });
+              }
+            } else if (lifecyclePatches.length > 0) {
               const patchResp = await dryRunAwarePatch(
                 inputArgs.dryRun || false,
                 apiKey,
@@ -3282,6 +3595,7 @@ async function processOneFlag(
                 "flags",
                 "lifecycle (archived/deprecated) and tags",
               );
+              noteFlagWrite(destKey, patchResp.status);
               if (patchResp.status >= 200 && patchResp.status < 300) {
                 console.log(
                   Colors.gray(
@@ -3320,8 +3634,16 @@ async function processOneFlag(
             }, skipping`,
           ),
         );
-        // Carry forward the previous manifest entry unchanged
-        updatedManifestFlags[flag.key] = prevEntry;
+        // Carry forward the previous manifest entry (protection fields are updated by recordDestinationState)
+        updatedManifestFlags[flag.key] = {
+          ...prevEntry,
+          ...nextFlagTargetRecord(
+            prevEntry,
+            flagEditsByKey.get(flag.key) ?? NO_FLAG_EDITS,
+            undefined,
+            prevEntry.awaitingApproval,
+          ),
+        };
         incrementalSkipCountDelta++;
         return { incrementalSkipCountDelta, incrementalEnvSkipCountDelta };
       }
@@ -3443,6 +3765,18 @@ async function processOneFlag(
           Colors.gray(`\t⚠ Flag already exists, will update environments...`),
         );
       }
+    } else if (checkFlagResp.status === 404 && recorded.recorded) {
+      // This migration's recorded copy was deleted in the destination: not recreated
+      const prevEntry = ownEntry(previousManifest?.flags, flag.key)!;
+      const edits = detectFlagEdits(prevEntry, undefined, []);
+      flagEditsByKey.set(flag.key, edits);
+      reportFlagEdits(flag, flagKey, edits, prevEntry);
+      flagsDeletedInTarget.add(flagKey);
+      updatedManifestFlags[flag.key] = {
+        ...prevEntry,
+        ...nextFlagTargetRecord(prevEntry, edits, undefined),
+      };
+      return { incrementalSkipCountDelta, incrementalEnvSkipCountDelta };
     } else if (checkFlagResp.status === 404) {
       // Flag doesn't exist, we'll create it
       flagAlreadyExisted = false;
@@ -3536,6 +3870,7 @@ async function processOneFlag(
         "flags",
       );
 
+      noteFlagWrite(flagKey, flagResp.status);
       if (flagResp.status == 200 || flagResp.status == 201) {
         flagCreated = true;
         createdFlagKey = flagKey;
@@ -3637,6 +3972,41 @@ async function processOneFlag(
       );
     }
 
+    // This migration's own earlier copy: anything edited in the destination since is left as it is
+    const prevFlagEntry = ownEntry(previousManifest?.flags, flag.key);
+    let edits: FlagTargetEdits = NO_FLAG_EDITS;
+    if (flagAlreadyExisted && recorded.recorded && prevFlagEntry) {
+      if (!destinationFlag) {
+        console.log(Colors.red(
+          `\t✗ Could not read the destination copy; not written, since destination edits could not be checked`,
+        ));
+        flagsWithErrors.add(flag.key);
+        flagErrorDetails.set(
+          flag.key,
+          "destination copy could not be read to check for destination edits",
+        );
+        return { incrementalSkipCountDelta, incrementalEnvSkipCountDelta };
+      }
+      const observed = await observeFlag(
+        destinationFlag,
+        envkeys.map(destEnvFor),
+      );
+      observedDestFlags.set(flag.key, observed);
+      edits = detectFlagEdits(
+        prevFlagEntry,
+        observed,
+        envkeys.map(destEnvFor),
+        targetEditFallbackSince,
+      );
+      reportFlagEdits(flag, createdFlagKey, edits, prevFlagEntry);
+    } else if (destinationFlag) {
+      observedDestFlags.set(
+        flag.key,
+        await observeFlag(destinationFlag, envkeys.map(destEnvFor)),
+      );
+    }
+    flagEditsByKey.set(flag.key, edits);
+
     // Update flag-level properties when the flag already existed, or when it was just created
     // from a source that is archived or deprecated: the create endpoint ignores those fields, so
     // without this patch an archived source flag would go live in the destination (and be served).
@@ -3659,7 +4029,7 @@ async function processOneFlag(
       );
     }
     if (
-      destinationFlag &&
+      destinationFlag && !protectsFlagLevel(edits) &&
       (flagAlreadyExisted || flag.archived || flag.deprecated)
     ) {
       const flagLevelPatches: any[] = [];
@@ -3768,6 +4138,7 @@ async function processOneFlag(
           "flags",
           "flag-level properties",
         );
+        noteFlagWrite(createdFlagKey, flagLevelResp.status);
         if (flagLevelResp.status >= 200 && flagLevelResp.status < 300) {
           console.log(Colors.green(`\t✓ Flag-level properties updated`));
         } else {
@@ -3818,6 +4189,14 @@ async function processOneFlag(
           incrementalEnvSkipCountDelta++;
           continue;
         }
+      }
+
+      // Edited in the destination after the migration: its targeting is left as it is. The previous
+      // source version is kept, so the next run checks it again.
+      if (edits.environments.includes(destEnvKey)) {
+        const prevEnv = prevFlagEntry?.environments?.[env];
+        if (prevEnv) flagManifestEnvs[env] = prevEnv;
+        continue;
       }
 
       const patchReq: any[] = [];
@@ -3904,12 +4283,19 @@ async function processOneFlag(
   // A flag whose create failed gets no new entry; carryForwardManifestEntries keeps its previous one with
   // cleared versions, so the next --incremental run retries it.
   if (flagCreated) {
+    const prevForRecord = ownEntry(previousManifest?.flags, flag.key);
     updatedManifestFlags[flag.key] = withExtraDestKeys(
       {
         version: flag._version ?? 0,
         lastModified: flag.creationDate,
         environments: flagManifestEnvs,
         ...(createdFlagKey !== flag.key && { destKey: createdFlagKey }),
+        // Updated from the copy's state after this run's writes (recordDestinationState)
+        ...nextFlagTargetRecord(
+          prevForRecord,
+          flagEditsByKey.get(flag.key) ?? NO_FLAG_EDITS,
+          undefined,
+        ),
       },
       ownEntry(previousManifest?.flags, flag.key),
       flag.key,
@@ -4026,8 +4412,7 @@ try {
 // Destination copies of recorded flags whose source flag is archived and that exist in the destination:
 // expected by reconciliation (archived or not), so they are not reported as extra
 const archivedSourceDestKeys: string[] = [];
-// Destination copies archived this run, or found archived already; a failed patch is in flagsWithErrors instead
-const flagsArchivedInSource: string[] = [];
+// (flagsArchivedInSource is declared with the shared tracking state: the run record reads it on an abort)
 // Destination copies of recorded flags deleted in the source, kept in the destination
 const flagsDeletedInSource: string[] = [];
 // Destination copies of recorded flags archived in the source, left as they are (propagateArchived: false)
@@ -4081,6 +4466,33 @@ async function handleArchivedSourceCopy(
     }
     archivedSourceDestKeys.push(destKey);
     const destFlag = await destResp.json();
+    // A copy edited in the destination after the migration is not archived either (only the primary
+    // copy carries the recorded state)
+    const entry = ownEntry(updatedManifestFlags, key);
+    if (entry && destKey === (entry.destKey ?? key)) {
+      const observed = await observeFlag(destFlag, envkeys.map(destEnvFor));
+      observedDestFlags.set(key, observed);
+      const edits = detectFlagEdits(
+        entry,
+        observed,
+        envkeys.map(destEnvFor),
+        targetEditFallbackSince,
+      );
+      flagEditsByKey.set(key, edits);
+      if (
+        propagateArchived && destFlag.archived !== true &&
+        protectsFlagLevel(edits)
+      ) {
+        reportFlagEdits({ key }, destKey, edits, entry);
+        for (const p of protectedResources) {
+          if (p.kind === "flag" && p.key === key) p.sourceChanged = true;
+        }
+        console.log(Colors.yellow(
+          `\t🛡 ${destKey}${copy}: archived in the source, but edited in the destination; not archived`,
+        ));
+        return;
+      }
+    }
     if (!propagateArchived) {
       flagsArchivedNotPropagated.push(`${destKey}${copy}`);
       console.log(
@@ -4111,6 +4523,7 @@ async function handleArchivedSourceCopy(
       "flags",
       "archived in the source",
     );
+    noteFlagWrite(destKey, patchResp.status);
     if (patchResp.status >= 200 && patchResp.status < 300) {
       flagsArchivedInSource.push(destKey);
       console.log(
@@ -4273,6 +4686,8 @@ try {
   );
   reconciliationErrors.push(`archived in source: ${msg}`);
 }
+// The state each copy was left in, compared by the next run to find destination edits
+await recordDestinationState();
 // Persisted before view linking, so a failure there cannot lose the inventory of what was written
 await writeSyncManifestFile();
 
@@ -4376,6 +4791,166 @@ if (usableViews.size > 0) {
         }`,
       ),
     );
+  }
+}
+
+/**
+ * Records, on every entry this run looked at, the destination state the next run compares against: the
+ * copy read back after this run's writes, else as observed before them. A copy that was written but
+ * could not be read back loses its record, so the next run falls back to this run's end time instead
+ * of mistaking this run's own writes for a destination edit. Skipped on dry runs (no manifest).
+ */
+async function recordDestinationState(): Promise<void> {
+  if (inputArgs.dryRun) return;
+  const destEnvs = envkeys.map(destEnvFor);
+  const readBack = async (path: string): Promise<any | undefined> => {
+    try {
+      const resp = await rateLimitRequest(
+        ldAPIRequest(apiKey, domain, path),
+        path.startsWith("flags/") ? "flags" : "segments",
+      );
+      return resp.status === 200 ? await resp.json() : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const approvalsByFlag = new Map<string, string[]>();
+  for (const { flag, env } of approvalRequestsCreated) {
+    approvalsByFlag.set(flag, [...(approvalsByFlag.get(flag) ?? []), env]);
+  }
+
+  const flagJobs = Object.entries(updatedManifestFlags).filter(([key, entry]) =>
+    observedDestFlags.has(key) || flagEditsByKey.has(key) ||
+    destFlagsWritten.has(entry.destKey ?? key)
+  );
+  // CONCURRENCY is declared with the flag phase, after the segment phase this may run from
+  const concurrency = Math.max(1, inputArgs.concurrency ?? 10);
+  for (let i = 0; i < flagJobs.length; i += concurrency) {
+    await Promise.all(
+      flagJobs.slice(i, i + concurrency).map(async ([key, entry]) => {
+        const destKey = entry.destKey ?? key;
+        const edits = flagEditsByKey.get(key) ?? NO_FLAG_EDITS;
+        let observed = observedDestFlags.get(key);
+        let base: SyncManifestFlag = entry;
+        if (destFlagsWritten.has(destKey)) {
+          const copy = await readBack(
+            `flags/${inputArgs.projKeyDest}/${destKey}`,
+          );
+          observed = copy ? await observeFlag(copy, destEnvs) : undefined;
+          if (!copy) base = { ...entry, dest: undefined };
+        }
+        const record = nextFlagTargetRecord(
+          base,
+          edits,
+          observed,
+          approvalsByFlag.get(destKey) ?? [],
+        );
+        delete entry.dest;
+        delete entry.targetOwned;
+        delete entry.awaitingApproval;
+        Object.assign(entry, record);
+      }),
+    );
+  }
+
+  for (const [sourceEnv, segments] of Object.entries(updatedManifestSegments)) {
+    for (const [key, entry] of Object.entries(segments)) {
+      const id = `${sourceEnv}/${key}`;
+      const destEnv = entry.destEnv ?? destEnvFor(sourceEnv);
+      const destKey = entry.destKey ?? key;
+      const written = destSegmentsWritten.has(`${destEnv}/${destKey}`);
+      if (
+        !written && !observedDestSegments.has(id) && !segmentEditsById.has(id)
+      ) {
+        continue;
+      }
+      let observed = observedDestSegments.get(id);
+      let base: SyncManifestSegment = entry;
+      if (written) {
+        const copy = await readBack(
+          `segments/${inputArgs.projKeyDest}/${destEnv}/${destKey}`,
+        );
+        observed = copy ? await observeSegment(copy) : undefined;
+        if (!copy) base = { ...entry, dest: undefined };
+      }
+      const record = nextSegmentTargetRecord(
+        base,
+        segmentEditsById.get(id) ?? "none",
+        observed,
+      );
+      delete entry.dest;
+      delete entry.targetOwned;
+      Object.assign(entry, record);
+    }
+  }
+}
+
+/** Writes this run's record (see run_record.ts); a failure is reported but does not change the exit code. */
+async function writeRunRecordFile(
+  exitCode: number,
+  incomplete?: string,
+): Promise<void> {
+  const envMap: Record<string, string> = {};
+  for (const env of envkeys) envMap[env] = destEnvFor(env);
+  const split = (list?: string) =>
+    list ? list.split(",").map((k) => k.trim()).filter(Boolean) : undefined;
+  const conflicts = protectedResources.filter((p) => p.sourceChanged);
+  const record: RunRecord = {
+    schemaVersion: RUN_RECORD_SCHEMA_VERSION,
+    startedAt: runStartedAt,
+    finishedAt: new Date().toISOString(),
+    toolVersion: denoConfig.version,
+    configFile: inputArgs.config ?? null,
+    mode: runMode(inputArgs),
+    dryRun: Boolean(inputArgs.dryRun),
+    ...(incomplete ? { incomplete } : {}),
+    source: { projectKey: inputArgs.projKeySource },
+    destination: { projectKey: inputArgs.projKeyDest, domain },
+    envMap,
+    filters: {
+      includeFlags: split(inputArgs.includeFlags),
+      excludeFlags: split(inputArgs.excludeFlags),
+      since: inputArgs.since,
+      migrateSegments: Boolean(inputArgs.migrateSegments),
+    },
+    counts: {
+      flagsInScope: flagList.length,
+      flagsSkippedUnchanged: incrementalSkipCount,
+      environmentsSkippedUnchanged: incrementalEnvSkipCount,
+      segmentsSkippedUnchanged: incrementalSegmentSkipCount,
+      flagsArchivedInSource: flagsArchivedInSource.length,
+      protected: protectedResources.length,
+      conflicts: conflicts.length,
+      flagErrors: flagsWithErrors.size,
+      segmentErrors: segmentsWithErrors.size,
+      approvalRequests: approvalRequestsCreated.length,
+    },
+    protected: protectedResources,
+    conflicts,
+    errors: {
+      flags: [...flagsWithErrors].map((key) => ({
+        key,
+        ...(flagErrorDetails.has(key)
+          ? { detail: flagErrorDetails.get(key) }
+          : {}),
+      })),
+      segments: [...segmentsWithErrors],
+      reconciliation: reconciliationErrors,
+    },
+    reconciliation: reconciliationResult,
+    exitCode,
+    manifestPath: syncManifestPath,
+    manifestWritten: !inputArgs.dryRun && !manifestWriteFailed,
+  };
+  try {
+    const path = await writeRunRecord(record);
+    console.log(Colors.gray(`Run record written to ${path}`));
+  } catch (error) {
+    console.log(Colors.yellow(
+      `⚠ Could not write the run record: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    ));
   }
 }
 
@@ -4521,6 +5096,7 @@ async function writeSyncManifestFile(
     : markerAfterRun(previousManifest, run, entries, new Date().toISOString());
   const manifest: SyncManifest = {
     lastSyncTimestamp: new Date().toISOString(),
+    lastRunStartedAt: runStartedAt,
     sourceProject: inputArgs.projKeySource,
     destProject: inputArgs.projKeyDest,
     ...stampIdentity(previousManifest, destIdentity),
@@ -4737,6 +5313,38 @@ const printSourceLifecycleSection = (): void => {
 };
 
 /**
+ * Prints the destination copies left alone because they were edited or deleted there after the
+ * migration wrote them. Conflicts (the source changed too) need a decision in the destination.
+ */
+const printProtectedSection = (): void => {
+  if (protectedResources.length === 0) return;
+  const describe = (p: ProtectedResource) =>
+    `${p.kind} ${p.destKey}${p.destKey !== p.key ? ` (source ${p.key})` : ""}${
+      p.scope === "deleted"
+        ? ": deleted"
+        : p.scope === "flag"
+        ? ": flag-level fields"
+        : `: ${p.env}`
+    }`;
+  const conflicts = protectedResources.filter((p) => p.sourceChanged);
+  const unchanged = protectedResources.filter((p) => !p.sourceChanged);
+  console.log(Colors.cyan("\n🛡  DESTINATION EDITS LEFT AS THEY ARE"));
+  console.log(Colors.gray(
+    "  Edited or deleted in the destination after the migration wrote them; never overwritten by a rerun.",
+  ));
+  if (conflicts.length > 0) {
+    console.log(Colors.yellow(
+      `\n  Changed in the source too (${conflicts.length}); the source change was not applied, resolve in the destination if needed:`,
+    ));
+    conflicts.forEach((p) => console.log(Colors.yellow(`    ${describe(p)}`)));
+  }
+  if (unchanged.length > 0) {
+    console.log(Colors.gray(`\n  Source unchanged (${unchanged.length}):`));
+    unchanged.forEach((p) => console.log(Colors.gray(`    ${describe(p)}`)));
+  }
+};
+
+/**
  * Prints flags with errors section
  */
 const printErrorsSection = (flagsWithErrors: Set<string>): void => {
@@ -4819,6 +5427,7 @@ const printMigrationSummary = (
   printApprovalRequestsSection(approvals);
   printNonMigratedSettingsSection(skippedFields);
   printSourceLifecycleSection();
+  printProtectedSection();
   printErrorsSection(flagsWithErrors);
   printSegmentErrorsSection(segmentsWithErrors);
   if (reconciliationErrors.length > 0) {
@@ -4890,6 +5499,7 @@ async function listDestinationKeys(path: string): Promise<Set<string>> {
 
 async function reconcileDestination(): Promise<void> {
   if (inputArgs.dryRun) return;
+  reconciliationResult = { flags: null, segments: [] };
   console.log(Colors.blue("\n🔎 RECONCILIATION (source data vs destination)"));
   const resolved = new Map(
     conflictTracker.getResolutions().filter((r) => r.resourceType === "flag")
@@ -4907,6 +5517,8 @@ async function reconcileDestination(): Promise<void> {
     // Recorded copies whose source flag is archived stay in the destination (archived, or listed as an error)
     ...archivedSourceDestKeys,
   ]);
+  // Copies deleted in the destination after the migration are left deleted
+  for (const k of flagsDeletedInTarget) expectedFlags.delete(k);
   try {
     const dest = await listDestinationKeys(
       `flags/${inputArgs.projKeyDest}?summary=true&limit=50&offset=0`,
@@ -4917,6 +5529,12 @@ async function reconcileDestination(): Promise<void> {
     for (const k of destArchived) dest.add(k);
     const missing = [...expectedFlags].filter((k) => !dest.has(k));
     const extra = [...dest].filter((k) => !expectedFlags.has(k));
+    reconciliationResult.flags = {
+      expected: expectedFlags.size,
+      destination: dest.size,
+      missing,
+      extra,
+    };
     console.log(
       `  flags: source ${expectedFlags.size} → destination ${dest.size} (missing ${missing.length}, extra ${extra.length})`,
     );
@@ -4963,7 +5581,16 @@ async function reconcileDestination(): Promise<void> {
       );
       const expectedKey = (k: string) =>
         ownEntry(ownEntry(updatedManifestSegments, env), k)?.destKey ?? k;
-      const missing = sourceKeys.map(expectedKey).filter((k) => !dest.has(k));
+      const missing = sourceKeys.map(expectedKey).filter((k) =>
+        !dest.has(k) && !segmentsDeletedInTarget.has(`${destEnvKey}/${k}`)
+      );
+      reconciliationResult.segments.push({
+        sourceEnv: env,
+        destEnv: destEnvKey,
+        expected: sourceKeys.length,
+        destination: dest.size,
+        missing,
+      });
       console.log(
         `  segments ${env} → ${destEnvKey}: source ${sourceKeys.length} → destination ${dest.size} (missing ${missing.length})`,
       );
@@ -4993,9 +5620,9 @@ printMigrationSummary(
   conflictTracker.getReport(),
 );
 
-if (
-  flagsWithErrors.size > 0 || segmentsWithErrors.size > 0 ||
-  reconciliationErrors.length > 0 || viewLinkingFailed || manifestWriteFailed
-) {
-  Deno.exit(1);
-}
+const exitCode = flagsWithErrors.size > 0 || segmentsWithErrors.size > 0 ||
+    reconciliationErrors.length > 0 || viewLinkingFailed || manifestWriteFailed
+  ? 1
+  : 0;
+await writeRunRecordFile(exitCode);
+if (exitCode !== 0) Deno.exit(1);

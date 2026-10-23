@@ -15,7 +15,13 @@
  * left resources without an entry, writes the manifest marked `incomplete`; revert refuses such a
  * manifest until a later run clears the marker (see markerAfterRun and adoptUnresolved). A dry run
  * never writes a manifest.
+ *
+ * Every entry also records the state the run left its destination copy in (`dest`), and what was
+ * edited in the destination since (`targetOwned`), so reruns never overwrite destination edits; see
+ * target_guard.ts.
  */
+
+import type { FlagTargetRecord, SegmentTargetRecord } from "./target_guard.ts";
 
 export const MIGRATION_DATA_DIR = "./data/launchdarkly-migrations";
 
@@ -24,7 +30,8 @@ export interface SyncManifestEnv {
   lastModified?: string;
 }
 
-export interface SyncManifestFlag {
+/** dest, targetOwned and awaitingApproval protect destination edits; see target_guard.ts */
+export interface SyncManifestFlag extends FlagTargetRecord {
   version: number;
   lastModified?: string;
   environments: Record<string, SyncManifestEnv>;
@@ -34,7 +41,8 @@ export interface SyncManifestFlag {
   extraDestKeys?: string[];
 }
 
-export interface SyncManifestSegment {
+/** dest and targetOwned protect destination edits; see target_guard.ts */
+export interface SyncManifestSegment extends SegmentTargetRecord {
   version: number;
   lastModified?: number;
   /** Destination key in this environment, if it differs from the source key (e.g. conflict prefix) */
@@ -46,7 +54,10 @@ export interface SyncManifestSegment {
 }
 
 export interface SyncManifest {
+  /** When the writing run finished */
   lastSyncTimestamp: string;
+  /** When the writing run started; absent in manifests from older versions */
+  lastRunStartedAt?: string;
   sourceProject: string;
   destProject: string;
   /** Destination domain the manifest was written for; absent in manifests from older versions */
