@@ -1,6 +1,9 @@
 // deno-lint-ignore-file require-await
 // The mock HTTP client methods are async to satisfy the AgentControlHttpClient interface.
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import {
+  assert,
+  assertEquals,
+} from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   AGENT_CONTROL_MIGRATE_ORDER,
   agentControlExtractCliArgs,
@@ -14,7 +17,7 @@ import {
   configsPath,
   emptyAgentControlSummary,
   isAgentControlUnavailable,
-  isCriticalTargetingWarning,
+  mergeFlagRulesIntoTargeting,
   migrateAgentControlFromExtract,
   modelConfigsPath,
   recordOutcome,
@@ -22,6 +25,7 @@ import {
   sanitizeAgentControlPayload,
   sanitizeVariationPayload,
   shouldExtractAgentControl,
+  targetingHasRules,
   targetingPath,
   upsertAgentControlResource,
   variationPath,
@@ -125,7 +129,7 @@ Deno.test("buildTargetingInstructionsForEnvironment remaps variation indexes", (
     ["disabled", "dest-off"],
     ["on", "dest-on"],
   ]);
-  const { instructions, warnings } = buildTargetingInstructionsForEnvironment(
+  const { instructions, issues } = buildTargetingInstructionsForEnvironment(
     {
       rules: [{
         description: "rule",
@@ -145,7 +149,7 @@ Deno.test("buildTargetingInstructionsForEnvironment remaps variation indexes", (
     sourceVariations,
     destIds,
   );
-  assertEquals(warnings, []);
+  assertEquals(issues, []);
   assertEquals(instructions[0], {
     kind: "replaceRules",
     rules: [{
@@ -177,17 +181,289 @@ Deno.test("buildTargetingInstructionsForEnvironment remaps variation indexes", (
   });
 });
 
-Deno.test("critical targeting warnings detected", () => {
-  assertEquals(
-    isCriticalTargetingWarning("Could not map fallthrough variation"),
-    true,
+// Source variations: 0 disabled, 1 "on", 2 "gone" (has no destination copy)
+const partialRefs = [
+  { key: "disabled", _id: "src-off" },
+  { key: "on", _id: "src-on" },
+  { key: "gone", _id: "src-gone" },
+];
+const partialDestIds = new Map([["disabled", "dest-off"], ["on", "dest-on"]]);
+
+Deno.test("targeting keeps the default rule and mappable rules when one rule's variation is missing", () => {
+  const { instructions, issues } = buildTargetingInstructionsForEnvironment(
+    {
+      rules: [
+        { description: "keep", variation: 1, clauses: [] },
+        { description: "lost", variation: 2, clauses: [] },
+      ],
+      fallthrough: { variation: 1 },
+      offVariation: 0,
+    },
+    partialRefs,
+    partialDestIds,
   );
-  assertEquals(isCriticalTargetingWarning("Could not map off variation"), true);
+  const kinds = instructions.map((i) => i.kind);
+  assertEquals(kinds, [
+    "replaceRules",
+    "replaceTargets",
+    "updateFallthroughVariationOrRollout",
+    "updateOffVariation",
+  ]);
   assertEquals(
-    isCriticalTargetingWarning("Skipping target with unmapped variation"),
-    true,
+    (instructions[0].rules as Array<Record<string, unknown>>).map((r) =>
+      r.description
+    ),
+    ["keep"],
   );
-  assertEquals(isCriticalTargetingWarning("something else"), false);
+  assertEquals(issues.length, 1);
+  assertEquals(issues[0].severity, "error");
+  assertEquals(issues[0].part, "rule");
+  assertEquals(issues[0].variationKey, "gone");
+  assert(issues[0].message.includes('Rule 2 ("lost")'));
+});
+
+Deno.test("targeting reports a default rule or off variation it cannot map, and still applies the rest", () => {
+  const { instructions, issues } = buildTargetingInstructionsForEnvironment(
+    {
+      rules: [{ variation: 1, clauses: [] }],
+      targets: [{ variation: 2, values: ["u1", "u2"] }],
+      fallthrough: { variation: 2 },
+      offVariation: 2,
+    },
+    partialRefs,
+    partialDestIds,
+  );
+  assertEquals(instructions.map((i) => i.kind), [
+    "replaceRules",
+    "replaceTargets",
+  ]);
+  assertEquals(
+    issues.map((i) => `${i.severity}:${i.part}:${i.variationKey}`),
+    [
+      "error:target:gone",
+      "error:fallthrough:gone",
+      "error:offVariation:gone",
+    ],
+  );
+});
+
+Deno.test("targeting never sends a rollout with an unmapped weight, or a rule that serves nothing", () => {
+  const { instructions, issues } = buildTargetingInstructionsForEnvironment(
+    {
+      rules: [
+        {
+          rollout: {
+            variations: [
+              { variation: 1, weight: 60000 },
+              { variation: 2, weight: 40000 },
+            ],
+          },
+          clauses: [],
+        },
+        { clauses: [] },
+      ],
+      fallthrough: {
+        rollout: {
+          variations: [
+            { variation: 1, weight: 50000 },
+            { variation: 2, weight: 50000 },
+          ],
+        },
+      },
+    },
+    partialRefs,
+    partialDestIds,
+  );
+  assertEquals(instructions[0], { kind: "replaceRules", rules: [] });
+  assertEquals(
+    instructions.some((i) => i.kind === "updateFallthroughVariationOrRollout"),
+    false,
+  );
+  assertEquals(issues.map((i) => i.part), ["rule", "rule", "fallthrough"]);
+  assert(issues.every((i) => i.severity === "error"));
+  assert(issues[1].message.includes("neither a variation nor a rollout"));
+});
+
+Deno.test("targeting maps full rollouts, event tracking and on/off, and warns about per-rule event tracking", () => {
+  const { instructions, issues } = buildTargetingInstructionsForEnvironment(
+    {
+      enabled: false,
+      trackEvents: true,
+      trackEventsFallthrough: false,
+      rules: [{
+        variation: 1,
+        trackEvents: true,
+        clauses: [],
+      }],
+      fallthrough: {
+        rollout: {
+          bucketBy: "key",
+          variations: [
+            { variation: 0, weight: 25000 },
+            { variation: 1, weight: 75000 },
+          ],
+        },
+      },
+    },
+    partialRefs,
+    partialDestIds,
+  );
+  assertEquals(
+    instructions.find((i) => i.kind === "updateFallthroughVariationOrRollout"),
+    {
+      kind: "updateFallthroughVariationOrRollout",
+      rolloutWeights: { "dest-off": 25000, "dest-on": 75000 },
+      rolloutBucketBy: "key",
+    },
+  );
+  assertEquals(
+    instructions.find((i) => i.kind === "updateTrackEvents"),
+    { kind: "updateTrackEvents", trackEvents: true },
+  );
+  assertEquals(
+    instructions.find((i) => i.kind === "updateTrackEventsFallthrough"),
+    { kind: "updateTrackEventsFallthrough", trackEvents: false },
+  );
+  assertEquals(instructions.at(-1), { kind: "disableTargeting" });
+  assertEquals(
+    issues.map((i) => `${i.severity}:${i.part}`),
+    ["warning:trackEvents"],
+  );
+});
+
+// Agent-mode targeting variations carry their metadata as the value itself (shape seen on staging)
+const agentTargetingVariations = [
+  {
+    _id: "dbe46fa9",
+    name: "disabled",
+    value: { enabled: false },
+  },
+  {
+    _id: "c2c58a26",
+    name: "Friendly Support Bot",
+    value: {
+      enabled: true,
+      mode: "agent",
+      modelKey: "Anthropic.claude-haiku-4-5-20251001",
+      variationKey: "friendly-support-bot",
+    },
+  },
+];
+
+Deno.test("resolveVariationKey reads agent-mode targeting values, which have no _ldMeta wrapper", () => {
+  assertEquals(
+    agentTargetingVariations.map((v) => resolveVariationKey(v)),
+    ["disabled", "friendly-support-bot"],
+  );
+  assertEquals(
+    [...collectReferencedModelConfigKeys(agentTargetingVariations)],
+    ["Anthropic.claude-haiku-4-5-20251001"],
+  );
+});
+
+Deno.test("agent-mode targeting resolves keys from the value, not from config-detail IDs that change on edit", () => {
+  // The config detail reports the edited variation under a different (per-version) ID
+  const refs = buildSourceVariationRefsFromTargeting(agentTargetingVariations, [
+    { key: "friendly-support-bot", _id: "594d8670", name: "Renamed bot" },
+  ]);
+  assertEquals(refs, [
+    { key: "disabled", _id: "dbe46fa9" },
+    { key: "friendly-support-bot", _id: "c2c58a26" },
+  ]);
+});
+
+Deno.test("staging fixture: rules come from the backing flag and the whole environment maps", async () => {
+  const dir = new URL("./testdata/agent_control/", import.meta.url);
+  const targeting = JSON.parse(
+    await Deno.readTextFile(new URL("staging_targeting.json", dir)),
+  );
+  const flag = JSON.parse(
+    await Deno.readTextFile(new URL("staging_flag.json", dir)),
+  );
+  const env = targeting.environments.test;
+
+  // The targeting resource does not say what its rules serve
+  assertEquals(
+    env.rules.map((r: Record<string, unknown>) => Object.keys(r).sort()),
+    [["clauses", "trackEvents"], ["clauses", "trackEvents"]],
+  );
+  assert(targetingHasRules(targeting));
+  assertEquals(mergeFlagRulesIntoTargeting(targeting, flag), []);
+
+  const refs = buildSourceVariationRefsFromTargeting(targeting.variations);
+  assertEquals(refs.map((r) => r.key), ["disabled", "v-gemini", "v-claude"]);
+  const destIds = new Map(refs.map((r) => [r.key, `dest-${r.key}`]));
+  const { instructions, issues } = buildTargetingInstructionsForEnvironment(
+    env,
+    refs,
+    destIds,
+  );
+  assertEquals(issues, []);
+  const byKind = Object.fromEntries(instructions.map((i) => [i.kind, i]));
+  assertEquals(byKind.replaceRules.rules, [
+    {
+      clauses: [{
+        attribute: "country",
+        op: "in",
+        values: ["US"],
+        contextKind: "user",
+        negate: false,
+      }],
+      description: "claude rule",
+      variationId: "dest-v-claude",
+    },
+    {
+      clauses: [{
+        attribute: "plan",
+        op: "in",
+        values: ["pro"],
+        contextKind: "user",
+        negate: false,
+      }],
+      description: "rollout rule",
+      rolloutWeights: { "dest-v-gemini": 50000, "dest-v-claude": 50000 },
+      rolloutContextKind: "user",
+    },
+  ]);
+  // User targets are listed in both `targets` and `contextTargets`; sent once
+  assertEquals(byKind.replaceTargets.targets, [
+    { variationId: "dest-v-claude", values: ["alice"], contextKind: "user" },
+  ]);
+  assertEquals(byKind.updateFallthroughVariationOrRollout, {
+    kind: "updateFallthroughVariationOrRollout",
+    variationId: "dest-v-gemini",
+  });
+  assertEquals(byKind.updateOffVariation.variationId, "dest-v-claude");
+  assertEquals(byKind.updateTrackEvents.trackEvents, true);
+  assertEquals(instructions.at(-1), { kind: "enableTargeting" });
+
+  // Production was turned off on staging
+  const prod = buildTargetingInstructionsForEnvironment(
+    targeting.environments.production,
+    refs,
+    destIds,
+  );
+  assertEquals(prod.instructions.at(-1), { kind: "disableTargeting" });
+});
+
+Deno.test("flag rules that do not line up with the targeting rules are reported, not guessed", () => {
+  const targeting = {
+    environments: {
+      test: { rules: [{ clauses: [{ id: "c1" }], trackEvents: false }] },
+    },
+  };
+  const flag = {
+    variations: [{ _id: "v0" }],
+    environments: {
+      test: { rules: [{ variation: 0, clauses: [{ _id: "other" }] }] },
+    },
+  };
+  assertEquals(mergeFlagRulesIntoTargeting(targeting, flag), ["test"]);
+  assertEquals(
+    (targeting.environments.test.rules[0] as Record<string, unknown>)
+      .variation,
+    undefined,
+  );
 });
 
 Deno.test("collectReferencedModelConfigKeys reads modelKey from _ldMeta", () => {
@@ -204,8 +480,9 @@ Deno.test("collectReferencedModelConfigKeys reads modelKey from _ldMeta", () => 
 Deno.test("classifyUpsertStatus and unavailable helpers", () => {
   assertEquals(classifyUpsertStatus(201), "created");
   assertEquals(classifyUpsertStatus(409), "updated");
-  assertEquals(classifyUpsertStatus(403), "skipped");
-  assertEquals(classifyUpsertStatus(404), "skipped");
+  // A 403/404 on a write fails that write; it does not mean AgentControl is unavailable
+  assertEquals(classifyUpsertStatus(403), "error");
+  assertEquals(classifyUpsertStatus(404), "error");
   assertEquals(classifyUpsertStatus(500), "error");
   assertEquals(isAgentControlUnavailable(403), true);
   assertEquals(isAgentControlUnavailable(404), true);
@@ -221,12 +498,13 @@ Deno.test("recordOutcome increments summary counters", () => {
   assertEquals(summary, { created: 1, updated: 1, skipped: 1, errors: 1 });
 });
 
-Deno.test("AGENT_CONTROL_MIGRATE_ORDER is models → configs → variations → targeting", () => {
+Deno.test("AGENT_CONTROL_MIGRATE_ORDER is models → configs → variations → targeting → variation state", () => {
   assertEquals([...AGENT_CONTROL_MIGRATE_ORDER], [
     "model-configs",
     "configs",
     "variations",
     "targeting",
+    "variation-state",
   ]);
 });
 
@@ -297,7 +575,7 @@ Deno.test("upsertAgentControlResource updates on 409", async () => {
   ]);
 });
 
-Deno.test("upsertAgentControlResource skips immutable conflict after failed PATCH", async () => {
+Deno.test("upsertAgentControlResource leaves an immutable model config alone after a rejected PATCH", async () => {
   const client: AgentControlHttpClient = {
     async post() {
       return { status: 409 };
@@ -312,15 +590,43 @@ Deno.test("upsertAgentControlResource skips immutable conflict after failed PATC
     "projects/dest/ai-configs/model-configs/builtin",
     { key: "builtin", name: "Built-in" },
     false,
+    { immutableSkip: true },
   );
   assertEquals(outcome, "skipped");
 });
 
-Deno.test("upsertAgentControlResource skips on 403/404", async () => {
-  for (const status of [403, 404]) {
+Deno.test("upsertAgentControlResource reports a rejected PATCH of a config or variation as an error", async () => {
+  for (const status of [400, 405, 422]) {
+    const failures: Array<{ status: number; body?: string }> = [];
     const client: AgentControlHttpClient = {
       async post() {
-        return { status };
+        return { status: 409 };
+      },
+      async patch() {
+        return { status, body: `{"message":"model not found"}` };
+      },
+    };
+    const outcome = await upsertAgentControlResource(
+      client,
+      "projects/dest/ai-configs/cfg/variations",
+      "projects/dest/ai-configs/cfg/variations/v1",
+      { key: "v1" },
+      false,
+      { onFailure: (f) => failures.push(f) },
+    );
+    assertEquals(outcome, "error");
+    assertEquals(failures.length, 1);
+    assertEquals(failures[0].status, status);
+    assert(failures[0].body?.includes("model not found"));
+  }
+});
+
+Deno.test("upsertAgentControlResource reports a 403/404 on a write as an error, with its body", async () => {
+  for (const status of [403, 404]) {
+    const failures: string[] = [];
+    const client: AgentControlHttpClient = {
+      async post() {
+        return { status, body: "Unknown model config" };
       },
       async patch() {
         return { status: 200 };
@@ -332,8 +638,10 @@ Deno.test("upsertAgentControlResource skips on 403/404", async () => {
       "projects/dest/ai-configs/k",
       { key: "k" },
       false,
+      { onFailure: (f) => failures.push(`${f.action} ${f.status} ${f.body}`) },
     );
-    assertEquals(outcome, "skipped");
+    assertEquals(outcome, "error");
+    assertEquals(failures, [`POST ${status} Unknown model config`]);
   }
 });
 

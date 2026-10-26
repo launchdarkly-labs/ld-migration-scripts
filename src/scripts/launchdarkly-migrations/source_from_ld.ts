@@ -313,8 +313,10 @@ if (inputArgs.extractSegments && allEnvironments.length > 0) {
 }
 
 // AgentControl (AI Configs) Data //
+// Reads that failed leave the AgentControl extract incomplete; the export finishes, then exits with code 1
+let agentControlExtractFailures = 0;
 if (inputArgs.extractAgentControl) {
-  await extractAgentControlResources({
+  const agentControlExtract = await extractAgentControlResources({
     apiKey,
     domain,
     projectKey: inputArgs.projKey,
@@ -331,6 +333,7 @@ if (inputArgs.extractAgentControl) {
     },
     ensureDir: (path) => ensureDirSync(path),
   });
+  agentControlExtractFailures = agentControlExtract.failures.length;
 } else {
   console.log("\nSkipping AgentControl extraction (disabled in config)");
 }
@@ -474,3 +477,11 @@ await writeSourceData(projPath, "extraction", {
   environments: allEnvironments.map((e: any) => e.key),
   flagCount: flags.length,
 });
+
+if (agentControlExtractFailures > 0) {
+  console.log(
+    `\nAgentControl extract incomplete: ${agentControlExtractFailures} read(s) failed (listed above). ` +
+      "Migrating this extract would leave those resources out; fix the cause and extract again.",
+  );
+  Deno.exit(1);
+}

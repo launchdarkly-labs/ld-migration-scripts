@@ -1,0 +1,166 @@
+{
+  "key": "aic-probe-main",
+  "defaults": {
+    "offVariation": 0,
+    "onVariation": 0
+  },
+  "variations": [
+    {
+      "_id": "d8f729e0-2a70-4626-aa05-75d20e9482a2",
+      "name": "disabled",
+      "value": {
+        "_ldMeta": {
+          "enabled": false
+        }
+      }
+    },
+    {
+      "_id": "92fbe34e-6365-47d7-a77c-c154dea2caf7",
+      "name": "v-gemini",
+      "value": {
+        "_ldMeta": {
+          "enabled": true,
+          "mode": "completion",
+          "modelKey": "Gemini.gemini-2.5-flash",
+          "modelVersion": 1,
+          "variationKey": "v-gemini",
+          "version": 2,
+          "versionKey": "v-gemini"
+        },
+        "messages": [
+          {
+            "content": "edited",
+            "role": "system"
+          }
+        ],
+        "model": {
+          "name": "gemini-2.5-flash",
+          "parameters": {}
+        },
+        "provider": {
+          "name": "Gemini"
+        }
+      }
+    },
+    {
+      "_id": "a8c3c048-8af8-4f3d-8e2d-a5582e5a6b60",
+      "name": "v-claude",
+      "value": {
+        "_ldMeta": {
+          "enabled": true,
+          "mode": "completion",
+          "modelKey": "Anthropic.claude-haiku-4-5",
+          "modelVersion": 1,
+          "variationKey": "v-claude",
+          "version": 1,
+          "versionKey": "v-claude"
+        },
+        "messages": [
+          {
+            "content": "You are a probe.",
+            "role": "system"
+          }
+        ],
+        "model": {
+          "name": "claude-haiku-4-5",
+          "parameters": {}
+        },
+        "provider": {
+          "name": "Anthropic"
+        }
+      }
+    }
+  ],
+  "environments": {
+    "eu-prod": {
+      "_environmentName": "eu-prod",
+      "_version": 4,
+      "contextTargets": [],
+      "enabled": true,
+      "fallthrough": {
+        "variation": 1
+      },
+      "lastModified": 1793026015627,
+      "offVariation": 0,
+      "rules": [],
+      "targets": [],
+      "trackEvents": false,
+      "trackEventsFallthrough": false
+    },
+    "production": {
+      "_environmentName": "us-prod",
+      "_version": 6,
+      "contextTargets": [],
+      "enabled": false,
+      "fallthrough": {
+        "variation": 2
+      },
+      "lastModified": 1793026014655,
+      "offVariation": 0,
+      "rules": [],
+      "targets": [],
+      "trackEvents": false,
+      "trackEventsFallthrough": false
+    },
+    "test": {
+      "_environmentName": "Test",
+      "_version": 4,
+      "contextTargets": [
+        {
+          "contextKind": "user",
+          "values": [
+            "alice"
+          ],
+          "variation": 2
+        }
+      ],
+      "enabled": true,
+      "fallthrough": {
+        "variation": 1
+      },
+      "lastModified": 1793026016901,
+      "offVariation": 2,
+      "rules": [
+        {
+          "clauses": [
+            {
+              "attribute": "country",
+              "id": "73a353cd-65f8-4d65-a43a-4e004029e781",
+              "negate": false,
+              "op": "in",
+              "values": [
+                "US"
+              ]
+            }
+          ],
+          "trackEvents": false
+        },
+        {
+          "clauses": [
+            {
+              "attribute": "plan",
+              "id": "57235160-9407-49d1-a102-d0970992a707",
+              "negate": false,
+              "op": "in",
+              "values": [
+                "pro"
+              ]
+            }
+          ],
+          "trackEvents": false
+        }
+      ],
+      "targets": [
+        {
+          "contextKind": "user",
+          "values": [
+            "alice"
+          ],
+          "variation": 2
+        }
+      ],
+      "trackEvents": true,
+      "trackEventsFallthrough": false
+    }
+  }
+}

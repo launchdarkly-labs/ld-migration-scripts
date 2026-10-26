@@ -56,10 +56,16 @@ export interface SyncManifestAgentControlEntry {
   destKey?: string;
 }
 
+export interface SyncManifestAgentControlVariation {
+  hash?: string;
+  /** This migration archived the destination copy (so it restores it when the source does) */
+  archived?: boolean;
+}
+
 export interface SyncManifestAgentControlConfig
   extends SyncManifestAgentControlEntry {
   /** variations[variationKey] */
-  variations: Record<string, { hash?: string }>;
+  variations: Record<string, SyncManifestAgentControlVariation>;
   /** targeting[sourceEnvironmentKey] */
   targeting: Record<string, { hash?: string }>;
 }
@@ -90,7 +96,7 @@ export function cloneAgentControlManifest(
     copy.modelConfigs[key] = { ...entry };
   }
   for (const [key, entry] of Object.entries(source?.configs ?? {})) {
-    const variations = emptyRecord<{ hash?: string }>();
+    const variations = emptyRecord<SyncManifestAgentControlVariation>();
     for (const [k, v] of Object.entries(entry.variations ?? {})) {
       variations[k] = { ...v };
     }

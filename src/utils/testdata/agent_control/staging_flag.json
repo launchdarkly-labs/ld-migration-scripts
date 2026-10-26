@@ -1,0 +1,149 @@
+{
+  "key": "aic-probe-main",
+  "variations": [
+    {
+      "_id": "d8f729e0-2a70-4626-aa05-75d20e9482a2",
+      "name": "disabled",
+      "value": {
+        "_ldMeta": {
+          "enabled": false
+        }
+      }
+    },
+    {
+      "_id": "92fbe34e-6365-47d7-a77c-c154dea2caf7",
+      "name": "v-gemini",
+      "value": {
+        "_ldMeta": {
+          "enabled": true,
+          "mode": "completion",
+          "modelKey": "Gemini.gemini-2.5-flash",
+          "modelVersion": 1,
+          "variationKey": "v-gemini",
+          "version": 2,
+          "versionKey": "v-gemini"
+        },
+        "messages": [
+          {
+            "content": "edited",
+            "role": "system"
+          }
+        ],
+        "model": {
+          "name": "gemini-2.5-flash",
+          "parameters": {}
+        },
+        "provider": {
+          "name": "Gemini"
+        }
+      }
+    },
+    {
+      "_id": "a8c3c048-8af8-4f3d-8e2d-a5582e5a6b60",
+      "name": "v-claude",
+      "value": {
+        "_ldMeta": {
+          "enabled": true,
+          "mode": "completion",
+          "modelKey": "Anthropic.claude-haiku-4-5",
+          "modelVersion": 1,
+          "variationKey": "v-claude",
+          "version": 1,
+          "versionKey": "v-claude"
+        },
+        "messages": [
+          {
+            "content": "You are a probe.",
+            "role": "system"
+          }
+        ],
+        "model": {
+          "name": "claude-haiku-4-5",
+          "parameters": {}
+        },
+        "provider": {
+          "name": "Anthropic"
+        }
+      }
+    }
+  ],
+  "environments": {
+    "eu-prod": {
+      "on": true,
+      "rules": [],
+      "fallthrough": {
+        "variation": 1
+      },
+      "offVariation": 0
+    },
+    "production": {
+      "on": false,
+      "rules": [],
+      "fallthrough": {
+        "variation": 2
+      },
+      "offVariation": 0
+    },
+    "test": {
+      "on": true,
+      "rules": [
+        {
+          "_id": "2fed463a-a551-4b2a-8b93-3d2724f0234c",
+          "variation": 2,
+          "clauses": [
+            {
+              "_id": "73a353cd-65f8-4d65-a43a-4e004029e781",
+              "attribute": "country",
+              "op": "in",
+              "values": [
+                "US"
+              ],
+              "contextKind": "user",
+              "negate": false
+            }
+          ],
+          "trackEvents": false,
+          "description": "claude rule"
+        },
+        {
+          "_id": "40866e93-e424-4945-a7a6-23a32a8b6369",
+          "rollout": {
+            "variations": [
+              {
+                "variation": 0,
+                "weight": 0
+              },
+              {
+                "variation": 1,
+                "weight": 50000
+              },
+              {
+                "variation": 2,
+                "weight": 50000
+              }
+            ],
+            "contextKind": "user"
+          },
+          "clauses": [
+            {
+              "_id": "57235160-9407-49d1-a102-d0970992a707",
+              "attribute": "plan",
+              "op": "in",
+              "values": [
+                "pro"
+              ],
+              "contextKind": "user",
+              "negate": false
+            }
+          ],
+          "trackEvents": false,
+          "description": "rollout rule"
+        }
+      ],
+      "fallthrough": {
+        "variation": 1
+      },
+      "offVariation": 2
+    }
+  }
+}

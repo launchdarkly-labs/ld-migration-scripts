@@ -15,12 +15,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - CLI: `--extract-agent-control` (source) and `--migrate-agent-control` (migrate, default off)
   - Workflow YAML: `extraction.includeAgentControl` / `migration.migrateAgentControl`
   - Extract auto-enables when migrate is enabled (same pattern as segments)
-  - Migrate order: model-configs → configs → variations → targeting
-  - Graceful skip on `403`/`404` when AgentControl is not available
+  - Migrate order: model-configs → configs → variations → targeting → variation state
+  - Extract skips on a `403`/`404` from its first list call (AgentControl not available); any other failed read is listed, removes that config's earlier targeting file, and makes the extract exit with code 1
   - On-disk tree under `ai-configs/`; example: `examples/workflow-agent-control.yaml`
   - Sync manifest `agentControl` section with content-hash `--incremental` skipping (a config the destination no longer has is rewritten); `--on-conflict` / `-c` (prefix carries to variations and targeting, existing model configs are reused), `--tags` and maintainer mapping now apply to AgentControl; post-run reconciliation of configs and model configs
   - Sync manifest records the destination project ID; a deleted and recreated destination project ignores `--incremental` with a warning (all resources)
   - Targeting reads destination variation IDs from `/targeting` (includes the built-in `disabled`/`enabled` variations); existing configs are updated directly; global model configs are skipped (the API field is `global`)
+  - Model preflight (dry runs included): built-in models the extract uses are checked against the destination's model configs, since instance catalogs differ (Federal offers far fewer models than commercial). Missing models are listed with the variations that use them, and those variations are reported as errors instead of being sent
+  - Targeting applies whatever maps: a rule, target list, default rule or off variation serving a variation the destination lacks is left out and reported as an error naming the variation and its cause, where previously the whole environment's patch was dropped with a warning. Rollouts are sent only when every weight maps; a failed environment no longer stops the config's other environments; event tracking (`trackEvents`, `trackEventsFallthrough`) is migrated; per-rule event tracking is reported as a warning
+  - Targeting rules are migrated with what they serve: the AI Config targeting endpoint omits each rule's variation or rollout, description and clause context kinds, so every rule was dropped. The extract now reads them from the config's backing flag (read-only) and reports when it cannot
+  - Targeting on/off is migrated (`enableTargeting`/`disableTargeting`, accepted by the targeting endpoint though not in the API reference). A new config starts on in every environment, so a source environment that was off served its rules in the destination
+  - Agent-mode variations, whose targeting values carry no `_ldMeta` wrapper, are matched by key; the destination's variation IDs come from the targeting endpoint, since the config detail's ID changes when a variation is edited and targeting rejects it. Variations are created in the source's order, so a new config's default rule never points at an archived one; user targets listed under both `targets` and `contextTargets` are sent once
+  - Archived variations are archived in the destination after targeting (restored when the source restores them); a config's only active variation is left published with a warning
+  - Write failures are errors: a rejected update of a config or variation (`400`/`405`/`422`) and a `403`/`404` on any write were counted as skips. Only an immutable model config is still left alone
+  - AgentControl errors, missing models and warnings are listed in the migration summary and count towards the exit code (they did not before); each run writes `data/launchdarkly-migrations/reports/agent-control-<source>-<destination>.json`
 
 ## [3.4.2] - 2026-10-20
 

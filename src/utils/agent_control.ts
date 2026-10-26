@@ -23,6 +23,9 @@ import {
 
 export const AGENT_CONTROL_DIR = "ai-configs";
 
+/** How much of an API error body is logged and reported. */
+const BODY_LOG_LIMIT = 500;
+
 export type UpsertOutcome = "created" | "updated" | "skipped" | "error";
 
 export interface AgentControlSummary {
@@ -34,6 +37,39 @@ export interface AgentControlSummary {
 
 export function emptyAgentControlSummary(): AgentControlSummary {
   return { created: 0, updated: 0, skipped: 0, errors: 0 };
+}
+
+export type AgentControlReportStage =
+  | "extract"
+  | "model-configs"
+  | "configs"
+  | "variations"
+  | "targeting"
+  | "variation-state";
+
+/** A resource (or part of one) that was not migrated, with why. */
+export interface AgentControlFailure {
+  stage: AgentControlReportStage;
+  /** Source key: `config`, `config/variation`, `config/environment` or a model key */
+  key: string;
+  /** Destination key when it differs from the source key (conflict prefix) */
+  destKey?: string;
+  status?: number;
+  reason: string;
+}
+
+/** Something that was migrated, or deliberately left alone, but differs from the source. */
+export interface AgentControlWarning {
+  stage: AgentControlReportStage;
+  key: string;
+  message: string;
+}
+
+/** A model referenced by the extract that the destination does not offer. */
+export interface AgentControlMissingModel {
+  modelKey: string;
+  /** `config/variation` keys that use it */
+  usedBy: string[];
 }
 
 export function recordOutcome(
@@ -53,6 +89,8 @@ export const AGENT_CONTROL_MIGRATE_ORDER = [
   "configs",
   "variations",
   "targeting",
+  // Archived variations are archived last, once targeting no longer needs them active
+  "variation-state",
 ] as const;
 
 export type AgentControlMigrateStage =
@@ -140,8 +178,9 @@ export function resolveVariationKey(
     return variation.key.trim();
   }
   const value = variation.value;
+  // The targeting resource carries the metadata as the value itself; other shapes wrap it in `_ldMeta`
   const meta = value && typeof value === "object"
-    ? (value as Record<string, unknown>)._ldMeta
+    ? (value as Record<string, unknown>)._ldMeta ?? value
     : undefined;
   if (meta && typeof meta === "object") {
     const ldMeta = meta as Record<string, unknown>;
@@ -168,7 +207,7 @@ export function collectReferencedModelConfigKeys(
     }
     const value = record.value;
     if (value && typeof value === "object") {
-      const meta = (value as Record<string, unknown>)._ldMeta;
+      const meta = (value as Record<string, unknown>)._ldMeta ?? value;
       if (meta && typeof meta === "object") {
         const ldMeta = meta as Record<string, unknown>;
         if (typeof ldMeta.modelKey === "string" && ldMeta.modelKey) {
@@ -220,82 +259,89 @@ export function isAgentControlUnavailable(status: number): boolean {
 export function classifyUpsertStatus(status: number): UpsertOutcome {
   if (status >= 200 && status < 300) return "created";
   if (status === 409) return "updated"; // caller should PATCH after 409
-  if (isAgentControlUnavailable(status)) return "skipped";
+  // A 403/404 on a write is a failure of that write (for example a missing model or environment), not a
+  // sign that AgentControl is unavailable: that is only decided by the extract's first list call
   return "error";
 }
 
 export interface PaginatedItems {
   items: Record<string, unknown>[];
   unavailable: boolean;
+  /** Set when a page could not be read: `items` holds only the pages read before it */
+  error?: { status?: number; reason: string };
 }
 
+type AgentControlGet = (
+  path: string,
+) => Promise<{ status: number; json?: unknown; body?: string }>;
+
+const errorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
 /**
- * Paginate a collection endpoint that returns { items, totalCount? }.
- * On 403/404 sets unavailable and returns empty items.
+ * Paginate a collection endpoint that returns { items, totalCount? } (or a bare array).
+ * On 403/404 sets unavailable and returns empty items; any other failure sets `error`.
  */
-export async function paginateAgentControlCollection(
-  apiKey: string,
-  domain: string,
+export async function listAgentControlCollection(
+  get: AgentControlGet,
   basePath: string,
-  rateLimitKey = "ai-configs",
   pageSize = 50,
 ): Promise<PaginatedItems> {
   const items: Record<string, unknown>[] = [];
   let offset = 0;
-  let more = true;
 
-  while (more) {
+  while (true) {
     const sep = basePath.includes("?") ? "&" : "?";
     const path = `${basePath}${sep}limit=${pageSize}&offset=${offset}`;
-    let resp: Response;
+    let resp: Awaited<ReturnType<AgentControlGet>>;
     try {
-      resp = await rateLimitRequest(
-        ldAPIRequest(apiKey, domain, path),
-        rateLimitKey,
-      );
+      resp = await get(path);
     } catch (error) {
-      console.log(Colors.yellow(
-        `  ⚠ AgentControl list request failed for ${basePath}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      ));
-      return { items, unavailable: false };
+      return {
+        items,
+        unavailable: false,
+        error: { reason: errorMessage(error) },
+      };
     }
 
     if (isAgentControlUnavailable(resp.status)) {
       return { items: [], unavailable: true };
     }
-    if (resp.status > 201) {
-      const body = await resp.text().catch(() => "");
-      console.log(Colors.yellow(
-        `  ⚠ AgentControl list failed (${resp.status}) for ${basePath}${
-          body ? `: ${body.slice(0, 200)}` : ""
-        }`,
-      ));
-      return { items, unavailable: false };
+    if (resp.status < 200 || resp.status >= 300) {
+      return {
+        items,
+        unavailable: false,
+        error: {
+          status: resp.status,
+          reason: resp.body?.slice(0, BODY_LOG_LIMIT) || `HTTP ${resp.status}`,
+        },
+      };
     }
 
-    const data = await resp.json();
-    const pageItems = Array.isArray(data.items)
-      ? data.items
-      : Array.isArray(data)
+    const data = resp.json as
+      | { items?: unknown; totalCount?: unknown; _links?: { next?: unknown } }
+      | unknown[]
+      | undefined;
+    const pageItems = (Array.isArray(data)
       ? data
-      : [];
+      : Array.isArray(data?.items)
+      ? data.items
+      : []) as Record<string, unknown>[];
     items.push(...pageItems);
 
-    const totalCount = typeof data.totalCount === "number"
-      ? data.totalCount
+    const paged = Array.isArray(data) ? undefined : data;
+    const totalCount = typeof paged?.totalCount === "number"
+      ? paged.totalCount
       : items.length;
-    if (items.length < totalCount && pageItems.length > 0) {
-      offset += pageSize;
-    } else if (data._links?.next && pageItems.length > 0) {
+    if (
+      pageItems.length > 0 &&
+      (items.length < totalCount || paged?._links?.next)
+    ) {
       offset += pageSize;
     } else {
-      more = false;
+      return { items, unavailable: false };
     }
   }
-
-  return { items, unavailable: false };
 }
 
 export interface ExtractAgentControlOptions {
@@ -305,36 +351,69 @@ export interface ExtractAgentControlOptions {
   projPath: string;
   writeJson: (filePathWithoutExt: string, data: unknown) => Promise<void>;
   ensureDir: (path: string) => void;
+  /** Optional injected reader for tests; defaults to the rate-limited API client */
+  client?: Pick<AgentControlHttpClient, "get">;
+}
+
+export interface ExtractAgentControlResult {
+  skipped: boolean;
+  configCount: number;
+  variationCount: number;
+  modelCount: number;
+  /** Configs whose targeting was written */
+  targetingCount: number;
+  /** Reads that failed: the extract is incomplete for these */
+  failures: AgentControlFailure[];
 }
 
 /** Extract model-configs, configs, variations, and targeting to disk. */
 export async function extractAgentControlResources(
   options: ExtractAgentControlOptions,
-): Promise<
-  {
-    skipped: boolean;
-    configCount: number;
-    variationCount: number;
-    modelCount: number;
-  }
-> {
+): Promise<ExtractAgentControlResult> {
   const { apiKey, domain, projectKey, projPath, writeJson, ensureDir } =
     options;
+  const get = options.client?.get ?? defaultHttpClient(apiKey, domain).get!;
   const root = agentControlRoot(projPath);
   ensureDir(root);
+  const failures: AgentControlFailure[] = [];
+  const fail = (key: string, reason: string, status?: number) => {
+    failures.push({
+      stage: "extract",
+      key,
+      reason,
+      ...(status !== undefined ? { status } : {}),
+    });
+    console.log(Colors.red(
+      `  ✗ ${key}: ${reason}${status !== undefined ? ` (HTTP ${status})` : ""}`,
+    ));
+  };
+  const empty = (modelCount = 0): ExtractAgentControlResult => ({
+    skipped: true,
+    configCount: 0,
+    variationCount: 0,
+    modelCount,
+    targetingCount: 0,
+    failures,
+  });
 
   console.log(Colors.cyan("\nExtracting AgentControl (AI Configs) data..."));
 
-  const models = await paginateAgentControlCollection(
-    apiKey,
-    domain,
+  const models = await listAgentControlCollection(
+    get,
     `projects/${projectKey}/ai-configs/model-configs`,
   );
   if (models.unavailable) {
     console.log(Colors.yellow(
       "Skipping AgentControl extract (not available for this account/project)",
     ));
-    return { skipped: true, configCount: 0, variationCount: 0, modelCount: 0 };
+    return empty();
+  }
+  if (models.error) {
+    fail(
+      "model-configs",
+      `listing model configs failed: ${models.error.reason}`,
+      models.error.status,
+    );
   }
 
   await writeJson(`${root}/model-configs`, {
@@ -343,21 +422,22 @@ export async function extractAgentControlResources(
   });
   console.log(Colors.gray(`  Found ${models.items.length} model config(s)`));
 
-  const configs = await paginateAgentControlCollection(
-    apiKey,
-    domain,
+  const configs = await listAgentControlCollection(
+    get,
     `projects/${projectKey}/ai-configs`,
   );
   if (configs.unavailable) {
     console.log(Colors.yellow(
       "Skipping AgentControl extract (not available for this account/project)",
     ));
-    return {
-      skipped: true,
-      configCount: 0,
-      variationCount: 0,
-      modelCount: models.items.length,
-    };
+    return empty(models.items.length);
+  }
+  if (configs.error) {
+    fail(
+      "configs",
+      `listing configs failed after ${configs.items.length} config(s): ${configs.error.reason}`,
+      configs.error.status,
+    );
   }
 
   await writeJson(`${root}/configs`, {
@@ -371,7 +451,12 @@ export async function extractAgentControlResources(
   ensureDir(`${root}/variations`);
   ensureDir(`${root}/targeting`);
 
+  // An earlier extract's targeting must not be migrated as if it were current
+  const removeStaleTargeting = (configKey: string) =>
+    Deno.remove(targetingPath(projPath, configKey)).catch(() => {});
+
   let variationCount = 0;
+  let targetingCount = 0;
   for (const config of configs.items) {
     const configKey = String(config.key ?? "");
     if (!configKey) continue;
@@ -379,32 +464,26 @@ export async function extractAgentControlResources(
     // Prefer full GET for embedded variations
     let detail: Record<string, unknown> = config;
     try {
-      const detailResp = await rateLimitRequest(
-        ldAPIRequest(
-          apiKey,
-          domain,
-          `projects/${projectKey}/ai-configs/${configKey}`,
-        ),
-        "ai-configs",
+      const detailResp = await get(
+        `projects/${projectKey}/ai-configs/${configKey}`,
       );
       if (detailResp.status >= 200 && detailResp.status < 300) {
-        detail = await detailResp.json();
-      } else if (isAgentControlUnavailable(detailResp.status)) {
-        continue;
-      } else if (detailResp.status > 201) {
-        const body = await detailResp.text().catch(() => "");
-        console.log(Colors.yellow(
-          `  ⚠ Failed to GET ai-config ${configKey} (${detailResp.status})${
-            body ? `: ${body.slice(0, 200)}` : ""
+        detail = (detailResp.json ?? config) as Record<string, unknown>;
+      } else {
+        fail(
+          configKey,
+          `reading the config failed: ${
+            detailResp.body?.slice(0, BODY_LOG_LIMIT) || "no response body"
           }`,
-        ));
+          detailResp.status,
+        );
+        if (isAgentControlUnavailable(detailResp.status)) {
+          await removeStaleTargeting(configKey);
+          continue;
+        }
       }
     } catch (error) {
-      console.log(Colors.yellow(
-        `  ⚠ Failed to GET ai-config ${configKey}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      ));
+      fail(configKey, `reading the config failed: ${errorMessage(error)}`);
     }
 
     const variations = Array.isArray(detail.variations)
@@ -426,16 +505,21 @@ export async function extractAgentControlResources(
       variationCount++;
     };
 
-    if (variations.length === 0) {
-      const listed = await paginateAgentControlCollection(
-        apiKey,
-        domain,
+    if (variations.length === 0 && detail.mode !== "agent") {
+      const listed = await listAgentControlCollection(
+        get,
         `projects/${projectKey}/ai-configs/${configKey}/variations`,
       );
-      if (!listed.unavailable) {
-        for (const v of listed.items) {
-          await writeVariation(v);
-        }
+      // 405: the config has no variation collection (agent mode); nothing to extract
+      if (listed.error && listed.error.status !== 405) {
+        fail(
+          `${configKey}/variations`,
+          `listing variations failed: ${listed.error.reason}`,
+          listed.error.status,
+        );
+      }
+      for (const v of listed.items) {
+        await writeVariation(v);
       }
     } else {
       for (const v of variations) {
@@ -445,17 +529,39 @@ export async function extractAgentControlResources(
 
     // Dedicated targeting endpoint (not fields scraped from config detail)
     try {
-      const targetingResp = await rateLimitRequest(
-        ldAPIRequest(
-          apiKey,
-          domain,
-          `projects/${projectKey}/ai-configs/${configKey}/targeting`,
-        ),
-        "ai-configs",
+      const targetingResp = await get(
+        `projects/${projectKey}/ai-configs/${configKey}/targeting`,
       );
       if (targetingResp.status >= 200 && targetingResp.status < 300) {
-        const targeting = await targetingResp.json() as Record<string, unknown>;
+        const targeting = (targetingResp.json ?? {}) as Record<string, unknown>;
         targeting.key = configKey;
+        if (targetingHasRules(targeting)) {
+          // The targeting resource omits what each rule serves (and clause context kinds); the
+          // config's backing flag carries them. The flags API is read-only for AI Configs.
+          const flagResp = await get(`flags/${projectKey}/${configKey}`);
+          if (
+            flagResp.status >= 200 && flagResp.status < 300 && flagResp.json
+          ) {
+            const unmatched = mergeFlagRulesIntoTargeting(
+              targeting,
+              flagResp.json as Record<string, unknown>,
+            );
+            for (const envKey of unmatched) {
+              fail(
+                `${configKey}/targeting`,
+                `targeting rules in environment ${envKey} differ from its flag's rules; what they serve is unknown and they will not be migrated`,
+              );
+            }
+          } else {
+            fail(
+              `${configKey}/targeting`,
+              `reading the rules' variations (flags/${projectKey}/${configKey}) failed; its targeting rules will not be migrated: ${
+                flagResp.body?.slice(0, BODY_LOG_LIMIT) || "no response body"
+              }`,
+              flagResp.status,
+            );
+          }
+        }
         // Persist resolved keys on embedded variations so migrate indexes stay stable
         if (Array.isArray(targeting.variations)) {
           targeting.variations =
@@ -466,29 +572,51 @@ export async function extractAgentControlResources(
               });
         }
         await writeJson(`${root}/targeting/${configKey}`, targeting);
-      } else if (!isAgentControlUnavailable(targetingResp.status)) {
-        const body = await targetingResp.text().catch(() => "");
-        console.log(Colors.yellow(
-          `  ⚠ Failed to GET targeting for ${configKey} (${targetingResp.status})${
-            body ? `: ${body.slice(0, 200)}` : ""
+        targetingCount++;
+      } else {
+        await removeStaleTargeting(configKey);
+        fail(
+          `${configKey}/targeting`,
+          `reading targeting failed, its targeting will not be migrated: ${
+            targetingResp.body?.slice(0, BODY_LOG_LIMIT) || "no response body"
           }`,
-        ));
+          targetingResp.status,
+        );
       }
     } catch (error) {
-      console.log(Colors.yellow(
-        `  ⚠ Failed to GET targeting for ${configKey}: ${
-          error instanceof Error ? error.message : String(error)
+      await removeStaleTargeting(configKey);
+      fail(
+        `${configKey}/targeting`,
+        `reading targeting failed, its targeting will not be migrated: ${
+          errorMessage(error)
         }`,
-      ));
+      );
     }
   }
 
   console.log(Colors.gray(`  Found ${variationCount} variation(s)`));
+  console.log(Colors.gray(
+    `  Targeting extracted for ${targetingCount} of ${configs.items.length} config(s)`,
+  ));
+  if (failures.length > 0) {
+    console.log(Colors.red(
+      `\n  ✗ AgentControl extract incomplete: ${failures.length} read(s) failed`,
+    ));
+    for (const f of failures) {
+      console.log(Colors.red(
+        `    ✗ ${f.key}${
+          f.status !== undefined ? ` (HTTP ${f.status})` : ""
+        }: ${f.reason}`,
+      ));
+    }
+  }
   return {
     skipped: false,
     configCount: configs.items.length,
     variationCount,
     modelCount: models.items.length,
+    targetingCount,
+    failures,
   };
 }
 
@@ -519,9 +647,25 @@ function logUpsertFailure(
 ): void {
   console.log(Colors.red(
     `    ✗ ${action} ${path} failed (${status})${
-      body ? `: ${body.slice(0, 300)}` : ""
+      body ? `: ${body.slice(0, BODY_LOG_LIMIT)}` : ""
     }`,
   ));
+}
+
+/** A failed write, as reported to `onFailure`. */
+export interface UpsertFailure {
+  action: "POST" | "PATCH";
+  path: string;
+  status: number;
+  body?: string;
+}
+
+/** Report reason for a failed write: the API's message when it sent one. */
+export function upsertFailureReason(failure: UpsertFailure): string {
+  const body = failure.body?.trim();
+  return `${failure.action} ${failure.path} failed${
+    body ? `: ${body.slice(0, BODY_LOG_LIMIT)}` : ""
+  }`;
 }
 
 export async function upsertAgentControlResource(
@@ -538,6 +682,13 @@ export async function upsertAgentControlResource(
      * a 409, so it cannot be relied on to signal the conflict.
      */
     knownExisting?: boolean;
+    /**
+     * Model configs only: an existing model config that rejects the update (400/405/422) is built-in or
+     * immutable and is left as it is. For any other resource that rejection is an error.
+     */
+    immutableSkip?: boolean;
+    /** Called with the failed request when the outcome is "error" */
+    onFailure?: (failure: UpsertFailure) => void;
   },
 ): Promise<UpsertOutcome> {
   const sanitize = options?.sanitize ?? sanitizeAgentControlPayload;
@@ -548,6 +699,16 @@ export async function upsertAgentControlResource(
     ));
     return "created";
   }
+  const failed = (failure: UpsertFailure): UpsertOutcome => {
+    logUpsertFailure(
+      failure.action,
+      failure.path,
+      failure.status,
+      failure.body,
+    );
+    options?.onFailure?.(failure);
+    return "error";
+  };
 
   const createResp = options?.knownExisting
     ? { status: 409 as number, body: undefined }
@@ -555,34 +716,38 @@ export async function upsertAgentControlResource(
   if (createResp.status >= 200 && createResp.status < 300) {
     return "created";
   }
-  if (isAgentControlUnavailable(createResp.status)) {
-    return "skipped";
-  }
   if (createResp.status === 409) {
     // Merge-style object PATCH (AI Configs model/config/variation updates use JSON body objects)
     const patchResp = await client.patch(updatePath, body);
     if (patchResp.status >= 200 && patchResp.status < 300) {
       return "updated";
     }
-    if (isAgentControlUnavailable(patchResp.status)) {
-      return "skipped";
-    }
-    // Built-in / immutable model configs often conflict and reject update
     if (
-      patchResp.status === 400 || patchResp.status === 405 ||
-      patchResp.status === 422
+      options?.immutableSkip &&
+      (patchResp.status === 400 || patchResp.status === 405 ||
+        patchResp.status === 422)
     ) {
       console.log(Colors.yellow(
-        `    ⚠ Conflict on ${updatePath}; treating as immutable/built-in skip (${patchResp.status})`,
+        `    ⚠ ${updatePath} rejected the update (${patchResp.status}); leaving the existing model config as it is${
+          patchResp.body ? `: ${patchResp.body.slice(0, BODY_LOG_LIMIT)}` : ""
+        }`,
       ));
       return "skipped";
     }
-    logUpsertFailure("PATCH", updatePath, patchResp.status, patchResp.body);
-    return "error";
+    return failed({
+      action: "PATCH",
+      path: updatePath,
+      status: patchResp.status,
+      body: patchResp.body,
+    });
   }
 
-  logUpsertFailure("POST", createPath, createResp.status, createResp.body);
-  return "error";
+  return failed({
+    action: "POST",
+    path: createPath,
+    status: createResp.status,
+    body: createResp.body,
+  });
 }
 
 /** What to do with a model config or config whose key already exists in the destination. */
@@ -647,6 +812,12 @@ export interface AgentControlMigrationResult {
    * policy, failed ones (already reported as errors) and global model configs.
    */
   expected: { modelConfigs: string[]; configs: string[] };
+  /** Everything that was not migrated, with why; `summary.errors` counts these */
+  failures: AgentControlFailure[];
+  /** Migrated, or deliberately left alone, but different from the source */
+  warnings: AgentControlWarning[];
+  /** Models the extract uses that the destination does not offer (their variations are failures) */
+  missingModels: AgentControlMissingModel[];
 }
 
 /** JSON with object keys sorted, so equal content fingerprints equally whatever the key order. */
@@ -864,64 +1035,211 @@ export function buildSourceVariationRefsFromTargeting(
   });
 }
 
-/** True when a targeting warning means the migrate is incomplete/incorrect. */
-export function isCriticalTargetingWarning(warning: string): boolean {
-  const w = warning.toLowerCase();
-  return w.includes("fallthrough") ||
-    w.includes("off variation") ||
-    w.includes("rule variation") ||
-    w.includes("rollout variation") ||
-    w.includes("unmapped variation");
+/** True when any environment of an AI Config targeting resource has targeting rules. */
+export function targetingHasRules(targeting: Record<string, unknown>): boolean {
+  const environments = (targeting.environments ?? {}) as Record<
+    string,
+    Record<string, unknown>
+  >;
+  return Object.values(environments).some((env) =>
+    Array.isArray(env?.rules) && env.rules.length > 0
+  );
 }
 
-/** Build semantic-patch instructions for one environment's targeting state. */
+/**
+ * Replace each environment's targeting rules with its backing flag's rules, which carry what each rule
+ * serves (as a variation `_id`, the same IDs the targeting resource uses), its description and the
+ * clauses' context kinds. The flag's variation indexes are converted to IDs so they never depend on the
+ * order of the targeting resource's list. Returns the environments whose rules could not be matched.
+ */
+export function mergeFlagRulesIntoTargeting(
+  targeting: Record<string, unknown>,
+  flag: Record<string, unknown>,
+): string[] {
+  const flagVariations = Array.isArray(flag.variations)
+    ? flag.variations as Record<string, unknown>[]
+    : [];
+  // An index with no ID must not be read against the targeting resource's (differently ordered) list
+  const idAt = (index: unknown) =>
+    typeof index === "number" && typeof flagVariations[index]?._id === "string"
+      ? flagVariations[index]._id as string
+      : `flag variation ${String(index)}`;
+  const environments = (targeting.environments ?? {}) as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const flagEnvironments = (flag.environments ?? {}) as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const unmatched: string[] = [];
+
+  for (const [envKey, env] of Object.entries(environments)) {
+    const rules = Array.isArray(env?.rules)
+      ? env.rules as Record<string, unknown>[]
+      : [];
+    if (rules.length === 0) continue;
+    const flagRules = Array.isArray(flagEnvironments[envKey]?.rules)
+      ? flagEnvironments[envKey].rules as Record<string, unknown>[]
+      : undefined;
+    const clauseIds = (rule: Record<string, unknown>) =>
+      (Array.isArray(rule.clauses) ? rule.clauses : [])
+        .map((c) =>
+          String(
+            (c as Record<string, unknown>).id ??
+              (c as Record<string, unknown>)._id ?? "",
+          )
+        )
+        .join(",");
+    if (
+      !flagRules || flagRules.length !== rules.length ||
+      rules.some((rule, i) => clauseIds(rule) !== clauseIds(flagRules[i]))
+    ) {
+      unmatched.push(envKey);
+      continue;
+    }
+
+    env.rules = flagRules.map((flagRule) => {
+      const merged: Record<string, unknown> = {
+        clauses: (Array.isArray(flagRule.clauses) ? flagRule.clauses : []).map(
+          (c) => {
+            const { _id: _clauseId, ...clause } = c as Record<string, unknown>;
+            return clause;
+          },
+        ),
+        trackEvents: flagRule.trackEvents === true,
+      };
+      if (typeof flagRule.description === "string" && flagRule.description) {
+        merged.description = flagRule.description;
+      }
+      if (flagRule.variation !== undefined) {
+        merged.variation = idAt(flagRule.variation);
+      } else if (flagRule.rollout && typeof flagRule.rollout === "object") {
+        const rollout = flagRule.rollout as Record<string, unknown>;
+        merged.rollout = {
+          ...rollout,
+          variations: (Array.isArray(rollout.variations)
+            ? rollout.variations as Record<string, unknown>[]
+            : []).map((v) => ({
+              ...v,
+              variation: idAt(v.variation),
+            })),
+        };
+      }
+      return merged;
+    });
+  }
+  return unmatched;
+}
+
+export type TargetingPart =
+  | "rule"
+  | "target"
+  | "fallthrough"
+  | "offVariation"
+  | "trackEvents";
+
+/**
+ * Something in one environment's targeting that could not be migrated as it is in the source.
+ * Errors are parts left out of the patch; warnings are settings the patch cannot carry.
+ */
+export interface TargetingIssue {
+  severity: "error" | "warning";
+  part: TargetingPart;
+  /** Source key of the variation the part serves, when known */
+  variationKey?: string;
+  message: string;
+}
+
+/**
+ * Build semantic-patch instructions for one environment's targeting state. Whatever maps to destination
+ * variations is applied; each rule, target list, default rule or off variation that does not is left out
+ * and reported as an error issue.
+ */
 export function buildTargetingInstructionsForEnvironment(
   envConfig: Record<string, unknown>,
   sourceVariations: SourceVariationRef[],
   destVariationIdByKey: Map<string, string>,
-): { instructions: Record<string, unknown>[]; warnings: string[] } {
-  const warnings: string[] = [];
+): { instructions: Record<string, unknown>[]; issues: TargetingIssue[] } {
+  const issues: TargetingIssue[] = [];
   const instructions: Record<string, unknown>[] = [];
+  const error = (
+    part: TargetingPart,
+    message: string,
+    variationKey?: string,
+  ) =>
+    issues.push({
+      severity: "error",
+      part,
+      message,
+      ...(variationKey ? { variationKey } : {}),
+    });
 
-  const resolveDestId = (indexOrId: unknown): string | undefined => {
-    if (typeof indexOrId === "number") {
-      const key = sourceVariations[indexOrId]?.key;
-      return key ? destVariationIdByKey.get(key) : undefined;
+  const resolve = (ref: unknown) => {
+    let key: string | undefined;
+    if (typeof ref === "number") {
+      key = sourceVariations[ref]?.key || undefined;
+    } else if (typeof ref === "string") {
+      key = sourceVariations.find((v) => v._id === ref && v.key)?.key ??
+        // Direct key lookup (e.g. already-resolved variation key)
+        (destVariationIdByKey.has(ref) ? ref : undefined);
     }
-    if (typeof indexOrId === "string") {
-      const byId = sourceVariations.find((v) => v._id === indexOrId && v.key);
-      if (byId) return destVariationIdByKey.get(byId.key);
-      // Direct key lookup (e.g. already-resolved variation key)
-      if (destVariationIdByKey.has(indexOrId)) {
-        return destVariationIdByKey.get(indexOrId);
-      }
-      return undefined;
-    }
-    return undefined;
+    return {
+      destId: key ? destVariationIdByKey.get(key) : undefined,
+      variationKey: key,
+      label: key
+        ? `"${key}"`
+        : typeof ref === "number"
+        ? `at index ${ref}`
+        : `"${String(ref)}"`,
+    };
   };
 
-  const mapRolloutWeights = (
-    weights: Record<string, number> | undefined,
-  ): Record<string, number> | undefined => {
-    if (!weights) return undefined;
-    const out: Record<string, number> = {};
-    for (const [srcId, weight] of Object.entries(weights)) {
-      const destId = resolveDestId(srcId);
-      if (!destId) {
-        warnings.push(`Missing dest variation for rollout weight key ${srcId}`);
-        continue;
-      }
-      out[destId] = weight;
+  /** Destination rollout weights, or the first source variation that has no destination copy. */
+  const mapRollout = (
+    rollout: Record<string, unknown>,
+  ): {
+    weights?: Record<string, number>;
+    missing?: ReturnType<typeof resolve>;
+  } => {
+    const entries: Array<[unknown, number]> = Array.isArray(rollout.variations)
+      ? (rollout.variations as Array<Record<string, unknown>>)
+        // A rollout lists every variation, with weight 0 for those it does not serve
+        .filter((v) => typeof v.weight === "number" && v.weight > 0)
+        .map((v) => [v.variation ?? v.variationId, v.weight as number])
+      : rollout.weights && typeof rollout.weights === "object"
+      ? Object.entries(rollout.weights as Record<string, number>)
+      : [];
+    const weights: Record<string, number> = {};
+    for (const [ref, weight] of entries) {
+      const r = resolve(ref);
+      if (!r.destId) return { missing: r };
+      weights[r.destId] = (weights[r.destId] ?? 0) + weight;
     }
-    return Object.keys(out).length > 0 ? out : undefined;
+    return Object.keys(weights).length > 0 ? { weights } : {};
   };
+  const rolloutFields = (rollout: Record<string, unknown>) => ({
+    ...(typeof rollout.bucketBy === "string"
+      ? { rolloutBucketBy: rollout.bucketBy }
+      : {}),
+    ...(typeof rollout.contextKind === "string"
+      ? { rolloutContextKind: rollout.contextKind }
+      : {}),
+  });
+  const notInDestination = (r: ReturnType<typeof resolve>) =>
+    `variation ${r.label}, which is not in the destination`;
 
   // Rules
   const rules = Array.isArray(envConfig.rules)
     ? envConfig.rules as Record<string, unknown>[]
     : [];
   const mappedRules: Record<string, unknown>[] = [];
-  for (const rule of rules) {
+  rules.forEach((rule, index) => {
+    const label = `Rule ${index + 1}${
+      typeof rule.description === "string" && rule.description
+        ? ` ("${rule.description}")`
+        : ""
+    }`;
     const clauses = Array.isArray(rule.clauses)
       ? (rule.clauses as Record<string, unknown>[]).map((c) => {
         const {
@@ -938,49 +1256,55 @@ export function buildTargetingInstructionsForEnvironment(
     }
 
     if (rule.variation !== undefined || rule.variationId !== undefined) {
-      const destId = resolveDestId(rule.variationId ?? rule.variation);
-      if (!destId) {
-        warnings.push("Could not map rule variation to destination");
-        continue;
+      const r = resolve(rule.variationId ?? rule.variation);
+      if (!r.destId) {
+        error(
+          "rule",
+          `${label} not migrated: it serves ${notInDestination(r)}`,
+          r.variationKey,
+        );
+        return;
       }
-      mapped.variationId = destId;
+      mapped.variationId = r.destId;
     } else if (rule.rollout && typeof rule.rollout === "object") {
       const rollout = rule.rollout as Record<string, unknown>;
-      const weightsFromRollout = Array.isArray(rollout.variations)
-        ? Object.fromEntries(
-          (rollout.variations as Array<Record<string, unknown>>)
-            .filter((v) =>
-              typeof v.variation === "number" && typeof v.weight === "number"
-            )
-            .map((v) => [String(v.variation), v.weight as number]),
-        )
-        : undefined;
-      // Source GET uses index-based rollout.variations; semantic patch wants variationId weights.
-      // Convert index→destId via resolveDestId on numeric keys.
-      let rolloutWeights: Record<string, number> | undefined;
-      if (weightsFromRollout) {
-        rolloutWeights = {};
-        for (const [idx, weight] of Object.entries(weightsFromRollout)) {
-          const destId = resolveDestId(Number(idx));
-          if (destId) rolloutWeights[destId] = weight;
-          else warnings.push(`Could not map rollout variation index ${idx}`);
-        }
+      const { weights, missing } = mapRollout(rollout);
+      if (missing) {
+        error(
+          "rule",
+          `${label} not migrated: its percentage rollout includes ${
+            notInDestination(missing)
+          }`,
+          missing.variationKey,
+        );
+        return;
       }
-      if (rolloutWeights && Object.keys(rolloutWeights).length > 0) {
-        mapped.rolloutWeights = rolloutWeights;
-        if (typeof rollout.bucketBy === "string") {
-          mapped.rolloutBucketBy = rollout.bucketBy;
-        }
-        if (typeof rollout.contextKind === "string") {
-          mapped.rolloutContextKind = rollout.contextKind;
-        }
-      } else {
-        warnings.push("Rule rollout could not be mapped; skipping rule");
-        continue;
+      if (!weights) {
+        error(
+          "rule",
+          `${label} not migrated: its percentage rollout has no weights`,
+        );
+        return;
       }
+      mapped.rolloutWeights = weights;
+      Object.assign(mapped, rolloutFields(rollout));
+    } else {
+      error(
+        "rule",
+        `${label} not migrated: the source did not report what it serves (neither a variation nor a rollout)`,
+      );
+      return;
+    }
+    if (rule.trackEvents === true) {
+      issues.push({
+        severity: "warning",
+        part: "trackEvents",
+        message:
+          `${label} tracks events in the source; per-rule event tracking is not migrated`,
+      });
     }
     mappedRules.push(mapped);
-  }
+  });
   instructions.push({ kind: "replaceRules", rules: mappedRules });
 
   // Individual targets (targets and/or contextTargets)
@@ -993,17 +1317,32 @@ export function buildTargetingInstructionsForEnvironment(
       : []),
   ];
   const mappedTargets: Record<string, unknown>[] = [];
+  // User targets are listed in both `targets` and `contextTargets`
+  const seenTargets = new Set<string>();
   for (const t of targetLists) {
-    const destId = resolveDestId(t.variationId ?? t.variation);
-    if (!destId || !Array.isArray(t.values)) {
-      warnings.push(
-        "Skipping target with unmapped variation or missing values",
+    const values = Array.isArray(t.values) ? t.values : undefined;
+    if (!values || values.length === 0) continue;
+    const signature = stableStringify([
+      t.contextKind ?? "user",
+      t.variationId ?? t.variation,
+      [...values].map(String).sort(),
+    ]);
+    if (seenTargets.has(signature)) continue;
+    seenTargets.add(signature);
+    const r = resolve(t.variationId ?? t.variation);
+    if (!r.destId) {
+      error(
+        "target",
+        `Individual targets (${values.length} ${
+          typeof t.contextKind === "string" ? t.contextKind : "user"
+        } context(s)) not migrated: they are served ${notInDestination(r)}`,
+        r.variationKey,
       );
       continue;
     }
     mappedTargets.push({
-      variationId: destId,
-      values: t.values,
+      variationId: r.destId,
+      values,
       ...(typeof t.contextKind === "string"
         ? { contextKind: t.contextKind }
         : {}),
@@ -1011,7 +1350,7 @@ export function buildTargetingInstructionsForEnvironment(
   }
   instructions.push({ kind: "replaceTargets", targets: mappedTargets });
 
-  // Fallthrough
+  // Fallthrough (the default rule)
   const fallthrough = envConfig.fallthrough as
     | Record<string, unknown>
     | undefined;
@@ -1020,60 +1359,77 @@ export function buildTargetingInstructionsForEnvironment(
       fallthrough.variation !== undefined ||
       fallthrough.variationId !== undefined
     ) {
-      const destId = resolveDestId(
-        fallthrough.variationId ?? fallthrough.variation,
-      );
-      if (destId) {
+      const r = resolve(fallthrough.variationId ?? fallthrough.variation);
+      if (r.destId) {
         instructions.push({
           kind: "updateFallthroughVariationOrRollout",
-          variationId: destId,
+          variationId: r.destId,
         });
       } else {
-        warnings.push("Could not map fallthrough variation");
+        error(
+          "fallthrough",
+          `Default rule not migrated: it serves ${notInDestination(r)}`,
+          r.variationKey,
+        );
       }
     } else if (fallthrough.rollout && typeof fallthrough.rollout === "object") {
       const rollout = fallthrough.rollout as Record<string, unknown>;
-      const weightsFromRollout = Array.isArray(rollout.variations)
-        ? Object.fromEntries(
-          (rollout.variations as Array<Record<string, unknown>>)
-            .filter((v) =>
-              typeof v.variation === "number" && typeof v.weight === "number"
-            )
-            .map((v) => {
-              const destId = resolveDestId(v.variation as number);
-              return destId ? [destId, v.weight as number] : null;
-            })
-            .filter((e): e is [string, number] => e != null),
-        )
-        : mapRolloutWeights(
-          rollout.weights as Record<string, number> | undefined,
-        );
-      if (weightsFromRollout && Object.keys(weightsFromRollout).length > 0) {
+      const { weights, missing } = mapRollout(rollout);
+      if (weights) {
         instructions.push({
           kind: "updateFallthroughVariationOrRollout",
-          rolloutWeights: weightsFromRollout,
-          ...(typeof rollout.bucketBy === "string"
-            ? { rolloutBucketBy: rollout.bucketBy }
-            : {}),
-          ...(typeof rollout.contextKind === "string"
-            ? { rolloutContextKind: rollout.contextKind }
-            : {}),
+          rolloutWeights: weights,
+          ...rolloutFields(rollout),
         });
+      } else {
+        error(
+          "fallthrough",
+          missing
+            ? `Default rule not migrated: its percentage rollout includes ${
+              notInDestination(missing)
+            }`
+            : "Default rule not migrated: its percentage rollout has no weights",
+          missing?.variationKey,
+        );
       }
     }
   }
 
   // Off variation
-  if (envConfig.offVariation !== undefined) {
-    const destId = resolveDestId(envConfig.offVariation);
-    if (destId) {
-      instructions.push({ kind: "updateOffVariation", variationId: destId });
+  if (envConfig.offVariation !== undefined && envConfig.offVariation !== null) {
+    const r = resolve(envConfig.offVariation);
+    if (r.destId) {
+      instructions.push({ kind: "updateOffVariation", variationId: r.destId });
     } else {
-      warnings.push("Could not map off variation");
+      error(
+        "offVariation",
+        `Off variation not migrated: it is ${notInDestination(r)}`,
+        r.variationKey,
+      );
     }
   }
 
-  return { instructions, warnings };
+  if (typeof envConfig.trackEvents === "boolean") {
+    instructions.push({
+      kind: "updateTrackEvents",
+      trackEvents: envConfig.trackEvents,
+    });
+  }
+  if (typeof envConfig.trackEventsFallthrough === "boolean") {
+    instructions.push({
+      kind: "updateTrackEventsFallthrough",
+      trackEvents: envConfig.trackEventsFallthrough,
+    });
+  }
+
+  // Undocumented in the API reference; a new config starts with targeting on in every environment
+  if (typeof envConfig.enabled === "boolean") {
+    instructions.push({
+      kind: envConfig.enabled ? "enableTargeting" : "disableTargeting",
+    });
+  }
+
+  return { instructions, issues };
 }
 
 type ExistingResource =
@@ -1117,7 +1473,7 @@ type WritePlan =
   }
   | { kind: "skip" }
   | { kind: "abort" }
-  | { kind: "error" };
+  | { kind: "error"; reason: string };
 
 /** Migrate extracted AgentControl resources to destination project. */
 export async function migrateAgentControlFromExtract(
@@ -1147,6 +1503,73 @@ export async function migrateAgentControlFromExtract(
     modelConfigs: new Set<string>(),
     configs: new Set<string>(),
   };
+  const failures: AgentControlFailure[] = [];
+  const warnings: AgentControlWarning[] = [];
+  const missingModels: AgentControlMissingModel[] = [];
+  /** Records a failure and counts it as an error; the caller has already logged the request failure, if any */
+  const fail = (
+    stage: AgentControlReportStage,
+    key: string,
+    reason: string,
+    extra: { status?: number; destKey?: string; log?: boolean } = {},
+  ): void => {
+    failures.push({
+      stage,
+      key,
+      reason,
+      ...(extra.destKey && extra.destKey !== key.split("/")[0]
+        ? { destKey: extra.destKey }
+        : {}),
+      ...(extra.status !== undefined ? { status: extra.status } : {}),
+    });
+    summary.errors++;
+    if (extra.log !== false) {
+      console.log(Colors.red(`    ✗ ${key}: ${reason}`));
+    }
+  };
+  const warn = (
+    stage: AgentControlReportStage,
+    key: string,
+    message: string,
+  ): void => {
+    warnings.push({ stage, key, message });
+    console.log(Colors.yellow(`    ⚠ ${key}: ${message}`));
+  };
+  /** A failed write's outcome is counted through `fail`, not `recordOutcome` */
+  const writeFailure = (
+    stage: AgentControlReportStage,
+    key: string,
+    destKey?: string,
+  ) => {
+    let reported = false;
+    return {
+      onFailure: (f: UpsertFailure) => {
+        reported = true;
+        fail(stage, key, upsertFailureReason(f), {
+          status: f.status,
+          destKey,
+          log: false,
+        });
+      },
+      /** Count the outcome: an error the write did not report is recorded with a generic reason */
+      record: (outcome: UpsertOutcome) => {
+        if (outcome !== "error") recordOutcome(summary, outcome);
+        else if (!reported) fail(stage, key, "write failed", { destKey });
+      },
+    };
+  };
+  /** Source variations that were not written this run, with why (targeting names them) */
+  const failedVariations = new Map<string, Map<string, string>>();
+  const variationFailed = (
+    configKey: string,
+    variationKey: string,
+    reason: string,
+  ) => {
+    if (!failedVariations.has(configKey)) {
+      failedVariations.set(configKey, new Map());
+    }
+    failedVariations.get(configKey)!.set(variationKey, reason);
+  };
   const finish = (): AgentControlMigrationResult => ({
     summary,
     manifest,
@@ -1155,6 +1578,9 @@ export async function migrateAgentControlFromExtract(
       modelConfigs: [...expected.modelConfigs],
       configs: [...expected.configs],
     },
+    failures,
+    warnings,
+    missingModels,
   });
   const ensureConfig = (key: string): SyncManifestAgentControlConfig => {
     if (!Object.hasOwn(manifest.configs, key)) {
@@ -1248,10 +1674,10 @@ export async function migrateAgentControlFromExtract(
       const prefixedKey = `${prefix}${key}`;
       const taken = await fetchExisting(client, `${basePath}/${prefixedKey}`);
       if (taken.state === "exists") {
-        console.log(Colors.red(
-          `  ✗ ${label} ${key}: exists, and so does the prefixed key ${prefixedKey}; not overwriting it`,
-        ));
-        return { kind: "error" };
+        const reason =
+          `exists, and so does the prefixed key ${prefixedKey}; not overwriting it`;
+        console.log(Colors.red(`  ✗ ${label} ${key}: ${reason}`));
+        return { kind: "error", reason };
       }
       console.log(Colors.yellow(
         `  ⚠ ${label} ${key}: exists, writing it as ${prefixedKey}`,
@@ -1303,12 +1729,64 @@ export async function migrateAgentControlFromExtract(
 
   // Prefer only model configs referenced by extracted variations/targeting.
   // Provider catalogs are huge; migrating all of them is usually wrong/noisy.
-  const referencedModelKeys = await collectReferencedModelKeysFromExtract(
-    aiRoot,
-  );
+  const modelUsage = await collectModelUsageFromExtract(aiRoot);
+  const referencedModelKeys = new Set(modelUsage.keys());
   const modelsToMigrate = referencedModelKeys.size > 0
     ? modelItems.filter((m) => referencedModelKeys.has(String(m.key ?? "")))
     : modelItems;
+
+  // Preflight: built-in models (and ones the extract does not define) are not created by this
+  // migration, so the destination must already offer them. Instances differ (the Federal catalog is
+  // smaller than the commercial one), so check before writing anything, dry runs included.
+  const sourceModels = new Map(
+    modelItems.map((m) => [String(m.key ?? ""), m] as const),
+  );
+  const mustExist = [...referencedModelKeys].filter((k) => {
+    const m = sourceModels.get(k);
+    return !m || isBuiltInModel(m);
+  });
+  /** Models variations cannot use in the destination, with why */
+  const unavailableModels = new Map<string, string>();
+  let destModelKeys: Set<string> | undefined;
+  if (mustExist.length > 0) {
+    destModelKeys = await listDestinationModelKeys(client, dest);
+    if (!destModelKeys) {
+      warn(
+        "model-configs",
+        "model-configs",
+        "could not list the destination's model configs; built-in model availability was not checked",
+      );
+    } else {
+      for (const k of mustExist.sort()) {
+        if (destModelKeys.has(k)) continue;
+        missingModels.push({
+          modelKey: k,
+          usedBy: [...(modelUsage.get(k) ?? [])].sort(),
+        });
+        unavailableModels.set(
+          k,
+          `model "${k}" is not available in the destination`,
+        );
+      }
+      if (missingModels.length > 0) {
+        console.log(Colors.red(
+          `  ✗ ${missingModels.length} model(s) used by the source are not available in the destination:`,
+        ));
+        for (const m of missingModels) {
+          console.log(Colors.red(
+            `    ✗ ${m.modelKey} (used by ${
+              m.usedBy.join(", ") || "no variation"
+            })`,
+          ));
+        }
+      } else {
+        console.log(Colors.gray(
+          `  All ${mustExist.length} built-in model(s) used by the source are available in the destination`,
+        ));
+      }
+    }
+  }
+
   if (
     referencedModelKeys.size > 0 && modelsToMigrate.length < modelItems.length
   ) {
@@ -1334,13 +1812,20 @@ export async function migrateAgentControlFromExtract(
     }
     // Built-in (global) and restricted models cannot be created in the destination; skip without a write.
     // The API reports the flag as `global`; `isGlobal` is accepted for older extracts.
-    if (
-      model.global === true || model.isGlobal === true ||
-      model.isRestricted === true
-    ) {
-      console.log(
-        Colors.yellow(`  ⚠ Model config ${key}: skipped (global/restricted)`),
-      );
+    if (isBuiltInModel(model)) {
+      if (destModelKeys && !destModelKeys.has(key)) {
+        console.log(Colors.red(
+          `  ✗ Model config ${key}: built-in, and not available in the destination`,
+        ));
+      } else {
+        console.log(Colors.gray(
+          `  → Model config ${key}: built-in, ${
+            destModelKeys
+              ? "available in the destination"
+              : "not verified in the destination"
+          }`,
+        ));
+      }
       recordOutcome(summary, "skipped");
       continue;
     }
@@ -1390,7 +1875,7 @@ export async function migrateAgentControlFromExtract(
       continue;
     }
     if (plan.kind === "error") {
-      recordOutcome(summary, "error");
+      fail("model-configs", key, plan.reason, { log: false });
       if (!options.dryRun && previousEntry) {
         delete manifest.modelConfigs[key].hash;
       }
@@ -1400,19 +1885,29 @@ export async function migrateAgentControlFromExtract(
     const hash = await hashAgentControlInput(
       payloadFor(model, plan.destKey, plan.destName),
     );
+    const report = writeFailure("model-configs", key, plan.destKey);
     let outcome = await upsertAgentControlResource(
       client,
       modelBase,
       `${modelBase}/${plan.destKey}`,
       payloadFor(model, plan.destKey, plan.destName, plan.existingTags),
       options.dryRun,
-      { sanitize: (r) => r, knownExisting: plan.exists },
+      {
+        sanitize: (r) => r,
+        knownExisting: plan.exists,
+        immutableSkip: true,
+        onFailure: report.onFailure,
+      },
     );
     if (options.dryRun && outcome === "created" && plan.exists) {
       outcome = "updated";
     }
     logStageOutcome("Model config", key, outcome);
-    recordOutcome(summary, outcome);
+    report.record(outcome);
+    // A model config that is not in the destination cannot be used by the variations that name it
+    if (outcome === "error" && !plan.exists) {
+      unavailableModels.set(key, `model config "${key}" was not migrated`);
+    }
     if (options.dryRun) continue;
     if (outcome === "created" || outcome === "updated") {
       expected.modelConfigs.add(plan.destKey);
@@ -1490,7 +1985,7 @@ export async function migrateAgentControlFromExtract(
       continue;
     }
     if (plan.kind === "error") {
-      recordOutcome(summary, "error");
+      fail("configs", key, plan.reason, { log: false });
       configPlans.set(key, { destKey: key, blocked: true });
       if (!options.dryRun && previousEntry) delete manifest.configs[key].hash;
       continue;
@@ -1502,19 +1997,24 @@ export async function migrateAgentControlFromExtract(
     const hash = await hashAgentControlInput(
       payloadFor(config, plan.destKey, plan.destName),
     );
+    const report = writeFailure("configs", key, plan.destKey);
     let outcome = await upsertAgentControlResource(
       client,
       configBase,
       `${configBase}/${plan.destKey}`,
       payloadFor(config, plan.destKey, plan.destName, plan.existingTags),
       options.dryRun,
-      { sanitize: (r) => r, knownExisting: plan.exists },
+      {
+        sanitize: (r) => r,
+        knownExisting: plan.exists,
+        onFailure: report.onFailure,
+      },
     );
     if (options.dryRun && outcome === "created" && plan.exists) {
       outcome = "updated";
     }
     logStageOutcome("Config", key, outcome);
-    recordOutcome(summary, outcome);
+    report.record(outcome);
     configPlans.set(key, {
       destKey: plan.destKey,
       blocked: outcome === "skipped" || outcome === "error",
@@ -1535,16 +2035,36 @@ export async function migrateAgentControlFromExtract(
     configPlans.get(configKey) ?? { destKey: configKey, blocked: false };
 
   // Stage 3: variations
-  const variationFiles = await listVariationFiles(aiRoot);
+  const variationFiles = await sortVariationFilesBySourceOrder(
+    aiRoot,
+    await listVariationFiles(aiRoot),
+  );
   console.log(
     Colors.gray(`  Migrating ${variationFiles.length} variation(s)...`),
   );
+  /** Variations present in the destination after this stage, for the state stage */
+  const placedVariations: Array<{
+    configKey: string;
+    variationKey: string;
+    destConfigKey: string;
+    state: unknown;
+  }> = [];
   for (const { configKey, variationKey, filePath } of variationFiles) {
     if (aborted) break;
     const configPlan = planFor(configKey);
+    const label = `${configKey}/${variationKey}`;
+    const clearVariationHash = () => {
+      if (
+        !options.dryRun &&
+        Object.hasOwn(manifest.configs, configKey) &&
+        Object.hasOwn(manifest.configs[configKey].variations, variationKey)
+      ) {
+        delete manifest.configs[configKey].variations[variationKey].hash;
+      }
+    };
     if (configPlan.blocked) {
       console.log(Colors.gray(
-        `  → Variation ${configKey}/${variationKey}: skipped (its config was not written)`,
+        `  → Variation ${label}: skipped (its config was not written)`,
       ));
       recordOutcome(summary, "skipped");
       continue;
@@ -1553,7 +2073,12 @@ export async function migrateAgentControlFromExtract(
       | Record<string, unknown>
       | undefined;
     if (!variation) {
-      recordOutcome(summary, "error");
+      fail("variations", label, `could not read ${filePath}`);
+      variationFailed(
+        configKey,
+        variationKey,
+        "its extract file is unreadable",
+      );
       continue;
     }
     const hash = await hashAgentControlInput({
@@ -1569,30 +2094,68 @@ export async function migrateAgentControlFromExtract(
       !recreatedConfigs.has(configKey)
     ) {
       console.log(Colors.gray(
-        `  → Variation ${configKey}/${variationKey}: unchanged, skipping (--incremental)`,
+        `  → Variation ${label}: unchanged, skipping (--incremental)`,
       ));
       recordOutcome(summary, "skipped");
+      placedVariations.push({
+        configKey,
+        variationKey,
+        destConfigKey: configPlan.destKey,
+        state: variation.state,
+      });
       continue;
     }
+    // A variation whose model the destination does not offer would be rejected: report it instead
+    const unavailable = [...collectReferencedModelConfigKeys([variation])]
+      .map((m) => unavailableModels.get(m))
+      .find((reason) => reason !== undefined);
+    if (unavailable) {
+      fail("variations", label, `not migrated: ${unavailable}`, {
+        destKey: configPlan.destKey,
+      });
+      variationFailed(configKey, variationKey, unavailable);
+      clearVariationHash();
+      continue;
+    }
+    let writeReason: string | undefined;
+    const report = writeFailure("variations", label, configPlan.destKey);
     const outcome = await upsertAgentControlResource(
       client,
       `projects/${dest}/ai-configs/${configPlan.destKey}/variations`,
       `projects/${dest}/ai-configs/${configPlan.destKey}/variations/${variationKey}`,
       variation,
       options.dryRun,
-      { sanitize: sanitizeVariationPayload },
+      {
+        sanitize: sanitizeVariationPayload,
+        onFailure: (f) => {
+          writeReason = `its write failed (HTTP ${f.status})`;
+          report.onFailure(f);
+        },
+      },
     );
-    logStageOutcome("Variation", `${configKey}/${variationKey}`, outcome);
-    recordOutcome(summary, outcome);
+    logStageOutcome("Variation", label, outcome);
+    report.record(outcome);
+    if (outcome === "error") {
+      variationFailed(
+        configKey,
+        variationKey,
+        writeReason ?? "its write failed",
+      );
+      clearVariationHash();
+      continue;
+    }
+    placedVariations.push({
+      configKey,
+      variationKey,
+      destConfigKey: configPlan.destKey,
+      state: variation.state,
+    });
     if (options.dryRun) continue;
     if (outcome === "created" || outcome === "updated") {
-      ensureConfig(configKey).variations[variationKey] = { hash };
-    } else if (
-      outcome === "error" &&
-      Object.hasOwn(manifest.configs, configKey) &&
-      Object.hasOwn(manifest.configs[configKey].variations, variationKey)
-    ) {
-      delete manifest.configs[configKey].variations[variationKey].hash;
+      ensureConfig(configKey).variations[variationKey] = {
+        ...ownEntry(manifest.configs[configKey]?.variations, variationKey),
+        hash,
+      };
     }
   }
 
@@ -1615,7 +2178,7 @@ export async function migrateAgentControlFromExtract(
       | Record<string, unknown>
       | undefined;
     if (!targeting) {
-      recordOutcome(summary, "error");
+      fail("targeting", configKey, `could not read ${filePath}`);
       continue;
     }
 
@@ -1643,16 +2206,150 @@ export async function migrateAgentControlFromExtract(
           }
         },
       },
+      {
+        failedVariations: failedVariations.get(configKey) ?? new Map(),
+        fail: (key, reason, status) =>
+          fail("targeting", key, reason, {
+            status,
+            destKey: configPlan.destKey,
+          }),
+        warn: (key, message) => warn("targeting", key, message),
+      },
     );
     logStageOutcome("Targeting", configKey, outcome);
-    recordOutcome(summary, outcome);
+    // Failed environments were counted (with their reasons) as they happened
+    if (outcome !== "error") recordOutcome(summary, outcome);
+  }
+
+  // Stage 5: variation state. A variation is created published; archive the ones archived in the source,
+  // and restore ones this migration archived earlier that the source has since restored.
+  const archivedBefore = (configKey: string, variationKey: string) =>
+    ownEntry(ownEntry(previous?.configs, configKey)?.variations, variationKey)
+      ?.archived === true;
+  const stateChanges = placedVariations.filter((v) =>
+    v.state === "archived" || archivedBefore(v.configKey, v.variationKey)
+  );
+  if (stateChanges.length > 0 && !aborted) {
+    console.log(Colors.gray(
+      `  Checking the state of ${stateChanges.length} archived variation(s)...`,
+    ));
+  }
+  const destStates = new Map<string, Map<string, string> | undefined>();
+  const destStateOf = async (destConfigKey: string) => {
+    if (!destStates.has(destConfigKey)) {
+      const existing = await fetchExisting(
+        client,
+        `${configBase}/${destConfigKey}`,
+      );
+      destStates.set(
+        destConfigKey,
+        existing.state === "exists" && Array.isArray(existing.json.variations)
+          ? new Map(
+            (existing.json.variations as Record<string, unknown>[]).map(
+              (v) => [
+                resolveVariationKey(v) || String(v.key ?? ""),
+                typeof v.state === "string" ? v.state : "published",
+              ],
+            ),
+          )
+          : undefined,
+      );
+    }
+    return destStates.get(destConfigKey);
+  };
+  const recordArchived = (
+    configKey: string,
+    variationKey: string,
+    archived: boolean,
+  ) => {
+    if (options.dryRun) return;
+    const entry = {
+      ...ownEntry(manifest.configs[configKey]?.variations, variationKey),
+    };
+    if (archived) entry.archived = true;
+    else delete entry.archived;
+    ensureConfig(configKey).variations[variationKey] = entry;
+  };
+  for (const v of stateChanges) {
+    if (aborted) break;
+    const target = v.state === "archived" ? "archived" : "published";
+    const label = `${v.configKey}/${v.variationKey}`;
+    const states = await destStateOf(v.destConfigKey);
+    if (states?.get(v.variationKey) === target) {
+      recordArchived(v.configKey, v.variationKey, target === "archived");
+      recordOutcome(summary, "skipped");
+      continue;
+    }
+    if (target === "archived" && states) {
+      const active = [...states.entries()].filter(([k, s]) =>
+        k !== v.variationKey && k !== "disabled" && k !== "enabled" &&
+        s !== "archived"
+      );
+      if (active.length === 0) {
+        warn(
+          "variation-state",
+          label,
+          "archived in the source, but it is the config's only active variation in the destination, which cannot be archived",
+        );
+        continue;
+      }
+    }
+    const verb = target === "archived" ? "archive" : "restore";
+    if (options.dryRun) {
+      console.log(
+        Colors.gray(`    [DRY RUN] Would ${verb} variation ${label}`),
+      );
+      recordOutcome(summary, "updated");
+      continue;
+    }
+    const path =
+      `${configBase}/${v.destConfigKey}/variations/${v.variationKey}`;
+    const resp = await client.patch(path, { state: target });
+    if (resp.status >= 200 && resp.status < 300) {
+      console.log(Colors.green(
+        `  ✓ Variation ${label}: ${
+          target === "archived" ? "archived" : "restored"
+        }`,
+      ));
+      // Later variations of the same config are checked against the state this one now has
+      states?.set(v.variationKey, target);
+      recordArchived(v.configKey, v.variationKey, target === "archived");
+      recordOutcome(summary, "updated");
+    } else {
+      logUpsertFailure("PATCH", path, resp.status, resp.body);
+      fail(
+        "variation-state",
+        label,
+        `could not ${verb} the variation: ${
+          upsertFailureReason({
+            action: "PATCH",
+            path,
+            status: resp.status,
+            body: resp.body,
+          })
+        }`,
+        { status: resp.status, destKey: v.destConfigKey, log: false },
+      );
+    }
   }
 
   console.log(Colors.cyan("\nAgentControl summary:"));
   console.log(Colors.gray(`  Created: ${summary.created}`));
   console.log(Colors.gray(`  Updated: ${summary.updated}`));
   console.log(Colors.gray(`  Skipped: ${summary.skipped}`));
-  console.log(Colors.gray(`  Errors: ${summary.errors}`));
+  console.log(
+    (summary.errors > 0 ? Colors.red : Colors.gray)(
+      `  Errors: ${summary.errors}`,
+    ),
+  );
+  if (warnings.length > 0) {
+    console.log(Colors.yellow(`  Warnings: ${warnings.length}`));
+  }
+  if (missingModels.length > 0) {
+    console.log(Colors.red(
+      `  Models not available in the destination: ${missingModels.length}`,
+    ));
+  }
   if (aborted) {
     console.log(Colors.red("  Stopped early: --on-conflict abort"));
   }
@@ -1684,9 +2381,19 @@ interface TargetingTracking {
   record?: (sourceEnvKey: string, hash: string | undefined) => void;
 }
 
+interface TargetingReport {
+  /** Source variations of this config that were not written this run, with why */
+  failedVariations: Map<string, string>;
+  /** Records (and logs) a failure; each call counts as one error */
+  fail: (key: string, reason: string, status?: number) => void;
+  warn: (key: string, message: string) => void;
+}
+
 /**
  * Semantic-patch a config's per-environment targeting. `configKey` is the source key (names the extract
  * files); `destConfigKey` is where the config lives in the destination, which differs after a prefix.
+ * Each environment is patched with whatever maps; the parts that do not are reported as failures, and an
+ * environment that fails does not stop the others.
  */
 async function migrateConfigTargeting(
   client: AgentControlHttpClient,
@@ -1698,6 +2405,11 @@ async function migrateConfigTargeting(
   envMapping: Record<string, string>,
   dryRun: boolean,
   tracking: TargetingTracking = {},
+  report: TargetingReport = {
+    failedVariations: new Map(),
+    fail: () => {},
+    warn: () => {},
+  },
 ): Promise<UpsertOutcome> {
   const environments = (targeting.environments ?? {}) as Record<
     string,
@@ -1746,13 +2458,29 @@ async function migrateConfigTargeting(
     sourceVariations,
     dryRun,
   );
+  // A dry run invents destination IDs; variations that were not written this run would not have one
+  if (dryRun) {
+    for (const key of report.failedVariations.keys()) {
+      destVariationIdByKey.delete(key);
+    }
+  }
+
+  const envLabel = (sourceEnvKey: string) => {
+    const destEnvKey = envMapping[sourceEnvKey] ?? sourceEnvKey;
+    return `${configKey}/${sourceEnvKey}${
+      destEnvKey !== sourceEnvKey ? ` (destination ${destEnvKey})` : ""
+    }`;
+  };
 
   if (destVariationIdByKey.size === 0 && !dryRun) {
-    console.log(Colors.yellow(
-      `    ⚠ No destination variations found for ${destConfigKey}; skipping targeting`,
-    ));
-    for (const k of envKeys) tracking.record?.(k, undefined);
-    return "skipped";
+    for (const k of envKeys) {
+      report.fail(
+        envLabel(k),
+        `targeting not applied: no variations of ${destConfigKey} were found in the destination`,
+      );
+      tracking.record?.(k, undefined);
+    }
+    return "error";
   }
 
   let anyUpdated = false;
@@ -1760,64 +2488,87 @@ async function migrateConfigTargeting(
 
   for (const sourceEnvKey of envKeys) {
     const destEnvKey = envMapping[sourceEnvKey] ?? sourceEnvKey;
-    const { instructions, warnings } = buildTargetingInstructionsForEnvironment(
+    const label = envLabel(sourceEnvKey);
+    const { instructions, issues } = buildTargetingInstructionsForEnvironment(
       environments[sourceEnvKey],
       sourceVariations,
       destVariationIdByKey,
     );
-    for (const w of warnings) {
-      console.log(Colors.yellow(`    ⚠ ${configKey}/${sourceEnvKey}: ${w}`));
-      if (isCriticalTargetingWarning(w)) anyError = true;
-    }
-    if (instructions.length === 0) {
-      anyError = true;
-      tracking.record?.(sourceEnvKey, undefined);
-      continue;
+    // Name the earlier failure that left a variation out of the destination
+    const explain = (issue: TargetingIssue) => {
+      const why = issue.variationKey
+        ? report.failedVariations.get(issue.variationKey)
+        : undefined;
+      return why
+        ? `${issue.message} (variation "${issue.variationKey}" was not migrated: ${why})`
+        : issue.message;
+    };
+    const errors = issues.filter((i) => i.severity === "error");
+    for (const issue of issues) {
+      if (issue.severity === "warning") report.warn(label, issue.message);
     }
 
     if (dryRun) {
+      for (const issue of errors) report.fail(label, explain(issue));
       console.log(Colors.gray(
-        `    [DRY RUN] Would semantic-patch targeting ${destConfigKey} env=${destEnvKey} (${instructions.length} instruction(s))`,
+        `    [DRY RUN] Would semantic-patch targeting ${destConfigKey} env=${destEnvKey} (${instructions.length} instruction(s)${
+          errors.length > 0 ? `, ${errors.length} part(s) left out` : ""
+        })`,
       ));
-      if (!warnings.some(isCriticalTargetingWarning)) {
-        anyUpdated = true;
-      }
+      if (errors.length > 0) anyError = true;
+      else anyUpdated = true;
       continue;
     }
 
     if (!client.semanticPatch) {
-      console.log(Colors.red("    ✗ semanticPatch client not available"));
+      report.fail(
+        label,
+        "targeting not applied: semantic patch client not available",
+      );
       anyError = true;
       tracking.record?.(sourceEnvKey, undefined);
       continue;
     }
 
-    // Do not apply a partial targeting patch when critical mappings failed
-    if (warnings.some(isCriticalTargetingWarning)) {
-      tracking.record?.(sourceEnvKey, undefined);
-      continue;
-    }
-
-    const resp = await client.semanticPatch(
-      `projects/${dest}/ai-configs/${destConfigKey}/targeting`,
-      {
-        environmentKey: destEnvKey,
-        comment: "Migrated by ld-migration-scripts AgentControl",
-        instructions,
-      },
-    );
+    const path = `projects/${dest}/ai-configs/${destConfigKey}/targeting`;
+    const resp = await client.semanticPatch(path, {
+      environmentKey: destEnvKey,
+      comment: "Migrated by ld-migration-scripts AgentControl",
+      instructions,
+    });
 
     if (resp.status >= 200 && resp.status < 300) {
       anyUpdated = true;
-      tracking.record?.(sourceEnvKey, hashes.get(sourceEnvKey));
-    } else if (isAgentControlUnavailable(resp.status)) {
-      return "skipped";
+      if (errors.length === 0) {
+        console.log(Colors.green(`    ✓ ${label}: targeting applied`));
+        tracking.record?.(sourceEnvKey, hashes.get(sourceEnvKey));
+      } else {
+        console.log(Colors.yellow(
+          `    ⚠ ${label}: targeting applied without ${errors.length} part(s):`,
+        ));
+        for (const issue of errors) report.fail(label, explain(issue));
+        anyError = true;
+        // Not recorded: --incremental retries it once the missing variations exist
+        tracking.record?.(sourceEnvKey, undefined);
+      }
     } else {
       logUpsertFailure(
         "SEMANTIC PATCH targeting",
-        `${destConfigKey}/${destEnvKey}`,
+        `${path} env=${destEnvKey}`,
         resp.status,
         resp.body,
+      );
+      report.fail(
+        label,
+        `targeting not applied: ${
+          upsertFailureReason({
+            action: "PATCH",
+            path: `${path} (environment ${destEnvKey})`,
+            status: resp.status,
+            body: resp.body,
+          })
+        }`,
+        resp.status,
       );
       anyError = true;
       tracking.record?.(sourceEnvKey, undefined);
@@ -1900,26 +2651,58 @@ async function loadDestVariationIdByKey(
   return map;
 }
 
-async function collectReferencedModelKeysFromExtract(
+/** Built-in (global) and restricted model configs: offered by the instance, never created by a migration. */
+export function isBuiltInModel(model: Record<string, unknown>): boolean {
+  return model.global === true || model.isGlobal === true ||
+    model.isRestricted === true;
+}
+
+/** The model config keys the destination offers (its own and built-in), or undefined when they cannot be listed. */
+async function listDestinationModelKeys(
+  client: AgentControlHttpClient,
+  dest: string,
+): Promise<Set<string> | undefined> {
+  if (!client.get) return undefined;
+  const listed = await listAgentControlCollection(
+    client.get,
+    `projects/${dest}/ai-configs/model-configs`,
+  );
+  if (listed.unavailable || listed.error) return undefined;
+  return new Set(
+    listed.items.map((m) => String(m.key ?? "")).filter((k) => k !== ""),
+  );
+}
+
+/** Model key -> the `config/variation` keys in the extract that use it. */
+async function collectModelUsageFromExtract(
   aiRoot: string,
-): Promise<Set<string>> {
-  const records: Record<string, unknown>[] = [];
+): Promise<Map<string, Set<string>>> {
+  const usage = new Map<string, Set<string>>();
+  const add = (record: Record<string, unknown>, usedBy: string) => {
+    for (const modelKey of collectReferencedModelConfigKeys([record])) {
+      if (!usage.has(modelKey)) usage.set(modelKey, new Set());
+      usage.get(modelKey)!.add(usedBy);
+    }
+  };
   for (const file of await listVariationFiles(aiRoot)) {
     const v = await getJson(file.filePath) as
       | Record<string, unknown>
       | undefined;
-    if (v) records.push(v);
+    if (v) add(v, `${file.configKey}/${file.variationKey}`);
   }
   for (const file of await listTargetingFiles(aiRoot)) {
     const t = await getJson(file.filePath) as
       | Record<string, unknown>
       | undefined;
-    if (!t) continue;
-    if (Array.isArray(t.variations)) {
-      records.push(...t.variations as Record<string, unknown>[]);
+    if (!t || !Array.isArray(t.variations)) continue;
+    for (const v of t.variations as Record<string, unknown>[]) {
+      add(
+        v,
+        `${file.configKey}/${resolveVariationKey(v) || String(v.key ?? "?")}`,
+      );
     }
   }
-  return collectReferencedModelConfigKeys(records);
+  return usage;
 }
 
 async function directoryExists(path: string): Promise<boolean> {
@@ -1955,6 +2738,37 @@ async function listVariationFiles(
     }
   }
   return out;
+}
+
+/**
+ * Orders each config's variations as the source lists them in targeting, so the destination shows them
+ * in the same order and its default rule (which a new config points at the first variation created) is
+ * never an archived one. Variations targeting does not list (archived ones) come last, by key.
+ */
+async function sortVariationFilesBySourceOrder<
+  T extends { configKey: string; variationKey: string },
+>(aiRoot: string, files: T[]): Promise<T[]> {
+  const order = new Map<string, Map<string, number>>();
+  for (const configKey of new Set(files.map((f) => f.configKey))) {
+    const path = `${aiRoot}/targeting/${configKey}.json`;
+    const exists = await Deno.stat(path).then(() => true, () => false);
+    const targeting = exists
+      ? await getJson(path) as Record<string, unknown> | undefined
+      : undefined;
+    const variations = Array.isArray(targeting?.variations)
+      ? targeting.variations as Record<string, unknown>[]
+      : [];
+    order.set(
+      configKey,
+      new Map(variations.map((v, i) => [resolveVariationKey(v), i])),
+    );
+  }
+  const position = (f: T) =>
+    order.get(f.configKey)?.get(f.variationKey) ?? Number.MAX_SAFE_INTEGER;
+  return [...files].sort((a, b) =>
+    a.configKey.localeCompare(b.configKey) || position(a) - position(b) ||
+    a.variationKey.localeCompare(b.variationKey)
+  );
 }
 
 async function listTargetingFiles(

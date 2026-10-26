@@ -24,7 +24,10 @@ import {
 import * as Colors from "https://deno.land/std@0.149.0/fmt/colors.ts";
 import { parse as parseYaml } from "https://deno.land/std@0.224.0/yaml/parse.ts";
 import { getDestinationApiKey } from "../../utils/api_keys.ts";
-import { migrateAgentControlFromExtract } from "../../utils/agent_control.ts";
+import {
+  type AgentControlMigrationResult,
+  migrateAgentControlFromExtract,
+} from "../../utils/agent_control.ts";
 import { resolveDestinationProjectName } from "../../utils/workflow_config.ts";
 import { mergeTags } from "../../utils/tags.ts";
 import {
@@ -1037,6 +1040,15 @@ let updatedManifestAgentControl: SyncManifestAgentControl | null = null;
 // Destination keys the AgentControl phase left in place, for reconciliation against the destination
 let agentControlExpected: { modelConfigs: string[]; configs: string[] } | null =
   null;
+// What the AgentControl phase could not migrate (or migrated differently), for the summary and report file
+let agentControlReport:
+  | Pick<
+    AgentControlMigrationResult,
+    "summary" | "failures" | "warnings" | "missingModels"
+  >
+  | null = null;
+// Set when the AgentControl phase threw: everything after the failure point was not migrated
+let agentControlPhaseError: string | null = null;
 let incrementalSkipCount = 0;
 let incrementalEnvSkipCount = 0;
 let incrementalSegmentSkipCount = 0;
@@ -2436,18 +2448,22 @@ if (inputArgs.migrateAgentControl) {
     });
     updatedManifestAgentControl = aicResult.manifest;
     agentControlExpected = aicResult.expected;
+    agentControlReport = aicResult;
     if (aicResult.aborted && aicAbort) {
       const { resourceType, key } = aicAbort;
       requestAbort(resourceType, key);
       await finalizeAbort();
     }
   } catch (error) {
+    agentControlPhaseError = error instanceof Error
+      ? error.message
+      : String(error);
     console.log(Colors.red(
-      `  ✗ AgentControl migration error: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
+      `  ✗ AgentControl migration error: ${agentControlPhaseError}`,
     ));
-    console.log(Colors.yellow("  Continuing with flag migration..."));
+    console.log(Colors.yellow(
+      "  Continuing with flag migration (the run will exit with code 1)...",
+    ));
   }
 } else {
   console.log(Colors.gray("\n  AgentControl migration disabled, skipping..."));
@@ -4620,6 +4636,111 @@ const getMigrationStatusMessage = (
   };
 };
 
+/** AgentControl problems that make the run fail: each unmigrated resource or part, and a phase crash. */
+const agentControlErrorCount = (): number =>
+  (agentControlReport?.failures.length ?? 0) +
+  (agentControlPhaseError ? 1 : 0);
+
+const AGENT_CONTROL_STAGE_LABELS: Record<string, string> = {
+  "model-configs": "Model configs",
+  configs: "Configs",
+  variations: "Variations",
+  targeting: "Targeting",
+  "variation-state": "Variation state (archived)",
+};
+
+const printAgentControlSections = (): void => {
+  if (agentControlPhaseError) {
+    console.log(Colors.red("\n❌ AGENTCONTROL PHASE FAILED"));
+    console.log(Colors.red(`  ✗ ${agentControlPhaseError}`));
+    console.log(Colors.gray(
+      "  → AgentControl resources after the failure point were not migrated",
+    ));
+  }
+  if (!agentControlReport) return;
+  const { failures, warnings, missingModels } = agentControlReport;
+
+  if (missingModels.length > 0) {
+    console.log(Colors.red("\n❌ MODELS NOT AVAILABLE IN DESTINATION"));
+    for (const m of missingModels) {
+      console.log(Colors.red(`  ✗ ${m.modelKey}`));
+      if (m.usedBy.length > 0) {
+        console.log(Colors.gray(`      used by: ${m.usedBy.join(", ")}`));
+      }
+    }
+    console.log(Colors.gray(
+      "  → The destination's model catalog does not include these models. Change the variations to a model the destination offers, then re-run.",
+    ));
+  }
+
+  if (failures.length > 0) {
+    console.log(Colors.red(
+      `\n❌ AGENTCONTROL ERRORS (${failures.length} not migrated)`,
+    ));
+    const stages = [...new Set(failures.map((f) => f.stage))];
+    for (const stage of stages) {
+      console.log(
+        Colors.red(`  ${AGENT_CONTROL_STAGE_LABELS[stage] ?? stage}:`),
+      );
+      for (const f of failures.filter((x) => x.stage === stage)) {
+        const where = f.destKey ? ` → ${f.destKey}` : "";
+        const status = f.status !== undefined ? ` [HTTP ${f.status}]` : "";
+        console.log(Colors.red(`    ✗ ${f.key}${where}${status}: ${f.reason}`));
+      }
+    }
+    console.log(Colors.gray(
+      "  → Fix the cause, then re-run; with --incremental only these are retried",
+    ));
+  }
+
+  if (warnings.length > 0) {
+    console.log(Colors.yellow(
+      `\n⚠️  AGENTCONTROL WARNINGS (${warnings.length} migrated with differences)`,
+    ));
+    for (const w of warnings) {
+      console.log(Colors.yellow(`  ⚠ ${w.key}: ${w.message}`));
+    }
+  }
+};
+
+/** JSON report of the AgentControl phase, so a run can be reviewed (or shared) without its console log. */
+async function writeAgentControlReport(): Promise<void> {
+  if (!agentControlReport && !agentControlPhaseError) return;
+  const dir = "./data/launchdarkly-migrations/reports";
+  const path =
+    `${dir}/agent-control-${inputArgs.projKeySource}-${inputArgs.projKeyDest}.json`;
+  try {
+    await Deno.mkdir(dir, { recursive: true });
+    await Deno.writeTextFile(
+      path,
+      JSON.stringify(
+        {
+          generatedAt: new Date().toISOString(),
+          sourceProject: inputArgs.projKeySource,
+          destProject: inputArgs.projKeyDest,
+          destDomain: domain,
+          dryRun: inputArgs.dryRun === true,
+          summary: agentControlReport?.summary ?? null,
+          phaseError: agentControlPhaseError,
+          missingModels: agentControlReport?.missingModels ?? [],
+          failures: agentControlReport?.failures ?? [],
+          warnings: agentControlReport?.warnings ?? [],
+          missingAfterRun: agentControlMissing,
+        },
+        null,
+        2,
+      ),
+    );
+    console.log(Colors.gray(`\n  AgentControl report written to ${path}`));
+  } catch (error) {
+    console.log(Colors.yellow(
+      `  ⚠ Could not write the AgentControl report ${path}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    ));
+  }
+}
+
 /**
  * Prints the complete migration summary report
  */
@@ -4655,13 +4776,15 @@ const printMigrationSummary = (
       Colors.gray("  → Destination state was not verified for these resources"),
     );
   }
+  printAgentControlSections();
 
   console.log(conflictReport);
 
   const { message, color } = getMigrationStatusMessage(
     approvals.length,
     flagsWithErrors.size + segmentsWithErrors.size +
-      agentControlMissing.length + reconciliationErrors.length,
+      agentControlMissing.length + reconciliationErrors.length +
+      agentControlErrorCount(),
   );
 
   console.log(Colors.blue(`\n${divider}`));
@@ -4877,6 +5000,7 @@ async function reconcileAgentControl(): Promise<void> {
 
 await reconcileDestination();
 await reconcileAgentControl();
+await writeAgentControlReport();
 
 // Print the migration summary
 printMigrationSummary(
@@ -4889,7 +5013,7 @@ printMigrationSummary(
 if (
   flagsWithErrors.size > 0 || segmentsWithErrors.size > 0 ||
   agentControlMissing.length > 0 || reconciliationErrors.length > 0 ||
-  viewLinkingFailed || manifestWriteFailed
+  agentControlErrorCount() > 0 || viewLinkingFailed || manifestWriteFailed
 ) {
   Deno.exit(1);
 }
