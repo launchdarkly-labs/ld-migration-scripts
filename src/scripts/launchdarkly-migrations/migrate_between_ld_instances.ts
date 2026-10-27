@@ -56,6 +56,7 @@ import {
 import { getAccountId } from "../../utils/account_guard.ts";
 import { linkToView, type SourceView } from "../../utils/views.ts";
 import {
+  afterUnreadWrite,
   type DestFlagState,
   type DestSegmentState,
   detectFlagEdits,
@@ -5091,8 +5092,13 @@ async function recordDestinationState(): Promise<void> {
             `flags/${inputArgs.projKeyDest}/${destKey}`,
           );
           observed = copy ? await observeFlag(copy, destEnvs) : undefined;
-          // Without the state this run left, a later modification is what counts as an edit
-          if (!copy) base = { ...entry, dest: { since: Date.now() } };
+          // Without the state this run left, a later modification of what it wrote counts as an edit
+          if (!copy) {
+            base = {
+              ...entry,
+              dest: afterUnreadWrite(entry.dest, destEnvs, Date.now()),
+            };
+          }
         }
         // A request from an earlier run stays exempt while it is still open, so applying it later is not
         // taken for a destination edit; once applied or closed, the next run re-baselines the environment

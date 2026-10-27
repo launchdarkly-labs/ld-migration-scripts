@@ -27,6 +27,11 @@ export interface DestEnvState {
   version?: number;
   lastModified?: number;
   fingerprint?: string;
+  /**
+   * Epoch ms, set when the environment was written but the copy could not be read back afterwards:
+   * a modification after it counts as a destination edit (no fingerprint is recorded then)
+   */
+  since?: number;
 }
 
 /** The destination state of a flag copy as the migration left it (flag level and per destination environment). */
@@ -34,18 +39,31 @@ export interface DestFlagState {
   version?: number;
   fingerprint?: string;
   environments?: Record<string, DestEnvState>;
-  /**
-   * Epoch ms, set when the copy could not be read back after this run's writes: a modification after
-   * it counts as a destination edit wherever no fingerprint is recorded
-   */
-  since?: number;
+}
+
+/**
+ * The record after a run wrote `writtenEnvs` of a copy it could not read back: those environments
+ * fall back to `at`, the flag-level fingerprint goes (it no longer describes the copy), and every
+ * other environment keeps its record.
+ */
+export function afterUnreadWrite(
+  dest: DestFlagState | undefined,
+  writtenEnvs: Iterable<string>,
+  at: number,
+): DestFlagState {
+  const environments: Record<string, DestEnvState> = Object.assign(
+    Object.create(null),
+    dest?.environments ?? {},
+  );
+  for (const env of writtenEnvs) environments[env] = { since: at };
+  return { environments };
 }
 
 export interface DestSegmentState {
   version?: number;
   lastModified?: number;
   fingerprint?: string;
-  /** See DestFlagState.since */
+  /** See DestEnvState.since */
   since?: number;
 }
 
@@ -292,7 +310,6 @@ export function detectFlagEdits(
       deleted: true,
     };
   }
-  const cutoff = entry.dest?.since ?? fallbackSince;
   const edited: string[] = [];
   for (const env of guardEnvKeys(entry, runEnvs)) {
     const current = observed.environments?.[env];
@@ -304,6 +321,7 @@ export function detectFlagEdits(
     // Our own pending approval request may have been applied since: not an independent edit
     if (entry.awaitingApproval?.includes(env)) continue;
     const recorded = entry.dest?.environments?.[env];
+    const cutoff = recorded?.since ?? fallbackSince;
     if (recorded?.fingerprint) {
       if (recorded.fingerprint !== current.fingerprint) edited.push(env);
     } else if (
@@ -358,7 +376,6 @@ export function nextFlagTargetRecord(
       entry?.dest?.environments ?? {},
     ),
   };
-  // dest.since stays: it covers environments that still have no fingerprint
   if (observed && !deleted) {
     if (!ownedFlag) {
       dest.version = observed.version;
@@ -371,7 +388,7 @@ export function nextFlagTargetRecord(
   const copies = entry?.targetOwned?.copies ?? [];
   const record: FlagTargetRecord = {};
   if (
-    dest.fingerprint !== undefined || dest.since !== undefined ||
+    dest.fingerprint !== undefined ||
     Object.keys(dest.environments ?? {}).length > 0
   ) {
     record.dest = dest;

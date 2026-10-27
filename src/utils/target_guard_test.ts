@@ -1,5 +1,6 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  afterUnreadWrite,
   detectFlagEdits,
   detectSegmentEdit,
   flagLevelMatchesRecord,
@@ -345,32 +346,31 @@ Deno.test("nextSegmentTargetRecord keeps the old record once owned", async () =>
 });
 
 Deno.test("a copy that could not be read back counts as edited when modified after the run", async () => {
-  const now = await observeFlag(destFlag(), ENVS); // production modified at 1000, stage at 2000
+  const recorded = await observeFlag(destFlag(), ENVS);
+  // a run wrote stage only, then could not read the copy back
+  const dest = afterUnreadWrite(recorded, ["stage"], 1_500);
+  assertEquals(dest.fingerprint, undefined);
+  assertEquals(dest.environments!.stage, { since: 1_500 });
+  // production, not written, keeps its fingerprint
   assertEquals(
-    detectFlagEdits({ dest: { since: 1_500 } }, now, ENVS).environments,
-    ["stage"],
+    dest.environments!.production,
+    recorded.environments!.production,
   );
-  // a later read records fingerprints for what it sees; the cutoff stays for environments it did not see
-  const partly = await observeFlag(destFlag(), ["stage"]);
-  const record = nextFlagTargetRecord(
-    { dest: { since: 1_500 } },
-    NO_FLAG_EDITS,
-    partly,
-  );
-  assertEquals(record.dest?.since, 1_500);
+  const now = await observeFlag(destFlag(), ENVS); // production modified at 1000, stage at 2000
+  assertEquals(detectFlagEdits({ dest }, now, ENVS).environments, ["stage"]);
   assertEquals(
     detectFlagEdits(
-      record,
-      await observeFlag(destFlag({ on: true }), ENVS),
+      { dest: afterUnreadWrite(recorded, ["stage"], 2_500) },
+      now,
       ENVS,
-    )
-      .environments,
-    [],
+    ),
+    NO_FLAG_EDITS,
   );
+  // a later read records the fingerprint again
   assertEquals(
-    nextFlagTargetRecord({ dest: { since: 1_500 } }, NO_FLAG_EDITS, undefined)
-      .dest,
-    { since: 1_500, environments: {} },
+    nextFlagTargetRecord({ dest }, NO_FLAG_EDITS, now).dest!.environments!
+      .stage,
+    now.environments!.stage,
   );
   const segment = await observeSegment(destSegment(["a"])); // modified at 3000
   assertEquals(
