@@ -1,7 +1,7 @@
 /**
  * The run record `migrate` writes after every run, dry runs included:
- *   data/launchdarkly-migrations/runs/<startedAt>-<sourceProject>-<destProject>.json
- *   data/launchdarkly-migrations/runs/latest-<sourceProject>-<destProject>.json (a copy of the newest)
+ *   data/launchdarkly-migrations/runs/<sourceProject>/<destProject>/<startedAt>.json
+ *   data/launchdarkly-migrations/runs/<sourceProject>/<destProject>/latest.json (a copy of the newest)
  *
  * Unlike the sync manifest (the cumulative inventory of what the migration owns), a run record
  * describes one run: when it ran, in which mode and scope, what it wrote, which destination edits it
@@ -120,10 +120,11 @@ export function runRecordPaths(
   destProject: string,
   baseDir: string = MIGRATION_DATA_DIR,
 ): { path: string; latestPath: string } {
-  const dir = `${baseDir}/runs`;
+  // One directory per pair: project keys cannot contain "/", so pairs never share a file
+  const dir = `${baseDir}/runs/${sourceProject}/${destProject}`;
   return {
-    path: `${dir}/${fileStamp(startedAt)}-${sourceProject}-${destProject}.json`,
-    latestPath: `${dir}/latest-${sourceProject}-${destProject}.json`,
+    path: `${dir}/${fileStamp(startedAt)}.json`,
+    latestPath: `${dir}/latest.json`,
   };
 }
 
@@ -138,7 +139,7 @@ export async function writeRunRecord(
     record.destination.projectKey,
     baseDir,
   );
-  await Deno.mkdir(`${baseDir}/runs`, { recursive: true });
+  await Deno.mkdir(path.slice(0, path.lastIndexOf("/")), { recursive: true });
   const text = JSON.stringify(record, null, 2);
   await Deno.writeTextFile(path, text);
   await Deno.writeTextFile(latestPath, text);

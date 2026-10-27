@@ -1883,15 +1883,26 @@ if (contextKinds && contextKinds.length > 0) {
       );
       continue;
     }
-    const resp = await rateLimitRequest(
-      ldAPIPutRequest(
-        apiKey,
-        domain,
-        `projects/${inputArgs.projKeyDest}/context-kinds/${kind.key}`,
-        body,
-      ),
-      "context-kinds",
-    );
+    // A failed request is reported like a rejected one, so the run still reaches its run record
+    let resp: Response;
+    try {
+      resp = await rateLimitRequest(
+        ldAPIPutRequest(
+          apiKey,
+          domain,
+          `projects/${inputArgs.projKeyDest}/context-kinds/${kind.key}`,
+          body,
+        ),
+        "context-kinds",
+      );
+    } catch (error) {
+      console.log(Colors.red(
+        `  ✗ Context kind "${kind.key}" failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      ));
+      continue;
+    }
     if (resp.status >= 200 && resp.status < 300) {
       console.log(Colors.green(`  ✓ Context kind "${kind.key}" upserted`));
     } else {
@@ -5206,7 +5217,7 @@ async function writeRunRecordFile(
   exitCode: number,
   incomplete?: string,
 ): Promise<void> {
-  const envMap: Record<string, string> = {};
+  const envMap = emptyRecord<string>();
   for (const env of envkeys) envMap[env] = destEnvFor(env);
   const split = (list?: string) =>
     list ? list.split(",").map((k) => k.trim()).filter(Boolean) : undefined;

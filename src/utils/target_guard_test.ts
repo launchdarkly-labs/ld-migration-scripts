@@ -423,3 +423,18 @@ Deno.test("sourceFlagLevelDigest changes with flag-level fields only", () => {
     false,
   );
 });
+
+Deno.test("observeFlag ignores generated rule metadata", async () => {
+  const a = await observeFlag(destFlag(), ENVS);
+  const b = destFlag();
+  Object.assign(b.environments.production.rules[0], {
+    _generation: 4,
+    _version: 2,
+    _ref: "x",
+    _deleted: false,
+  });
+  assertEquals(
+    (await observeFlag(b, ENVS)).environments!.production.fingerprint,
+    a.environments!.production.fingerprint,
+  );
+});

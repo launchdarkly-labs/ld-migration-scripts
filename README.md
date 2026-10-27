@@ -1047,7 +1047,7 @@ After every real run, `migrate` writes `data/launchdarkly-migrations/sync-manife
 
 ## Run Records
 
-Every `migrate` run that gets past its setup checks (dry runs and aborted runs included) writes a run record to `data/launchdarkly-migrations/runs/<startedAt>-<source>-<dest>.json` and a copy of the newest one to `runs/latest-<source>-<dest>.json`. Where the sync manifest is the cumulative inventory, a run record describes one run, for people and for tools such as the [project sync check](https://github.com/launchdarkly-labs/ld-project-sync-check):
+Every `migrate` run that gets past its setup checks (dry runs and aborted runs included) writes a run record to `data/launchdarkly-migrations/runs/<source>/<dest>/<startedAt>.json` and a copy of the newest one to `runs/<source>/<dest>/latest.json`. Where the sync manifest is the cumulative inventory, a run record describes one run, for people and for tools such as the [project sync check](https://github.com/launchdarkly-labs/ld-project-sync-check):
 
 - `schemaVersion` (currently 1), `startedAt`, `finishedAt`, `toolVersion`, `configFile`, `dryRun`, and `incomplete` with the reason when the run stopped early
 - `mode`: `full`, `incremental`, `targeted` (`includeFlags` / `excludeFlags`), `since` or `dry-run`

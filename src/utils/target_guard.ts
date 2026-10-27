@@ -173,6 +173,19 @@ const withoutId = (item: unknown): unknown => {
   return rest;
 };
 
+/** A rule without the metadata LaunchDarkly generates for it (what buildRulesReplace strips too). */
+const withoutRuleMetadata = (rule: unknown): unknown => {
+  if (rule === null || typeof rule !== "object" || Array.isArray(rule)) {
+    return rule;
+  }
+  const { _id, _generation, _deleted, _version, _ref, ...rest } =
+    rule as Record<
+      string,
+      unknown
+    >;
+  return rest;
+};
+
 /**
  * Drops the IDs LaunchDarkly generates for variations, rules and clauses (they are not content), and
  * nothing else: an `_id` inside a JSON variation value or a custom property is user data.
@@ -182,7 +195,7 @@ function withoutGeneratedIds(field: string, value: unknown): unknown {
   if (field === "variations") return value.map(withoutId);
   if (field === "rules") {
     return value.map((rule) => {
-      const r = withoutId(rule) as Record<string, unknown>;
+      const r = withoutRuleMetadata(rule) as Record<string, unknown>;
       return r && Array.isArray(r.clauses)
         ? { ...r, clauses: r.clauses.map(withoutId) }
         : r;

@@ -15,13 +15,19 @@ Deno.test("runMode names the run by its scope", () => {
   assertEquals(runMode({}), "full");
 });
 
-Deno.test("runRecordPaths uses a file-name-safe timestamp", () => {
+Deno.test("runRecordPaths uses a file-name-safe timestamp and one directory per project pair", () => {
   assertEquals(
     runRecordPaths("2026-10-23T09:15:00.123Z", "default", "default", "/d"),
     {
-      path: "/d/runs/2026-10-23T09-15-00-123Z-default-default.json",
-      latestPath: "/d/runs/latest-default-default.json",
+      path: "/d/runs/default/default/2026-10-23T09-15-00-123Z.json",
+      latestPath: "/d/runs/default/default/latest.json",
     },
+  );
+  // a-b -> c and a -> b-c no longer share a latest record
+  assertEquals(
+    runRecordPaths("2026-10-23T09:15:00.123Z", "a-b", "c", "/d").latestPath ===
+      runRecordPaths("2026-10-23T09:15:00.123Z", "a", "b-c", "/d").latestPath,
+    false,
   );
 });
 
@@ -37,7 +43,7 @@ Deno.test("writeRunRecord writes the record and the latest copy", async () => {
     const path = await writeRunRecord(record, dir);
     assertEquals(JSON.parse(await Deno.readTextFile(path)), record);
     assertEquals(
-      JSON.parse(await Deno.readTextFile(`${dir}/runs/latest-src-dst.json`)),
+      JSON.parse(await Deno.readTextFile(`${dir}/runs/src/dst/latest.json`)),
       record,
     );
   } finally {
