@@ -2,6 +2,8 @@ import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   detectFlagEdits,
   detectSegmentEdit,
+  flagLevelMatchesRecord,
+  guardEnvKeys,
   nextFlagTargetRecord,
   nextSegmentTargetRecord,
   NO_FLAG_EDITS,
@@ -76,6 +78,7 @@ Deno.test("detectFlagEdits finds an environment edited in the destination", asyn
   assertEquals(edits, {
     flagLevel: false,
     environments: ["production"],
+    otherEnvironments: [],
     deleted: false,
   });
   assertEquals(protectsFlagLevel(edits), true);
@@ -94,7 +97,12 @@ Deno.test("detectFlagEdits finds flag-level edits and nothing when unchanged", a
       await observeFlag(destFlag({ name: "Renamed" }), ENVS),
       ENVS,
     ),
-    { flagLevel: true, environments: [], deleted: false },
+    {
+      flagLevel: true,
+      environments: [],
+      otherEnvironments: [],
+      deleted: false,
+    },
   );
 });
 
@@ -113,8 +121,22 @@ Deno.test("detectFlagEdits reports a recorded copy that is gone as deleted", () 
   assertEquals(detectFlagEdits({}, undefined, ENVS), {
     flagLevel: true,
     environments: [],
+    otherEnvironments: [],
     deleted: true,
   });
+});
+
+Deno.test("detectFlagEdits leaves every environment of a copy recreated after its deletion alone", async () => {
+  const now = await observeFlag(destFlag(), ENVS);
+  assertEquals(
+    detectFlagEdits({ dest: now, targetOwned: { deleted: true } }, now, ENVS),
+    {
+      flagLevel: true,
+      environments: ["production", "stage"],
+      otherEnvironments: [],
+      deleted: true,
+    },
+  );
 });
 
 Deno.test("detectFlagEdits falls back to the previous run's end for entries without a record", async () => {
@@ -129,8 +151,57 @@ Deno.test("detectFlagEdits keeps owned parts owned even after the edit is undone
   const now = await observeFlag(destFlag(), ENVS);
   const entry = { dest: now, targetOwned: { environments: ["stage"] } };
   assertEquals(detectFlagEdits(entry, now, ENVS).environments, ["stage"]);
-  // an environment no longer migrated is not reported
-  assertEquals(detectFlagEdits(entry, now, ["production"]), NO_FLAG_EDITS);
+  // an environment no longer migrated is not written, but still keeps the shared flag-level fields
+  const edits = detectFlagEdits(entry, now, ["production"]);
+  assertEquals(edits.environments, []);
+  assertEquals(edits.otherEnvironments, ["stage"]);
+  assertEquals(protectsFlagLevel(edits), true);
+});
+
+Deno.test("detectFlagEdits checks recorded environments outside this run's mapping", async () => {
+  const recorded = await observeFlag(destFlag(), ENVS);
+  const entry = { dest: recorded };
+  assertEquals(guardEnvKeys(entry, ["stage"]).sort(), ENVS);
+  const now = await observeFlag(
+    destFlag({ on: true }),
+    guardEnvKeys(entry, ["stage"]),
+  );
+  assertEquals(detectFlagEdits(entry, now, ["stage"]), {
+    flagLevel: false,
+    environments: [],
+    otherEnvironments: ["production"],
+    deleted: false,
+  });
+  assertEquals(
+    nextFlagTargetRecord(entry, detectFlagEdits(entry, now, ["stage"]), now)
+      .targetOwned,
+    { environments: ["production"] },
+  );
+});
+
+Deno.test("observeFlag keeps an _id inside a JSON variation value as content", async () => {
+  const a = destFlag();
+  a.variations = [{ _id: "v1", value: { _id: "old" } as any }];
+  const b = destFlag();
+  b.variations = [{ _id: "v1", value: { _id: "new" } as any }];
+  const fa = (await observeFlag(a, ENVS)).fingerprint;
+  assertEquals(fa === (await observeFlag(b, ENVS)).fingerprint, false);
+});
+
+Deno.test("flagLevelMatchesRecord tells a destination-only lifecycle edit from a source change", async () => {
+  const entry = { dest: await observeFlag(destFlag(), ENVS) };
+  const archivedInDest = { ...destFlag(), archived: true };
+  // the source still has archived: false, as last written: the destination archived it
+  assertEquals(
+    await flagLevelMatchesRecord(entry, archivedInDest, { archived: false }),
+    true,
+  );
+  // the source deprecated it: a change the destination copy was not given
+  assertEquals(
+    await flagLevelMatchesRecord(entry, destFlag(), { deprecated: true }),
+    false,
+  );
+  assertEquals(await flagLevelMatchesRecord({}, destFlag(), {}), false);
 });
 
 Deno.test("detectFlagEdits does not take an applied approval request of the migration for an edit", async () => {
@@ -149,7 +220,12 @@ Deno.test("detectFlagEdits does not take an applied approval request of the migr
 Deno.test("nextFlagTargetRecord records the observed state and keeps owned parts", async () => {
   const before = await observeFlag(destFlag(), ENVS);
   const after = await observeFlag(destFlag({ on: true, stageOn: false }), ENVS);
-  const edits = { flagLevel: false, environments: ["stage"], deleted: false };
+  const edits = {
+    flagLevel: false,
+    environments: ["stage"],
+    otherEnvironments: [],
+    deleted: false,
+  };
   const record = nextFlagTargetRecord({ dest: before }, edits, after);
   assertEquals(record.targetOwned, { environments: ["stage"] });
   // production takes the state after this run's write; stage keeps the record from before the edit
@@ -162,7 +238,12 @@ Deno.test("nextFlagTargetRecord records the observed state and keeps owned parts
   // the next run compares against that record: production unchanged, stage still owned
   assertEquals(
     detectFlagEdits(record, after, ENVS),
-    { flagLevel: false, environments: ["stage"], deleted: false },
+    {
+      flagLevel: false,
+      environments: ["stage"],
+      otherEnvironments: [],
+      deleted: false,
+    },
   );
 });
 
@@ -179,6 +260,7 @@ Deno.test("nextFlagTargetRecord keeps the previous record when the copy was not 
     nextFlagTargetRecord({ dest: before }, {
       flagLevel: true,
       environments: [],
+      otherEnvironments: [],
       deleted: true,
     }, undefined)
       .targetOwned,
@@ -192,6 +274,20 @@ Deno.test("nextFlagTargetRecord records approval requests for re-baselining", as
     nextFlagTargetRecord(undefined, NO_FLAG_EDITS, now, ["stage", "stage"])
       .awaitingApproval,
     ["stage"],
+  );
+});
+
+Deno.test("nextFlagTargetRecord serializes an environment named __proto__", async () => {
+  const flag = destFlag();
+  Object.defineProperty(flag.environments, "__proto__", {
+    value: flag.environments.stage,
+    enumerable: true,
+  });
+  const now = await observeFlag(flag, ["__proto__"]);
+  const record = nextFlagTargetRecord({}, NO_FLAG_EDITS, now);
+  assertEquals(
+    Object.keys(JSON.parse(JSON.stringify(record)).dest.environments),
+    ["__proto__"],
   );
 });
 
@@ -223,6 +319,15 @@ Deno.test("detectSegmentEdit compares the recorded fingerprint, else the previou
   assertEquals(
     detectSegmentEdit({ targetOwned: "edited" }, recorded),
     "edited",
+  );
+  // an edited copy deleted later is deleted, and stays so
+  assertEquals(
+    detectSegmentEdit({ targetOwned: "edited" }, undefined),
+    "deleted",
+  );
+  assertEquals(
+    nextSegmentTargetRecord({ targetOwned: "edited" }, "deleted", undefined),
+    { targetOwned: "deleted" },
   );
 });
 

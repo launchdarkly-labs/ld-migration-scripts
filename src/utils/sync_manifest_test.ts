@@ -548,8 +548,9 @@ Deno.test("retireDeletedFlags drops entries whose copies a revert deleted and ke
         environments: {},
         destKey: "imported-c",
         extraDestKeys: ["c"],
+        dest: { fingerprint: "of-imported-c" },
       },
-      d: { version: 1, environments: {} },
+      d: { version: 1, environments: {}, dest: { fingerprint: "of-d" } },
     },
   };
   // a and both copies of b deleted; c's prefixed copy failed to delete; d was not touched
@@ -559,6 +560,7 @@ Deno.test("retireDeletedFlags drops entries whose copies a revert deleted and ke
     version: 1,
     environments: {},
     destKey: "imported-c",
+    dest: { fingerprint: "of-imported-c" },
   });
   assertEquals(after.flags.d, before.flags.d);
   assertEquals(manifestDestinationFlagKeys(after), ["imported-c", "d"]);
@@ -568,17 +570,19 @@ Deno.test("retireDeletedFlags drops entries whose copies a revert deleted and ke
     {},
   );
   // A surviving extra copy becomes the main copy, with its cached versions dropped: reruns only kept the
-  // primary in sync, so the next --incremental run must re-sync the promoted copy in full
+  // primary in sync, so the next --incremental run must re-sync the promoted copy in full (the recorded
+  // destination state described the deleted primary and is dropped too)
   assertEquals(
     retireDeletedFlags(before, ["imported-c"]).flags.c,
     { version: 0, lastModified: undefined, environments: {} },
     "c survives under its own key and is re-synced",
   );
-  // No promotion: the primary survives and its versions are kept
+  // No promotion: the primary survives and its versions and recorded state are kept
   assertEquals(retireDeletedFlags(before, ["c"]).flags.c, {
     version: 1,
     environments: {},
     destKey: "imported-c",
+    dest: { fingerprint: "of-imported-c" },
   });
 });
 

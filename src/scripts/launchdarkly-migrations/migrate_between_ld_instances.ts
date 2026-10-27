@@ -61,7 +61,9 @@ import {
   detectFlagEdits,
   detectSegmentEdit,
   epochMs,
+  flagLevelMatchesRecord,
   type FlagTargetEdits,
+  guardEnvKeys,
   nextFlagTargetRecord,
   nextSegmentTargetRecord,
   NO_FLAG_EDITS,
@@ -1032,6 +1034,20 @@ const syncManifestPath = syncManifestPathFor(
   inputArgs.projKeySource,
   inputArgs.projKeyDest,
 );
+// Validated before anything is written, so an invalid date never leaves a run without its record
+let sinceDate: Date | null = null;
+if (inputArgs.since) {
+  sinceDate = new Date(inputArgs.since);
+  if (isNaN(sinceDate.getTime())) {
+    console.log(
+      Colors.red(
+        `Error: Invalid --since date: "${inputArgs.since}". Use ISO 8601 format (e.g., 2026-01-15).`,
+      ),
+    );
+    Deno.exit(1);
+  }
+}
+
 // Recorded in the manifest and the run record; destination writes happen after this point
 const runStartedAt = new Date().toISOString();
 let previousManifest: SyncManifest | null = null;
@@ -1076,9 +1092,16 @@ try {
   Deno.exit(1);
 }
 
-// Destination edits made after the previous run are detected against the state it recorded per copy;
-// entries from before that record existed fall back to the previous run's end (see target_guard.ts)
-const targetEditFallbackSince = epochMs(previousManifest?.lastSyncTimestamp);
+// Destination edits made after the previous run are detected against the state it recorded per copy.
+// Entries from before that record existed fall back to the end of the last run on an older version:
+// kept in the manifest, since a filtered run leaves the entries it does not select unrecorded
+const legacyEditCutoff = previousManifest?.legacyEditCutoff ??
+  (previousManifest && !previousManifest.lastRunStartedAt
+    ? previousManifest.lastSyncTimestamp
+    : undefined);
+const targetEditFallbackSince = epochMs(legacyEditCutoff);
+// Adopted copies never carry a record: they count as edited when modified after the previous run ended
+const previousRunEnd = epochMs(previousManifest?.lastSyncTimestamp);
 
 if (previousManifest && !previousManifest.destDomain) {
   console.log(Colors.yellow(
@@ -1587,7 +1610,8 @@ function reportFlagEdits(
     ));
     return true;
   }
-  if (edits.flagLevel) {
+  // Environments outside this run's mapping are not written either way; their edits only keep the flag-level fields
+  if (edits.flagLevel || edits.otherEnvironments.length > 0) {
     protectedResources.push({
       kind: "flag",
       key: flag.key,
@@ -1611,14 +1635,23 @@ function reportFlagEdits(
         prevEntry?.environments?.[sourceEnv]?.version !== sourceVersion,
     });
   }
+  const elsewhere = edits.otherEnvironments.length > 0
+    ? ` (${
+      edits.otherEnvironments.join(", ")
+    }, not migrated this run, edited in the destination too)`
+    : "";
   console.log(Colors.yellow(
     edits.environments.length > 0
       ? `\t🛡 ${destKey}: ${
         edits.environments.join(", ")
-      } edited in the destination after the migration; ${
+      } edited in the destination after the migration${elsewhere}; ${
         edits.flagLevel ? "with the flag-level fields edited too, " : ""
       }those environments and the flag-level fields are left as they are`
-      : `\t🛡 ${destKey}: flag-level fields edited in the destination after the migration; left as they are`,
+      : edits.flagLevel
+      ? `\t🛡 ${destKey}: flag-level fields edited in the destination after the migration${elsewhere}; left as they are`
+      : `\t🛡 ${destKey}: ${
+        edits.otherEnvironments.join(", ")
+      } (not migrated this run) edited in the destination after the migration; the shared flag-level fields are left as they are`,
   ));
   return true;
 }
@@ -2901,18 +2934,19 @@ type ApprovalRequestBody = {
 /**
  * Checks if an approval request is active (should prevent duplicate creation)
  */
-const isActiveApprovalRequest = (request: ApprovalRequest): boolean => {
+// Function declarations: recordDestinationState also runs from an abort during the segment phase
+function isActiveApprovalRequest(request: ApprovalRequest): boolean {
   const activeStatuses = ["pending", "scheduled", "failed"];
   return activeStatuses.includes(request.status);
-};
+}
 
 /**
  * Finds active approval requests for a flag environment
  */
-const findActiveApprovalRequests = async (
+async function findActiveApprovalRequests(
   flagKey: string,
   env: string,
-): Promise<ApprovalRequest[]> => {
+): Promise<ApprovalRequest[]> {
   const listApprovalsReq = ldAPIRequest(
     apiKey,
     domain,
@@ -2930,7 +2964,7 @@ const findActiveApprovalRequests = async (
 
   const data = await response.json();
   return (data.items || []).filter(isActiveApprovalRequest);
-};
+}
 
 /**
  * Determines who should be notified about an approval request
@@ -3389,17 +3423,7 @@ console.log(Colors.blue("\n🚩 Starting flag migration..."));
 // flagsWithErrors and flagsSkippedByDate are declared with the shared tracking state above the segment phase
 const skippedFieldsByFlag: Map<string, Set<string>> = new Map();
 
-let sinceDate: Date | null = null;
-if (inputArgs.since) {
-  sinceDate = new Date(inputArgs.since);
-  if (isNaN(sinceDate.getTime())) {
-    console.log(
-      Colors.red(
-        `Error: Invalid --since date: "${inputArgs.since}". Use ISO 8601 format (e.g., 2026-01-15).`,
-      ),
-    );
-    Deno.exit(1);
-  }
+if (sinceDate) {
   console.log(
     Colors.cyan(
       `\n📋 Since filter: only syncing flags modified after ${sinceDate.toISOString()}`,
@@ -3520,7 +3544,7 @@ async function processOneFlag(
             const destFlag = await destResp.json();
             const observed = await observeFlag(
               destFlag,
-              envkeys.map(destEnvFor),
+              guardEnvKeys(prevEntry, envkeys.map(destEnvFor)),
             );
             observedDestFlags.set(flag.key, observed);
             const edits = detectFlagEdits(
@@ -3568,14 +3592,25 @@ async function processOneFlag(
                 );
               }
             }
+            // Lifecycle and tags change without a version bump. The source changed them (a conflict) unless
+            // the copy with the source values matches what the migration last wrote (a destination-only edit)
+            const sourceLifecycleChanged = lifecyclePatches.length > 0 &&
+              flagLevelProtected &&
+              !(await flagLevelMatchesRecord(
+                prevEntry,
+                destFlag,
+                Object.fromEntries(
+                  lifecyclePatches.map((p) => [p.path.slice(1), p.value]),
+                ),
+              ));
             if (lifecyclePatches.length > 0 && flagLevelProtected) {
-              // The source changed lifecycle or tags without a version bump while the copy was edited: a conflict
               const flagItem = protectedResources.find((p) =>
                 p.kind === "flag" && p.key === flag.key &&
                 p.scope !== "environment"
               );
-              if (flagItem) flagItem.sourceChanged = true;
-              else {
+              if (flagItem) {
+                flagItem.sourceChanged ||= sourceLifecycleChanged;
+              } else if (sourceLifecycleChanged) {
                 protectedResources.push({
                   kind: "flag",
                   key: flag.key,
@@ -3989,7 +4024,7 @@ async function processOneFlag(
       }
       const observed = await observeFlag(
         destinationFlag,
-        envkeys.map(destEnvFor),
+        guardEnvKeys(prevFlagEntry, envkeys.map(destEnvFor)),
       );
       observedDestFlags.set(flag.key, observed);
       edits = detectFlagEdits(
@@ -4466,19 +4501,32 @@ async function handleArchivedSourceCopy(
     }
     archivedSourceDestKeys.push(destKey);
     const destFlag = await destResp.json();
-    // A copy edited in the destination after the migration is not archived either (only the primary
-    // copy carries the recorded state)
+    // A copy edited in the destination after the migration is not archived either. Only the primary
+    // copy carries the recorded state; an adopted copy counts as edited when modified since the previous run
     const entry = ownEntry(updatedManifestFlags, key);
-    if (entry && destKey === (entry.destKey ?? key)) {
-      const observed = await observeFlag(destFlag, envkeys.map(destEnvFor));
-      observedDestFlags.set(key, observed);
-      const edits = detectFlagEdits(
-        entry,
-        observed,
-        envkeys.map(destEnvFor),
-        targetEditFallbackSince,
+    if (entry) {
+      const primary = destKey === (entry.destKey ?? key);
+      const observed = await observeFlag(
+        destFlag,
+        guardEnvKeys(primary ? entry : undefined, envkeys.map(destEnvFor)),
       );
-      flagEditsByKey.set(key, edits);
+      const edits = primary
+        ? detectFlagEdits(
+          entry,
+          observed,
+          envkeys.map(destEnvFor),
+          targetEditFallbackSince,
+        )
+        : detectFlagEdits(
+          {},
+          observed,
+          envkeys.map(destEnvFor),
+          previousRunEnd,
+        );
+      if (primary) {
+        observedDestFlags.set(key, observed);
+        flagEditsByKey.set(key, edits);
+      }
       if (
         propagateArchived && destFlag.archived !== true &&
         protectsFlagLevel(edits)
@@ -4839,12 +4887,19 @@ async function recordDestinationState(): Promise<void> {
           observed = copy ? await observeFlag(copy, destEnvs) : undefined;
           if (!copy) base = { ...entry, dest: undefined };
         }
-        const record = nextFlagTargetRecord(
-          base,
-          edits,
-          observed,
-          approvalsByFlag.get(destKey) ?? [],
-        );
+        // A request from an earlier run stays exempt while it is still open, so applying it later is not
+        // taken for a destination edit; once applied or closed, the next run re-baselines the environment
+        const awaiting = [...(approvalsByFlag.get(destKey) ?? [])];
+        const earlier =
+          ownEntry(previousManifest?.flags, key)?.awaitingApproval ??
+            [];
+        for (const env of earlier) {
+          if (awaiting.includes(env)) continue;
+          if ((await findActiveApprovalRequests(destKey, env)).length > 0) {
+            awaiting.push(env);
+          }
+        }
+        const record = nextFlagTargetRecord(base, edits, observed, awaiting);
         delete entry.dest;
         delete entry.targetOwned;
         delete entry.awaitingApproval;
@@ -5097,6 +5152,7 @@ async function writeSyncManifestFile(
   const manifest: SyncManifest = {
     lastSyncTimestamp: new Date().toISOString(),
     lastRunStartedAt: runStartedAt,
+    ...(legacyEditCutoff ? { legacyEditCutoff } : {}),
     sourceProject: inputArgs.projKeySource,
     destProject: inputArgs.projKeyDest,
     ...stampIdentity(previousManifest, destIdentity),

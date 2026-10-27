@@ -16,10 +16,11 @@
  *
  * Once found, the resource is marked `targetOwned` in the manifest, so later runs leave it alone even
  * if the destination edit is undone. Fingerprints ignore version bumps that change nothing the
- * migration writes (view links, approvals metadata). Entries written before this version have no
- * `dest` record; for those an environment or segment counts as edited when its lastModified is after
- * the previous run's lastSyncTimestamp, and flag-level edits cannot be detected until the first run
- * on this version records a fingerprint.
+ * migration writes (view links, approvals metadata). Environments outside a run's mapping are checked
+ * too, since flag-level fields are shared by every environment. Entries written before this version
+ * have no `dest` record; for those an environment or segment counts as edited when its lastModified
+ * is after the end of the last run on an older version (the manifest's `legacyEditCutoff`), and
+ * flag-level edits cannot be detected until the first run on this version records a fingerprint.
  */
 
 export interface DestEnvState {
@@ -67,14 +68,17 @@ export interface SegmentTargetRecord {
 
 export interface FlagTargetEdits {
   flagLevel: boolean;
-  /** Destination environment keys */
+  /** Edited destination environments this run maps to */
   environments: string[];
+  /** Edited destination environments outside this run's mapping: they only keep the flag-level fields as they are */
+  otherEnvironments: string[];
   deleted: boolean;
 }
 
 export const NO_FLAG_EDITS: FlagTargetEdits = {
   flagLevel: false,
   environments: [],
+  otherEnvironments: [],
   deleted: false,
 };
 
@@ -116,12 +120,12 @@ const SEGMENT_FIELDS = [
   "unboundedContextKind",
 ] as const;
 
-/** JSON with object keys sorted and `_id` keys dropped (generated IDs are not content), so equal content gives equal text. */
+/** JSON with object keys sorted, so equal content gives equal text. */
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value !== null && typeof value === "object") {
     const entries = Object.entries(value as Record<string, unknown>)
-      .filter(([k, v]) => k !== "_id" && v !== undefined)
+      .filter(([, v]) => v !== undefined)
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
     return `{${
       entries.map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`).join(",")
@@ -130,13 +134,39 @@ function canonical(value: unknown): string {
   return JSON.stringify(value ?? null);
 }
 
+const withoutId = (item: unknown): unknown => {
+  if (item === null || typeof item !== "object" || Array.isArray(item)) {
+    return item;
+  }
+  const { _id: _, ...rest } = item as Record<string, unknown>;
+  return rest;
+};
+
+/**
+ * Drops the IDs LaunchDarkly generates for variations, rules and clauses (they are not content), and
+ * nothing else: an `_id` inside a JSON variation value or a custom property is user data.
+ */
+function withoutGeneratedIds(field: string, value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  if (field === "variations") return value.map(withoutId);
+  if (field === "rules") {
+    return value.map((rule) => {
+      const r = withoutId(rule) as Record<string, unknown>;
+      return r && Array.isArray(r.clauses)
+        ? { ...r, clauses: r.clauses.map(withoutId) }
+        : r;
+    });
+  }
+  return value;
+}
+
 async function fingerprint(
   source: Record<string, unknown> | undefined,
   fields: readonly string[],
 ): Promise<string> {
   const picked: Record<string, unknown> = {};
   for (const field of fields) {
-    let value = source?.[field];
+    let value = withoutGeneratedIds(field, source?.[field]);
     // Tag order carries no meaning
     if (field === "tags" && Array.isArray(value)) value = [...value].sort();
     picked[field] = value ?? null;
@@ -157,6 +187,38 @@ const asNumber = (v: unknown): number | undefined =>
     : typeof v === "string" && v !== "" && !isNaN(Number(v))
     ? Number(v)
     : undefined;
+
+/**
+ * The destination environments to check for edits: this run's (`runEnvKeys`) plus every environment
+ * the entry recorded or marks as owned, since an edit there also protects the shared flag-level fields.
+ */
+export function guardEnvKeys(
+  entry: FlagTargetRecord | undefined,
+  runEnvKeys: Iterable<string>,
+): string[] {
+  return [
+    ...new Set([
+      ...runEnvKeys,
+      ...Object.keys(entry?.dest?.environments ?? {}),
+      ...(entry?.targetOwned?.environments ?? []),
+    ]),
+  ];
+}
+
+/**
+ * Whether the destination flag, with `overrides` applied, has the flag-level fingerprint the entry
+ * recorded: then the source values in `overrides` equal what the migration last wrote, and any
+ * difference to them was made in the destination.
+ */
+export async function flagLevelMatchesRecord(
+  entry: FlagTargetRecord | undefined,
+  destFlag: any,
+  overrides: Record<string, unknown>,
+): Promise<boolean> {
+  return entry?.dest?.fingerprint !== undefined &&
+    await fingerprint({ ...destFlag, ...overrides }, FLAG_LEVEL_FIELDS) ===
+      entry.dest.fingerprint;
+}
 
 /** The current state of a destination flag (as returned by GET flags/{project}/{key}) in the given destination environments. */
 export async function observeFlag(
@@ -194,49 +256,65 @@ export async function observeSegment(
 /**
  * What was edited in the destination since the migration last wrote this flag copy. `entry` is the
  * previous manifest entry (no entry: not this migration's copy, nothing to protect). `observed` is
- * undefined when the recorded copy no longer exists. `fallbackSince` (epoch ms, the previous run's end)
- * is used for environments without a recorded fingerprint.
+ * undefined when the recorded copy no longer exists; it should cover guardEnvKeys(entry, runEnvKeys).
+ * `fallbackSince` (epoch ms) is used for environments without a recorded fingerprint.
  */
 export function detectFlagEdits(
   entry: FlagTargetRecord | undefined,
   observed: DestFlagState | undefined,
-  destEnvKeys: Iterable<string>,
+  runEnvKeys: Iterable<string>,
   fallbackSince?: number,
 ): FlagTargetEdits {
   if (!entry) return NO_FLAG_EDITS;
+  const runEnvs = new Set(runEnvKeys);
   const owned = entry.targetOwned;
   if (owned?.deleted || !observed) {
-    return { flagLevel: true, environments: [], deleted: true };
+    // A copy recreated in the destination after its deletion belongs to the destination entirely
+    const recreated = observed
+      ? [...runEnvs].filter((env) => observed.environments?.[env]).sort()
+      : [];
+    return {
+      flagLevel: true,
+      environments: recreated,
+      otherEnvironments: [],
+      deleted: true,
+    };
   }
-  const environments: string[] = [];
-  for (const env of new Set(destEnvKeys)) {
+  const edited: string[] = [];
+  for (const env of guardEnvKeys(entry, runEnvs)) {
     const current = observed.environments?.[env];
     if (!current) continue;
     if (owned?.environments?.includes(env)) {
-      environments.push(env);
+      edited.push(env);
       continue;
     }
     // Our own pending approval request may have been applied since: not an independent edit
     if (entry.awaitingApproval?.includes(env)) continue;
     const recorded = entry.dest?.environments?.[env];
     if (recorded?.fingerprint) {
-      if (recorded.fingerprint !== current.fingerprint) environments.push(env);
+      if (recorded.fingerprint !== current.fingerprint) edited.push(env);
     } else if (
       fallbackSince !== undefined && current.lastModified !== undefined &&
       current.lastModified > fallbackSince
     ) {
-      environments.push(env);
+      edited.push(env);
     }
   }
   const flagLevel = Boolean(owned?.flag) ||
     (entry.dest?.fingerprint !== undefined &&
       entry.dest.fingerprint !== observed.fingerprint);
-  return { flagLevel, environments: environments.sort(), deleted: false };
+  return {
+    flagLevel,
+    environments: edited.filter((env) => runEnvs.has(env)).sort(),
+    otherEnvironments: edited.filter((env) => !runEnvs.has(env)).sort(),
+    deleted: false,
+  };
 }
 
 /** Flag-level fields are left alone when they, or any environment, were edited in the destination. */
 export const protectsFlagLevel = (edits: FlagTargetEdits): boolean =>
-  edits.deleted || edits.flagLevel || edits.environments.length > 0;
+  edits.deleted || edits.flagLevel || edits.environments.length > 0 ||
+  edits.otherEnvironments.length > 0;
 
 /**
  * The protection fields for a flag entry after this run. `observed` is the copy's state after this
@@ -254,13 +332,18 @@ export function nextFlagTargetRecord(
     ...new Set([
       ...(entry?.targetOwned?.environments ?? []),
       ...edits.environments,
+      ...edits.otherEnvironments,
     ]),
   ].sort();
   const deleted = Boolean(entry?.targetOwned?.deleted) || edits.deleted;
   const ownedFlag = Boolean(entry?.targetOwned?.flag) || edits.flagLevel;
   const dest: DestFlagState = {
     ...(entry?.dest ?? {}),
-    environments: { ...(entry?.dest?.environments ?? {}) },
+    // Null prototype: an environment named "__proto__" must be an own entry that serializes
+    environments: Object.assign(
+      Object.create(null),
+      entry?.dest?.environments ?? {},
+    ),
   };
   if (observed && !deleted) {
     if (!ownedFlag) {
@@ -301,8 +384,9 @@ export function detectSegmentEdit(
   fallbackSince?: number,
 ): "none" | "edited" | "deleted" {
   if (!entry) return "none";
+  // An edited copy deleted later counts as deleted, so reconciliation does not expect it
+  if (!observed || entry.targetOwned === "deleted") return "deleted";
   if (entry.targetOwned) return entry.targetOwned;
-  if (!observed) return "deleted";
   if (entry.dest?.fingerprint) {
     return entry.dest.fingerprint !== observed.fingerprint ? "edited" : "none";
   }
@@ -318,7 +402,9 @@ export function nextSegmentTargetRecord(
   edit: "none" | "edited" | "deleted",
   observed: DestSegmentState | undefined,
 ): SegmentTargetRecord {
-  const owned = entry?.targetOwned ?? (edit === "none" ? undefined : edit);
+  const owned = edit === "deleted"
+    ? "deleted"
+    : entry?.targetOwned ?? (edit === "none" ? undefined : edit);
   const dest = owned || !observed ? entry?.dest : observed;
   return {
     ...(dest ? { dest } : {}),

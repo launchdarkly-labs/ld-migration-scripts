@@ -58,6 +58,11 @@ export interface SyncManifest {
   lastSyncTimestamp: string;
   /** When the writing run started; absent in manifests from older versions */
   lastRunStartedAt?: string;
+  /**
+   * End of the last run on a version before 3.6.0: entries without a recorded destination state count
+   * as edited when the destination was modified after it (see target_guard.ts)
+   */
+  legacyEditCutoff?: string;
   sourceProject: string;
   destProject: string;
   /** Destination domain the manifest was written for; absent in manifests from older versions */
@@ -520,15 +525,27 @@ export function retireDeletedFlags(
   for (const [key, entry] of Object.entries(manifest.flags)) {
     const remaining = ownedKeys(key, entry).filter((k) => !deleted.has(k));
     if (remaining.length === 0) continue;
-    const { destKey: _d, extraDestKeys: _e, ...rest } = entry;
+    const {
+      destKey: _d,
+      extraDestKeys: _e,
+      dest,
+      targetOwned,
+      awaitingApproval,
+      ...rest
+    } = entry;
     // A promoted extra copy was never synchronized by reruns (only the primary is updated), so its
-    // cached source versions are dropped and the next --incremental run re-syncs it in full
+    // cached source versions are dropped and the next --incremental run re-syncs it in full; the
+    // recorded destination state described the deleted primary copy and goes too
     const promoted = remaining[0] !== (entry.destKey ?? key);
     flags[key] = {
       ...rest,
       ...(promoted
         ? { version: 0, lastModified: undefined, environments: {} }
-        : {}),
+        : {
+          ...(dest ? { dest } : {}),
+          ...(targetOwned ? { targetOwned } : {}),
+          ...(awaitingApproval ? { awaitingApproval } : {}),
+        }),
       ...(remaining[0] !== key ? { destKey: remaining[0] } : {}),
       ...(remaining.length > 1 ? { extraDestKeys: remaining.slice(1) } : {}),
     };
