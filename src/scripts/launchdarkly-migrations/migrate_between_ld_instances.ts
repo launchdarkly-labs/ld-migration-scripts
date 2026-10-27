@@ -2317,6 +2317,27 @@ if (inputArgs.migrateSegments) {
             );
             continue;
           }
+        } else {
+          // A copy shared with another source environment (several mapped to one destination
+          // environment) that the destination owns stays protected for this new entry too; no source
+          // version is recorded, since nothing was applied
+          const sharedOwned = sharedSegmentOwnership(destEnvKey, segmentKey);
+          if (sharedOwned) {
+            reportSegmentEdit(
+              env.key,
+              segment,
+              destEnvKey,
+              segmentKey,
+              sharedOwned,
+              undefined,
+            );
+            keepProtectedSegment(env.key, segment.key, {
+              version: 0,
+              destEnv: destEnvKey,
+              ...(segmentKey !== segment.key ? { destKey: segmentKey } : {}),
+            }, sharedOwned);
+            continue;
+          }
         }
 
         while (!segmentCreated && attemptCount < 2) {
