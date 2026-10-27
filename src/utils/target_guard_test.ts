@@ -350,11 +350,22 @@ Deno.test("a copy that could not be read back counts as edited when modified aft
     detectFlagEdits({ dest: { since: 1_500 } }, now, ENVS).environments,
     ["stage"],
   );
-  // the next read records fingerprints and drops the cutoff
+  // a later read records fingerprints for what it sees; the cutoff stays for environments it did not see
+  const partly = await observeFlag(destFlag(), ["stage"]);
+  const record = nextFlagTargetRecord(
+    { dest: { since: 1_500 } },
+    NO_FLAG_EDITS,
+    partly,
+  );
+  assertEquals(record.dest?.since, 1_500);
   assertEquals(
-    nextFlagTargetRecord({ dest: { since: 1_500 } }, NO_FLAG_EDITS, now).dest
-      ?.since,
-    undefined,
+    detectFlagEdits(
+      record,
+      await observeFlag(destFlag({ on: true }), ENVS),
+      ENVS,
+    )
+      .environments,
+    [],
   );
   assertEquals(
     nextFlagTargetRecord({ dest: { since: 1_500 } }, NO_FLAG_EDITS, undefined)
@@ -378,4 +389,13 @@ Deno.test("nextFlagTargetRecord keeps adopted copies marked as edited", () => {
     ).targetOwned,
     { copies: ["old-key"] },
   );
+});
+
+Deno.test("observeFlag fingerprints every environment field migrate writes", async () => {
+  const a = destFlag();
+  const b = destFlag();
+  (b.environments.production as any).samplingRatio = 10;
+  const fa = (await observeFlag(a, ENVS)).environments!.production.fingerprint;
+  const fb = (await observeFlag(b, ENVS)).environments!.production.fingerprint;
+  assertEquals(fa === fb, false);
 });

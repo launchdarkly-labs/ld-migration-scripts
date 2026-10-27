@@ -64,6 +64,7 @@ import {
   flagLevelMatchesRecord,
   type FlagTargetEdits,
   guardEnvKeys,
+  isWrittenEnvField,
   nextFlagTargetRecord,
   nextSegmentTargetRecord,
   NO_FLAG_EDITS,
@@ -4282,18 +4283,9 @@ async function processOneFlag(
       }
 
       const patchReq: any[] = [];
+      // The same selection the destination-edit fingerprint covers
       const parsedData: Record<string, string> = Object.keys(flagEnvData)
-        .filter((key) => !key.includes("salt"))
-        .filter((key) => !key.includes("version"))
-        .filter((key) => !key.includes("lastModified"))
-        .filter((key) => !key.includes("_environmentName"))
-        .filter((key) => !key.includes("_site"))
-        .filter((key) => !key.includes("_summary"))
-        .filter((key) => !key.includes("sel"))
-        .filter((key) => !key.includes("access"))
-        .filter((key) => !key.includes("_debugEventsUntilDate"))
-        .filter((key) => !key.startsWith("_"))
-        .filter((key) => !key.startsWith("-"))
+        .filter(isWrittenEnvField)
         .reduce((cur, key) => {
           return Object.assign(cur, { [key]: flagEnvData[key] });
         }, {});

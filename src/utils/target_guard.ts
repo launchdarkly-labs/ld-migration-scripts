@@ -104,17 +104,17 @@ const FLAG_LEVEL_FIELDS = [
   "deprecated",
 ] as const;
 
-const FLAG_ENV_FIELDS = [
-  "on",
-  "offVariation",
-  "fallthrough",
-  "rules",
-  "targets",
-  "contextTargets",
-  "prerequisites",
-  "trackEvents",
-  "trackEventsFallthrough",
-] as const;
+/**
+ * Whether `migrate` writes this field of a flag environment configuration. Shared with its patch
+ * builder, so the fingerprint covers exactly what a run would overwrite.
+ */
+export const isWrittenEnvField = (key: string): boolean =>
+  !key.includes("salt") && !key.includes("version") &&
+  !key.includes("lastModified") && !key.includes("_environmentName") &&
+  !key.includes("_site") && !key.includes("_summary") &&
+  !key.includes("sel") && !key.includes("access") &&
+  !key.includes("_debugEventsUntilDate") && !key.startsWith("_") &&
+  !key.startsWith("-");
 
 const SEGMENT_FIELDS = [
   "name",
@@ -241,7 +241,10 @@ export async function observeFlag(
     environments[env] = {
       version: asNumber(config.version ?? config._version),
       lastModified: asNumber(config.lastModified),
-      fingerprint: await fingerprint(config, FLAG_ENV_FIELDS),
+      fingerprint: await fingerprint(
+        config,
+        Object.keys(config).filter(isWrittenEnvField).sort(),
+      ),
     };
   }
   return {
@@ -355,8 +358,8 @@ export function nextFlagTargetRecord(
       entry?.dest?.environments ?? {},
     ),
   };
+  // dest.since stays: it covers environments that still have no fingerprint
   if (observed && !deleted) {
-    delete dest.since;
     if (!ownedFlag) {
       dest.version = observed.version;
       dest.fingerprint = observed.fingerprint;

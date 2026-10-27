@@ -516,6 +516,28 @@ export function adoptUnresolved(
  * to its main destination key. The manifest itself stays, possibly with no flags, as the authoritative
  * inventory for the pair.
  */
+/**
+ * Ownership after a revert promotes `remaining[0]` (an adopted copy) to the main copy: surviving
+ * adopted copies keep theirs, and a promoted copy that was edited in the destination belongs to it
+ * entirely (like a copy recreated there: no field or environment is written).
+ */
+function promotedOwnership(
+  owned: SyncManifestFlag["targetOwned"],
+  remaining: string[],
+): Pick<SyncManifestFlag, "targetOwned"> {
+  const copies = (owned?.copies ?? []).filter((k) =>
+    remaining.slice(1).includes(k)
+  );
+  const promotedOwned = Boolean(owned?.copies?.includes(remaining[0]));
+  if (!promotedOwned && copies.length === 0) return {};
+  return {
+    targetOwned: {
+      ...(promotedOwned ? { flag: true, deleted: true } : {}),
+      ...(copies.length > 0 ? { copies } : {}),
+    },
+  };
+}
+
 export function retireDeletedFlags(
   manifest: SyncManifest,
   deletedDestKeys: Iterable<string>,
@@ -540,7 +562,12 @@ export function retireDeletedFlags(
     flags[key] = {
       ...rest,
       ...(promoted
-        ? { version: 0, lastModified: undefined, environments: {} }
+        ? {
+          version: 0,
+          lastModified: undefined,
+          environments: {},
+          ...promotedOwnership(targetOwned, remaining),
+        }
         : {
           ...(dest ? { dest } : {}),
           ...(targetOwned ? { targetOwned } : {}),

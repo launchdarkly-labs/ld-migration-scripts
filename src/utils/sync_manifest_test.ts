@@ -586,6 +586,30 @@ Deno.test("retireDeletedFlags drops entries whose copies a revert deleted and ke
   });
 });
 
+Deno.test("retireDeletedFlags keeps the ownership of surviving adopted copies", () => {
+  const before: SyncManifest = {
+    ...manifest,
+    flags: {
+      e: {
+        version: 1,
+        environments: {},
+        destKey: "imported-e",
+        extraDestKeys: ["e", "old-e"],
+        dest: { fingerprint: "of-imported-e" },
+        targetOwned: { copies: ["e", "old-e"] },
+      },
+    },
+  };
+  // The primary is deleted: e is promoted and, edited in the destination, belongs to it entirely
+  assertEquals(retireDeletedFlags(before, ["imported-e"]).flags.e, {
+    version: 0,
+    lastModified: undefined,
+    environments: {},
+    extraDestKeys: ["old-e"],
+    targetOwned: { flag: true, deleted: true, copies: ["old-e"] },
+  });
+});
+
 Deno.test("segmentEnvironmentMismatches flags entries whose destination environment changed", () => {
   const previous: SyncManifest = {
     ...manifest,
