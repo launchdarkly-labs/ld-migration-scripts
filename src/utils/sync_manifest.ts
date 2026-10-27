@@ -577,7 +577,9 @@ export function retireDeletedFlags(
       ...(remaining.length > 1 ? { extraDestKeys: remaining.slice(1) } : {}),
     };
   }
-  return { ...manifest, flags, lastSyncTimestamp: new Date().toISOString() };
+  // lastSyncTimestamp stays the last migration's end: it is the cutoff for detecting destination edits
+  // on copies without a recorded state, and a revert is not a sync
+  return { ...manifest, flags };
 }
 
 /**

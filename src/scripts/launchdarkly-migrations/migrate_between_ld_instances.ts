@@ -1928,7 +1928,11 @@ async function checkRecordedSegment(
   }
   const observed = copy ? await observeSegment(copy) : undefined;
   if (observed) observedDestSegments.set(id, observed);
-  const edit = detectSegmentEdit(prevEntry, observed, targetEditFallbackSince);
+  // Several source environments mapped to one destination environment share its copy: a change made
+  // by this run's own earlier write is not a destination edit
+  const edit = destSegmentsWritten.has(`${destEnv}/${destKey}`)
+    ? "none"
+    : detectSegmentEdit(prevEntry, observed, targetEditFallbackSince);
   segmentEditsById.set(id, edit);
   if (edit !== "none") {
     reportSegmentEdit(sourceEnv, segment, destEnv, destKey, edit, prevEntry);
@@ -4524,6 +4528,12 @@ async function handleArchivedSourceCopy(
       "flags",
     );
     if (destResp.status === 404) {
+      // A recorded primary copy was deleted in the destination: recorded, so a recreation there is
+      // never archived (or otherwise written) by a later run
+      const recordedEntry = ownEntry(updatedManifestFlags, key);
+      if (recordedEntry && destKey === (recordedEntry.destKey ?? key)) {
+        flagEditsByKey.set(key, detectFlagEdits(recordedEntry, undefined, []));
+      }
       console.log(
         Colors.gray(
           `\t- ${destKey}${copy}: archived in the source, no copy in the destination`,

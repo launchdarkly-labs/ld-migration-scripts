@@ -556,6 +556,8 @@ Deno.test("retireDeletedFlags drops entries whose copies a revert deleted and ke
   // a and both copies of b deleted; c's prefixed copy failed to delete; d was not touched
   const after = retireDeletedFlags(before, ["a", "imported-b", "b", "c"]);
   assertEquals(Object.keys(after.flags), ["c", "d"]);
+  // The last migration's end stays the cutoff for destination edits
+  assertEquals(after.lastSyncTimestamp, before.lastSyncTimestamp);
   assertEquals(after.flags.c, {
     version: 1,
     environments: {},
