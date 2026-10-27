@@ -1891,6 +1891,29 @@ if (contextKinds && contextKinds.length > 0) {
  * the merge of source tags, migration tags and the tags already there; without them the copy gets the
  * source tags, as flags do. Returns a short log note, empty when nothing was changed.
  */
+/** Ownership any previous manifest entry records for the destination segment copy destEnv/destKey. */
+function sharedSegmentOwnership(
+  destEnv: string,
+  destKey: string,
+): SyncManifestSegment["targetOwned"] {
+  for (
+    const [sourceEnv, entries] of Object.entries(
+      previousManifest?.segments ?? {},
+    )
+  ) {
+    for (const [key, entry] of Object.entries(entries)) {
+      if (
+        entry.targetOwned &&
+        (entry.destEnv ?? destEnvFor(sourceEnv)) === destEnv &&
+        (entry.destKey ?? key) === destKey
+      ) {
+        return entry.targetOwned;
+      }
+    }
+  }
+  return undefined;
+}
+
 /**
  * Reads this migration's recorded copy of a segment and checks it for destination edits. Returns the
  * copy (null when it no longer exists) and the edit found; `undefined` copy when it could not be read,
@@ -1928,9 +1951,14 @@ async function checkRecordedSegment(
   }
   const observed = copy ? await observeSegment(copy) : undefined;
   if (observed) observedDestSegments.set(id, observed);
-  // Several source environments mapped to one destination environment share its copy: a change made
-  // by this run's own earlier write is not a destination edit
-  const edit = destSegmentsWritten.has(`${destEnv}/${destKey}`)
+  // Several source environments mapped to one destination environment share its copy: ownership
+  // recorded by any of their entries applies to all, and otherwise a change made by this run's own
+  // earlier write is not a destination edit
+  const owned = prevEntry.targetOwned ??
+    sharedSegmentOwnership(destEnv, destKey);
+  const edit = owned
+    ? detectSegmentEdit({ ...prevEntry, targetOwned: owned }, observed)
+    : destSegmentsWritten.has(`${destEnv}/${destKey}`)
     ? "none"
     : detectSegmentEdit(prevEntry, observed, targetEditFallbackSince);
   segmentEditsById.set(id, edit);
