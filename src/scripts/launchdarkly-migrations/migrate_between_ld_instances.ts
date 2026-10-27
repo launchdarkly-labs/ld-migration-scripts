@@ -3757,15 +3757,18 @@ async function processOneFlag(
             }
             // Lifecycle and tags change without a version bump. The source changed them (a conflict) unless
             // the copy with the source values matches what the migration last wrote (a destination-only edit)
+            // The digest last applied answers it directly; older entries reconstruct from the destination
             const sourceLifecycleChanged = lifecyclePatches.length > 0 &&
               flagLevelProtected &&
-              !(await flagLevelMatchesRecord(
-                prevEntry,
-                destFlag,
-                Object.fromEntries(
-                  lifecyclePatches.map((p) => [p.path.slice(1), p.value]),
-                ),
-              ));
+              (prevEntry.sourceDigest !== undefined
+                ? prevEntry.sourceDigest !== sourceFlagLevelDigest(flag)
+                : !(await flagLevelMatchesRecord(
+                  prevEntry,
+                  destFlag,
+                  Object.fromEntries(
+                    lifecyclePatches.map((p) => [p.path.slice(1), p.value]),
+                  ),
+                )));
             if (lifecyclePatches.length > 0 && flagLevelProtected) {
               const flagItem = protectedResources.find((p) =>
                 p.kind === "flag" && p.key === flag.key &&
@@ -4255,17 +4258,20 @@ async function processOneFlag(
           ) => rest),
         );
     if (variationsDiverged) {
+      // Diverged variations block the targeting either way; whether that is a conflict depends on the
+      // source having changed its flag-level fields since they were last applied
       const flagItem = protectedResources.find((p) =>
         p.kind === "flag" && p.key === flag.key && p.scope === "flag"
       );
-      if (flagItem) flagItem.sourceChanged = true;
-      else {
+      if (!flagItem) {
         protectedResources.push({
           kind: "flag",
           key: flag.key,
           destKey: createdFlagKey,
           scope: "flag",
-          sourceChanged: true,
+          sourceChanged: prevFlagEntry?.sourceDigest !== undefined
+            ? prevFlagEntry.sourceDigest !== sourceFlagLevelDigest(flag)
+            : prevFlagEntry?.version !== flag._version,
         });
       }
       console.log(Colors.yellow(
