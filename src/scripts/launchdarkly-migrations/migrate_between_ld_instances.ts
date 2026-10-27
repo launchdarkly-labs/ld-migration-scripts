@@ -1618,8 +1618,22 @@ function reportFlagEdits(
     ));
     return true;
   }
-  // Environments outside this run's mapping are not written either way; their edits only keep the flag-level fields
-  if (edits.flagLevel || edits.otherEnvironments.length > 0) {
+  // Environments outside this run's mapping are not written either way; their edits only keep the flag-level
+  // fields. A source change to those fields left unapplied (any edit keeps them) is a flag-level conflict too:
+  // the flag version moved while no environment version did
+  const sourceFlagLevelChanged = prevEntry !== undefined &&
+    prevEntry.version !== flag._version &&
+    Object.entries(flag.environments ?? {}).every(([env, config]: [
+      string,
+      any,
+    ]) =>
+      !envkeys.includes(env) ||
+      prevEntry.environments?.[env]?.version === config?.version
+    );
+  if (
+    edits.flagLevel || edits.otherEnvironments.length > 0 ||
+    sourceFlagLevelChanged
+  ) {
     protectedResources.push({
       kind: "flag",
       key: flag.key,
