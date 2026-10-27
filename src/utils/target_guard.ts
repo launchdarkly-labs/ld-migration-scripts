@@ -34,12 +34,19 @@ export interface DestFlagState {
   version?: number;
   fingerprint?: string;
   environments?: Record<string, DestEnvState>;
+  /**
+   * Epoch ms, set when the copy could not be read back after this run's writes: a modification after
+   * it counts as a destination edit wherever no fingerprint is recorded
+   */
+  since?: number;
 }
 
 export interface DestSegmentState {
   version?: number;
   lastModified?: number;
   fingerprint?: string;
+  /** See DestFlagState.since */
+  since?: number;
 }
 
 export interface FlagTargetOwnership {
@@ -49,6 +56,8 @@ export interface FlagTargetOwnership {
   environments?: string[];
   /** The recorded copy was deleted in the destination */
   deleted?: boolean;
+  /** Adopted copies (extraDestKeys) edited in the destination: never archived by the migration */
+  copies?: string[];
 }
 
 /** The protection fields of a manifest flag entry. */
@@ -280,6 +289,7 @@ export function detectFlagEdits(
       deleted: true,
     };
   }
+  const cutoff = entry.dest?.since ?? fallbackSince;
   const edited: string[] = [];
   for (const env of guardEnvKeys(entry, runEnvs)) {
     const current = observed.environments?.[env];
@@ -294,8 +304,8 @@ export function detectFlagEdits(
     if (recorded?.fingerprint) {
       if (recorded.fingerprint !== current.fingerprint) edited.push(env);
     } else if (
-      fallbackSince !== undefined && current.lastModified !== undefined &&
-      current.lastModified > fallbackSince
+      cutoff !== undefined && current.lastModified !== undefined &&
+      current.lastModified > cutoff
     ) {
       edited.push(env);
     }
@@ -346,6 +356,7 @@ export function nextFlagTargetRecord(
     ),
   };
   if (observed && !deleted) {
+    delete dest.since;
     if (!ownedFlag) {
       dest.version = observed.version;
       dest.fingerprint = observed.fingerprint;
@@ -354,18 +365,20 @@ export function nextFlagTargetRecord(
       if (!ownedEnvs.includes(env)) dest.environments![env] = state;
     }
   }
+  const copies = entry?.targetOwned?.copies ?? [];
   const record: FlagTargetRecord = {};
   if (
-    dest.fingerprint !== undefined ||
+    dest.fingerprint !== undefined || dest.since !== undefined ||
     Object.keys(dest.environments ?? {}).length > 0
   ) {
     record.dest = dest;
   }
-  if (ownedFlag || ownedEnvs.length > 0 || deleted) {
+  if (ownedFlag || ownedEnvs.length > 0 || deleted || copies.length > 0) {
     record.targetOwned = {
       ...(ownedFlag ? { flag: true } : {}),
       ...(ownedEnvs.length > 0 ? { environments: ownedEnvs } : {}),
       ...(deleted ? { deleted: true } : {}),
+      ...(copies.length > 0 ? { copies } : {}),
     };
   }
   if (awaitingApproval.length > 0) {
@@ -390,8 +403,9 @@ export function detectSegmentEdit(
   if (entry.dest?.fingerprint) {
     return entry.dest.fingerprint !== observed.fingerprint ? "edited" : "none";
   }
-  return fallbackSince !== undefined && observed.lastModified !== undefined &&
-      observed.lastModified > fallbackSince
+  const cutoff = entry.dest?.since ?? fallbackSince;
+  return cutoff !== undefined && observed.lastModified !== undefined &&
+      observed.lastModified > cutoff
     ? "edited"
     : "none";
 }

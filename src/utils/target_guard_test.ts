@@ -343,3 +343,39 @@ Deno.test("nextSegmentTargetRecord keeps the old record once owned", async () =>
   });
   assertEquals(nextSegmentTargetRecord(undefined, "none", undefined), {});
 });
+
+Deno.test("a copy that could not be read back counts as edited when modified after the run", async () => {
+  const now = await observeFlag(destFlag(), ENVS); // production modified at 1000, stage at 2000
+  assertEquals(
+    detectFlagEdits({ dest: { since: 1_500 } }, now, ENVS).environments,
+    ["stage"],
+  );
+  // the next read records fingerprints and drops the cutoff
+  assertEquals(
+    nextFlagTargetRecord({ dest: { since: 1_500 } }, NO_FLAG_EDITS, now).dest
+      ?.since,
+    undefined,
+  );
+  assertEquals(
+    nextFlagTargetRecord({ dest: { since: 1_500 } }, NO_FLAG_EDITS, undefined)
+      .dest,
+    { since: 1_500, environments: {} },
+  );
+  const segment = await observeSegment(destSegment(["a"])); // modified at 3000
+  assertEquals(
+    detectSegmentEdit({ dest: { since: 2_000 } }, segment),
+    "edited",
+  );
+  assertEquals(detectSegmentEdit({ dest: { since: 4_000 } }, segment), "none");
+});
+
+Deno.test("nextFlagTargetRecord keeps adopted copies marked as edited", () => {
+  assertEquals(
+    nextFlagTargetRecord(
+      { targetOwned: { copies: ["old-key"] } },
+      NO_FLAG_EDITS,
+      undefined,
+    ).targetOwned,
+    { copies: ["old-key"] },
+  );
+});

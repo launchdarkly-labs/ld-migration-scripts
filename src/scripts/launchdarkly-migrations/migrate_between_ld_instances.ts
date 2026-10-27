@@ -2941,11 +2941,12 @@ function isActiveApprovalRequest(request: ApprovalRequest): boolean {
 }
 
 /**
- * Finds active approval requests for a flag environment
+ * Finds active approval requests for a flag environment; a failed lookup gives none, or throws when `strict`
  */
 async function findActiveApprovalRequests(
   flagKey: string,
   env: string,
+  strict = false,
 ): Promise<ApprovalRequest[]> {
   const listApprovalsReq = ldAPIRequest(
     apiKey,
@@ -2959,6 +2960,7 @@ async function findActiveApprovalRequests(
   );
 
   if (response.status !== 200) {
+    if (strict) throw new Error(`HTTP ${response.status}`);
     return [];
   }
 
@@ -3740,6 +3742,7 @@ async function processOneFlag(
   let flagAlreadyExisted = false;
 
   flagsAttempted.add(flag.key);
+  let probeStatus: number | undefined;
   // First, check if the flag already exists in the destination
   try {
     const checkFlagReq = ldAPIRequest(
@@ -3748,6 +3751,7 @@ async function processOneFlag(
       `flags/${inputArgs.projKeyDest}/${flagKey}`,
     );
     const checkFlagResp = await rateLimitRequest(checkFlagReq, "flags");
+    probeStatus = checkFlagResp.status;
 
     if (checkFlagResp.status === 200 && recorded.recorded) {
       // Our own earlier copy, recorded in the manifest: not a conflict, update it in place
@@ -3823,6 +3827,20 @@ async function processOneFlag(
         `\t  Could not check if flag exists, will attempt creation...`,
       ),
     );
+  }
+  // A recorded copy may have been deleted in the destination, which must not be recreated
+  if (recorded.recorded && probeStatus !== 200 && probeStatus !== 404) {
+    console.log(Colors.red(
+      `\t✗ Could not check the recorded copy ${flagKey}${
+        probeStatus ? ` (HTTP ${probeStatus})` : ""
+      }; not written, since a copy deleted in the destination must not be recreated`,
+    ));
+    flagsWithErrors.add(flag.key);
+    flagErrorDetails.set(
+      flag.key,
+      "recorded destination copy could not be checked for existence",
+    );
+    return { incrementalSkipCountDelta, incrementalEnvSkipCountDelta };
   }
 
   while (!flagCreated && attemptCount < 2) {
@@ -4041,6 +4059,34 @@ async function processOneFlag(
       );
     }
     flagEditsByKey.set(flag.key, edits);
+    // Protected flag-level fields keep the destination's variations. Source targeting refers to
+    // variations by index, so it is only written while both sides have the same variations.
+    const variationsDiverged = destinationFlag && protectsFlagLevel(edits) &&
+      !edits.deleted &&
+      JSON.stringify(newVariations) !==
+        JSON.stringify(
+          (destinationFlag.variations ?? []).map((
+            { _id, ...rest }: Variation,
+          ) => rest),
+        );
+    if (variationsDiverged) {
+      const flagItem = protectedResources.find((p) =>
+        p.kind === "flag" && p.key === flag.key && p.scope === "flag"
+      );
+      if (flagItem) flagItem.sourceChanged = true;
+      else {
+        protectedResources.push({
+          kind: "flag",
+          key: flag.key,
+          destKey: createdFlagKey,
+          scope: "flag",
+          sourceChanged: true,
+        });
+      }
+      console.log(Colors.yellow(
+        `\t🛡 ${createdFlagKey}: the source variations differ from the destination's, which are left as they are; targeting is not written in any environment`,
+      ));
+    }
 
     // Update flag-level properties when the flag already existed, or when it was just created
     // from a source that is archived or deprecated: the create endpoint ignores those fields, so
@@ -4226,9 +4272,10 @@ async function processOneFlag(
         }
       }
 
-      // Edited in the destination after the migration: its targeting is left as it is. The previous
-      // source version is kept, so the next run checks it again.
-      if (edits.environments.includes(destEnvKey)) {
+      // Edited in the destination after the migration (or written against variations the destination
+      // does not have): its targeting is left as it is. The previous source version is kept, so the
+      // next run checks it again.
+      if (edits.environments.includes(destEnvKey) || variationsDiverged) {
         const prevEnv = prevFlagEntry?.environments?.[env];
         if (prevEnv) flagManifestEnvs[env] = prevEnv;
         continue;
@@ -4319,10 +4366,16 @@ async function processOneFlag(
   // cleared versions, so the next --incremental run retries it.
   if (flagCreated) {
     const prevForRecord = ownEntry(previousManifest?.flags, flag.key);
+    // Protected flag-level fields were not written: the previous source version is kept, so a source
+    // change stays a conflict on the next run instead of passing for applied
+    const keptFlagLevel = flagAlreadyExisted && prevForRecord &&
+      protectsFlagLevel(flagEditsByKey.get(flag.key) ?? NO_FLAG_EDITS);
     updatedManifestFlags[flag.key] = withExtraDestKeys(
       {
-        version: flag._version ?? 0,
-        lastModified: flag.creationDate,
+        version: keptFlagLevel ? prevForRecord.version : flag._version ?? 0,
+        lastModified: keptFlagLevel
+          ? prevForRecord.lastModified
+          : flag.creationDate,
         environments: flagManifestEnvs,
         ...(createdFlagKey !== flag.key && { destKey: createdFlagKey }),
         // Updated from the copy's state after this run's writes (recordDestinationState)
@@ -4510,6 +4563,8 @@ async function handleArchivedSourceCopy(
         destFlag,
         guardEnvKeys(primary ? entry : undefined, envkeys.map(destEnvFor)),
       );
+      const ownedCopy = !primary &&
+        Boolean(entry.targetOwned?.copies?.includes(destKey));
       const edits = primary
         ? detectFlagEdits(
           entry,
@@ -4517,6 +4572,8 @@ async function handleArchivedSourceCopy(
           envkeys.map(destEnvFor),
           targetEditFallbackSince,
         )
+        : ownedCopy
+        ? { ...NO_FLAG_EDITS, flagLevel: true }
         : detectFlagEdits(
           {},
           observed,
@@ -4526,6 +4583,12 @@ async function handleArchivedSourceCopy(
       if (primary) {
         observedDestFlags.set(key, observed);
         flagEditsByKey.set(key, edits);
+      } else if (!ownedCopy && protectsFlagLevel(edits)) {
+        // Recorded, since the previous run's end moves past this edit
+        entry.targetOwned = {
+          ...entry.targetOwned,
+          copies: [...(entry.targetOwned?.copies ?? []), destKey].sort(),
+        };
       }
       if (
         propagateArchived && destFlag.archived !== true &&
@@ -4885,7 +4948,8 @@ async function recordDestinationState(): Promise<void> {
             `flags/${inputArgs.projKeyDest}/${destKey}`,
           );
           observed = copy ? await observeFlag(copy, destEnvs) : undefined;
-          if (!copy) base = { ...entry, dest: undefined };
+          // Without the state this run left, a later modification is what counts as an edit
+          if (!copy) base = { ...entry, dest: { since: Date.now() } };
         }
         // A request from an earlier run stays exempt while it is still open, so applying it later is not
         // taken for a destination edit; once applied or closed, the next run re-baselines the environment
@@ -4895,8 +4959,20 @@ async function recordDestinationState(): Promise<void> {
             [];
         for (const env of earlier) {
           if (awaiting.includes(env)) continue;
-          if ((await findActiveApprovalRequests(destKey, env)).length > 0) {
+          try {
+            if (
+              (await findActiveApprovalRequests(destKey, env, true)).length > 0
+            ) {
+              awaiting.push(env);
+            }
+          } catch (error) {
+            // Kept: the request may still be open
             awaiting.push(env);
+            console.log(Colors.yellow(
+              `⚠ ${destKey}/${env}: could not check the approval request from an earlier run (${
+                error instanceof Error ? error.message : String(error)
+              }); still treated as open`,
+            ));
           }
         }
         const record = nextFlagTargetRecord(base, edits, observed, awaiting);
@@ -4926,7 +5002,7 @@ async function recordDestinationState(): Promise<void> {
           `segments/${inputArgs.projKeyDest}/${destEnv}/${destKey}`,
         );
         observed = copy ? await observeSegment(copy) : undefined;
-        if (!copy) base = { ...entry, dest: undefined };
+        if (!copy) base = { ...entry, dest: { since: Date.now() } };
       }
       const record = nextSegmentTargetRecord(
         base,
