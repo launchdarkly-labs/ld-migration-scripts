@@ -1914,6 +1914,43 @@ function entriesForSegmentCopy(
   return found;
 }
 
+/** The other source segment whose recorded copy is destEnv/destKey, if any: never written for a different segment. */
+function segmentRecordedByAnother(
+  destEnv: string,
+  destKey: string,
+  sourceKey: string,
+): string | undefined {
+  for (
+    const [sourceEnv, entries] of Object.entries(
+      previousManifest?.segments ?? {},
+    )
+  ) {
+    for (const [key, entry] of Object.entries(entries)) {
+      if (
+        key !== sourceKey &&
+        (entry.destEnv ?? destEnvFor(sourceEnv)) === destEnv &&
+        ownedKeys(key, entry).includes(destKey)
+      ) {
+        return key;
+      }
+    }
+  }
+  return undefined;
+}
+
+/** The other source flag whose recorded copy is destKey, if any: never written for a different flag. */
+function flagRecordedByAnother(
+  destKey: string,
+  sourceKey: string,
+): string | undefined {
+  for (const [key, entry] of Object.entries(previousManifest?.flags ?? {})) {
+    if (key !== sourceKey && ownedKeys(key, entry).includes(destKey)) {
+      return key;
+    }
+  }
+  return undefined;
+}
+
 /** Ownership any previous manifest entry records for the destination segment copy destEnv/destKey. */
 function sharedSegmentOwnership(
   destEnv: string,
@@ -2363,6 +2400,20 @@ if (inputArgs.migrateSegments) {
 
         while (!segmentCreated && attemptCount < 2) {
           attemptCount++;
+          // A key (the initial one or a prefix retry) that is another source segment's recorded copy
+          // is never created or patched for this one
+          const owner = segmentRecordedByAnother(
+            destEnvKey,
+            segmentKey,
+            segment.key,
+          );
+          if (owner) {
+            console.log(Colors.red(
+              `  ✗ ${segmentKey} in ${destEnvKey} is the recorded copy of source segment ${owner}; not written for ${segment.key}`,
+            ));
+            segmentsWithErrors.add(`${destEnvKey}/${segmentKey}`);
+            break; // segmentCreated stays false: no patching, no manifest entry
+          }
 
           const newSegment: any = {
             name: segmentName,
@@ -3903,6 +3954,23 @@ async function processOneFlag(
       ),
     );
   }
+  // Another source flag's recorded copy (reached by key or by the conflict prefix) is never written for this one
+  const collides = (): boolean => {
+    const owner = flagRecordedByAnother(flagKey, flag.key);
+    if (!owner) return false;
+    console.log(Colors.red(
+      `\t✗ ${flagKey} is the recorded copy of source flag ${owner}; not written for ${flag.key}`,
+    ));
+    flagsWithErrors.add(flag.key);
+    flagErrorDetails.set(
+      flag.key,
+      `destination key ${flagKey} is the recorded copy of source flag ${owner}`,
+    );
+    return true;
+  };
+  if (collides()) {
+    return { incrementalSkipCountDelta, incrementalEnvSkipCountDelta };
+  }
   // A recorded copy may have been deleted in the destination, which must not be recreated
   if (recorded.recorded && probeStatus !== 200 && probeStatus !== 404) {
     console.log(Colors.red(
@@ -3920,6 +3988,9 @@ async function processOneFlag(
 
   while (!flagCreated && attemptCount < 2) {
     attemptCount++;
+    if (collides()) {
+      return { incrementalSkipCountDelta, incrementalEnvSkipCountDelta };
+    }
 
     const newFlag: any = {
       key: flagKey,
