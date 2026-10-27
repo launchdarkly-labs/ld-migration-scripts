@@ -1891,11 +1891,12 @@ if (contextKinds && contextKinds.length > 0) {
  * the merge of source tags, migration tags and the tags already there; without them the copy gets the
  * source tags, as flags do. Returns a short log note, empty when nothing was changed.
  */
-/** Ownership any previous manifest entry records for the destination segment copy destEnv/destKey. */
-function sharedSegmentOwnership(
+/** Previous manifest entries (any source environment) recording the destination segment copy destEnv/destKey. */
+function entriesForSegmentCopy(
   destEnv: string,
   destKey: string,
-): SyncManifestSegment["targetOwned"] {
+): SyncManifestSegment[] {
+  const found: SyncManifestSegment[] = [];
   for (
     const [sourceEnv, entries] of Object.entries(
       previousManifest?.segments ?? {},
@@ -1903,15 +1904,33 @@ function sharedSegmentOwnership(
   ) {
     for (const [key, entry] of Object.entries(entries)) {
       if (
-        entry.targetOwned &&
         (entry.destEnv ?? destEnvFor(sourceEnv)) === destEnv &&
         (entry.destKey ?? key) === destKey
       ) {
-        return entry.targetOwned;
+        found.push(entry);
       }
     }
   }
-  return undefined;
+  return found;
+}
+
+/** Ownership any previous manifest entry records for the destination segment copy destEnv/destKey. */
+function sharedSegmentOwnership(
+  destEnv: string,
+  destKey: string,
+): SyncManifestSegment["targetOwned"] {
+  return entriesForSegmentCopy(destEnv, destKey).find((e) => e.targetOwned)
+    ?.targetOwned;
+}
+
+/** The entry to check a shared destination segment copy against: an owning one first, else one with a record. */
+function sharedSegmentEntry(
+  destEnv: string,
+  destKey: string,
+): SyncManifestSegment | undefined {
+  const entries = entriesForSegmentCopy(destEnv, destKey);
+  return entries.find((e) => e.targetOwned) ?? entries.find((e) => e.dest) ??
+    entries[0];
 }
 
 /**
@@ -2319,24 +2338,26 @@ if (inputArgs.migrateSegments) {
           }
         } else {
           // A copy shared with another source environment (several mapped to one destination
-          // environment) that the destination owns stays protected for this new entry too; no source
-          // version is recorded, since nothing was applied
-          const sharedOwned = sharedSegmentOwnership(destEnvKey, segmentKey);
-          if (sharedOwned) {
-            reportSegmentEdit(
+          // environment) is checked against that entry's record before this new entry writes it; a
+          // protected copy stays protected, and no source version is recorded since nothing was applied
+          const shared = sharedSegmentEntry(destEnvKey, segmentKey);
+          if (shared) {
+            const checked = await checkRecordedSegment(
               env.key,
               segment,
               destEnvKey,
               segmentKey,
-              sharedOwned,
-              undefined,
+              shared,
             );
-            keepProtectedSegment(env.key, segment.key, {
-              version: 0,
-              destEnv: destEnvKey,
-              ...(segmentKey !== segment.key ? { destKey: segmentKey } : {}),
-            }, sharedOwned);
-            continue;
+            if (checked.copy === undefined) continue;
+            if (checked.edit !== "none") {
+              keepProtectedSegment(env.key, segment.key, {
+                version: 0,
+                destEnv: destEnvKey,
+                ...(segmentKey !== segment.key ? { destKey: segmentKey } : {}),
+              }, checked.edit);
+              continue;
+            }
           }
         }
 
