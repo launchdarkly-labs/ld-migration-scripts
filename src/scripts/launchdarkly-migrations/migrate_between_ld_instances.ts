@@ -1557,6 +1557,8 @@ const protectedResources: ProtectedResource[] = [];
 const approvalRequestsCreated: Array<
   { flag: string; env: string; skippedFields: string[] }
 > = [];
+// Context kinds whose upsert failed: "<key>: <detail>"
+const contextKindErrors: string[] = [];
 // Destination copies archived this run, or found archived already; a failed patch is in flagsWithErrors instead
 const flagsArchivedInSource: string[] = [];
 // Filled by reconcileDestination; stays empty on dry runs and aborts
@@ -1896,22 +1898,21 @@ if (contextKinds && contextKinds.length > 0) {
         "context-kinds",
       );
     } catch (error) {
-      console.log(Colors.red(
-        `  ✗ Context kind "${kind.key}" failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      ));
+      const detail = error instanceof Error ? error.message : String(error);
+      console.log(
+        Colors.red(`  ✗ Context kind "${kind.key}" failed: ${detail}`),
+      );
+      contextKindErrors.push(`${kind.key}: ${detail.slice(0, 200)}`);
       continue;
     }
     if (resp.status >= 200 && resp.status < 300) {
       console.log(Colors.green(`  ✓ Context kind "${kind.key}" upserted`));
     } else {
+      const detail = `HTTP ${resp.status}: ${await resp.text()}`;
       console.log(
-        Colors.red(
-          `  ✗ Context kind "${kind.key}" failed (${resp.status}): ${await resp
-            .text()}`,
-        ),
+        Colors.red(`  ✗ Context kind "${kind.key}" failed (${detail})`),
       );
+      contextKindErrors.push(`${kind.key}: ${detail.slice(0, 200)}`);
     }
   }
 }
@@ -5263,6 +5264,9 @@ async function writeRunRecordFile(
       })),
       segments: [...segmentsWithErrors],
       reconciliation: reconciliationErrors,
+      ...(contextKindErrors.length > 0
+        ? { contextKinds: contextKindErrors }
+        : {}),
     },
     reconciliation: reconciliationResult,
     exitCode,
@@ -5396,10 +5400,12 @@ async function writeSyncManifestFile(
   for (const [key, entry] of Object.entries(entries.flags)) {
     const owned = [key, entry.destKey ?? key, ...(entry.extraDestKeys ?? [])];
     if (owned.some((k) => flagsWithErrors.has(k))) {
+      // A failed write may have left flag-level fields unapplied: the last applied digest stays
       Object.assign(entry, {
         version: 0,
         lastModified: undefined,
         environments: {},
+        sourceDigest: ownEntry(previousManifest?.flags, key)?.sourceDigest,
       });
     }
   }
@@ -5949,7 +5955,8 @@ printMigrationSummary(
 );
 
 const exitCode = flagsWithErrors.size > 0 || segmentsWithErrors.size > 0 ||
-    reconciliationErrors.length > 0 || viewLinkingFailed || manifestWriteFailed
+    reconciliationErrors.length > 0 || viewLinkingFailed ||
+    manifestWriteFailed || contextKindErrors.length > 0
   ? 1
   : 0;
 await writeRunRecordFile(exitCode);

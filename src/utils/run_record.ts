@@ -74,6 +74,8 @@ export interface RunRecord {
     flags: Array<{ key: string; detail?: string }>;
     segments: string[];
     reconciliation: string[];
+    /** Context kinds whose upsert failed ("<key>: <detail>"); absent when none did */
+    contextKinds?: string[];
   };
   /** Keys compared after the run; null for dry runs or when it did not run */
   reconciliation: {
