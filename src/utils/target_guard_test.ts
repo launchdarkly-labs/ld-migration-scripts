@@ -11,6 +11,7 @@ import {
   observeFlag,
   observeSegment,
   protectsFlagLevel,
+  sourceFlagLevelDigest,
 } from "./target_guard.ts";
 
 const destFlag = (
@@ -403,4 +404,22 @@ Deno.test("observeFlag fingerprints every environment field migrate writes", asy
   const fa = (await observeFlag(a, ENVS)).environments!.production.fingerprint;
   const fb = (await observeFlag(b, ENVS)).environments!.production.fingerprint;
   assertEquals(fa === fb, false);
+});
+
+Deno.test("sourceFlagLevelDigest changes with flag-level fields only", () => {
+  const base = destFlag();
+  const digest = sourceFlagLevelDigest(base);
+  assertEquals(digest.length, 16);
+  // targeting, tag order and generated IDs do not count
+  const retargeted = destFlag({ on: true });
+  retargeted.tags = ["a", "b"];
+  retargeted.variations = retargeted.variations.map((v) => ({
+    ...v,
+    _id: "x",
+  }));
+  assertEquals(sourceFlagLevelDigest(retargeted), digest);
+  assertEquals(
+    sourceFlagLevelDigest(destFlag({ name: "Renamed" })) === digest,
+    false,
+  );
 });

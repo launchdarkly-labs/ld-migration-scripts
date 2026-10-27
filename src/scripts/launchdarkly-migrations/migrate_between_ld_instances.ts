@@ -72,6 +72,7 @@ import {
   observeFlag,
   observeSegment,
   protectsFlagLevel,
+  sourceFlagLevelDigest,
 } from "../../utils/target_guard.ts";
 import {
   type ProtectedResource,
@@ -1603,15 +1604,21 @@ function reportFlagEdits(
   prevEntry: SyncManifestFlag | undefined,
 ): boolean {
   if (!protectsFlagLevel(edits)) return false;
-  const sourceEnvOf = (destEnv: string) =>
-    envkeys.find((env) => destEnvFor(env) === destEnv);
+  // Every source environment mapped to destEnv (several can share one) whose targeting changed since
+  const envChanged = (sourceEnv: string) =>
+    prevEntry?.environments?.[sourceEnv]?.version !==
+      flag.environments?.[sourceEnv]?.version;
+  const sourceEnvsOf = (destEnv: string) =>
+    envkeys.filter((env) => destEnvFor(env) === destEnv);
   if (edits.deleted) {
     protectedResources.push({
       kind: "flag",
       key: flag.key,
       destKey,
       scope: "deleted",
-      sourceChanged: prevEntry?.version !== flag._version,
+      // Targeting changes can move an environment version without the flag version
+      sourceChanged: prevEntry?.version !== flag._version ||
+        envkeys.some((env) => flag.environments?.[env] && envChanged(env)),
     });
     console.log(Colors.yellow(
       `\t🛡 ${destKey}: deleted in the destination after the migration wrote it; not recreated`,
@@ -1619,17 +1626,15 @@ function reportFlagEdits(
     return true;
   }
   // Environments outside this run's mapping are not written either way; their edits only keep the flag-level
-  // fields. A source change to those fields left unapplied (any edit keeps them) is a flag-level conflict too:
-  // the flag version moved while no environment version did
-  const sourceFlagLevelChanged = prevEntry !== undefined &&
-    prevEntry.version !== flag._version &&
-    Object.entries(flag.environments ?? {}).every(([env, config]: [
-      string,
-      any,
-    ]) =>
-      !envkeys.includes(env) ||
-      prevEntry.environments?.[env]?.version === config?.version
-    );
+  // fields. A source change to those fields left unapplied (any edit keeps them) is a flag-level conflict too.
+  // It is judged against the digest last applied; entries without one only count a moved flag version with
+  // no moved environment version
+  const sourceFlagLevelChanged = prevEntry === undefined
+    ? false
+    : prevEntry.sourceDigest !== undefined
+    ? prevEntry.sourceDigest !== sourceFlagLevelDigest(flag)
+    : prevEntry.version !== flag._version &&
+      !envkeys.some((env) => flag.environments?.[env] && envChanged(env));
   if (
     edits.flagLevel || edits.otherEnvironments.length > 0 ||
     sourceFlagLevelChanged
@@ -1639,22 +1644,19 @@ function reportFlagEdits(
       key: flag.key,
       destKey,
       scope: "flag",
-      sourceChanged: prevEntry?.version !== flag._version,
+      sourceChanged: prevEntry?.sourceDigest !== undefined
+        ? sourceFlagLevelChanged
+        : prevEntry?.version !== flag._version,
     });
   }
   for (const destEnv of edits.environments) {
-    const sourceEnv = sourceEnvOf(destEnv);
-    const sourceVersion = sourceEnv
-      ? flag.environments?.[sourceEnv]?.version
-      : undefined;
     protectedResources.push({
       kind: "flag",
       key: flag.key,
       destKey,
       scope: "environment",
       env: destEnv,
-      sourceChanged: sourceEnv !== undefined &&
-        prevEntry?.environments?.[sourceEnv]?.version !== sourceVersion,
+      sourceChanged: sourceEnvsOf(destEnv).some(envChanged),
     });
   }
   const elsewhere = edits.otherEnvironments.length > 0
@@ -3821,6 +3823,10 @@ async function processOneFlag(
         // Carry forward the previous manifest entry (protection fields are updated by recordDestinationState)
         updatedManifestFlags[flag.key] = {
           ...prevEntry,
+          // Lifecycle and tags applied: the source flag-level fields are now all applied
+          ...(lifecycleSynced
+            ? { sourceDigest: sourceFlagLevelDigest(flag) }
+            : {}),
           ...nextFlagTargetRecord(
             prevEntry,
             flagEditsByKey.get(flag.key) ?? NO_FLAG_EDITS,
@@ -4531,6 +4537,11 @@ async function processOneFlag(
     updatedManifestFlags[flag.key] = withExtraDestKeys(
       {
         version: keptFlagLevel ? prevForRecord.version : flag._version ?? 0,
+        ...(keptFlagLevel
+          ? prevForRecord.sourceDigest
+            ? { sourceDigest: prevForRecord.sourceDigest }
+            : {}
+          : { sourceDigest: sourceFlagLevelDigest(flag) }),
         lastModified: keptFlagLevel
           ? prevForRecord.lastModified
           : flag.creationDate,

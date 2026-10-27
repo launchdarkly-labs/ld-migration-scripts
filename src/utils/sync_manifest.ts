@@ -33,6 +33,8 @@ export interface SyncManifestEnv {
 /** dest, targetOwned and awaitingApproval protect destination edits; see target_guard.ts */
 export interface SyncManifestFlag extends FlagTargetRecord {
   version: number;
+  /** Digest of the source flag-level fields last applied (sourceFlagLevelDigest); absent before 3.6.0 */
+  sourceDigest?: string;
   lastModified?: string;
   environments: Record<string, SyncManifestEnv>;
   /** Destination key, if it differs from the source key (e.g. conflict prefix) */

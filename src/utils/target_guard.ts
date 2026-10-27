@@ -191,10 +191,11 @@ function withoutGeneratedIds(field: string, value: unknown): unknown {
   return value;
 }
 
-async function fingerprint(
+/** The canonical text of the given fields, as fingerprinted. */
+function fieldsText(
   source: Record<string, unknown> | undefined,
   fields: readonly string[],
-): Promise<string> {
+): string {
   const picked: Record<string, unknown> = {};
   for (const field of fields) {
     let value = withoutGeneratedIds(field, source?.[field]);
@@ -202,14 +203,37 @@ async function fingerprint(
     if (field === "tags" && Array.isArray(value)) value = [...value].sort();
     picked[field] = value ?? null;
   }
+  return canonical(picked);
+}
+
+async function fingerprint(
+  source: Record<string, unknown> | undefined,
+  fields: readonly string[],
+): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
-    new TextEncoder().encode(canonical(picked)),
+    new TextEncoder().encode(fieldsText(source, fields)),
   );
   return Array.from(
     new Uint8Array(digest).slice(0, 16),
     (b) => b.toString(16).padStart(2, "0"),
   ).join("");
+}
+
+/**
+ * A short synchronous digest of a source flag's flag-level fields (two 32-bit FNV-1a hashes). The
+ * manifest keeps the one last applied, telling a source change to those fields apart from targeting
+ * changes, which also move the flag version.
+ */
+export function sourceFlagLevelDigest(flag: any): string {
+  const text = fieldsText(flag, FLAG_LEVEL_FIELDS);
+  let a = 0x811c9dc5, b = 0x01000193 ^ 0x5bd1e995;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193) >>> 0;
+    b = Math.imul(b ^ c, 0x5bd1e995) >>> 0;
+  }
+  return a.toString(16).padStart(8, "0") + b.toString(16).padStart(8, "0");
 }
 
 const asNumber = (v: unknown): number | undefined =>
