@@ -350,6 +350,11 @@ Deno.test("a copy that could not be read back counts as edited when modified aft
   // a run wrote stage only, then could not read the copy back
   const dest = afterUnreadWrite(recorded, ["stage"], 1_500);
   assertEquals(dest.fingerprint, undefined);
+  // an environment-only write keeps the flag-level fingerprint, so a later rename is still detected
+  assertEquals(
+    afterUnreadWrite(recorded, ["stage"], 1_500, true).fingerprint,
+    recorded.fingerprint,
+  );
   assertEquals(dest.environments!.stage, { since: 1_500 });
   // production, not written, keeps its fingerprint
   assertEquals(

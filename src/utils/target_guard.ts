@@ -43,20 +43,24 @@ export interface DestFlagState {
 
 /**
  * The record after a run wrote `writtenEnvs` of a copy it could not read back: those environments
- * fall back to `at`, the flag-level fingerprint goes (it no longer describes the copy), and every
- * other environment keeps its record.
+ * fall back to `at` and every other environment keeps its record. The flag-level fingerprint stays
+ * when the run did not write flag-level fields (`flagLevelUnchanged`); otherwise it goes, since it
+ * no longer describes the copy.
  */
 export function afterUnreadWrite(
   dest: DestFlagState | undefined,
   writtenEnvs: Iterable<string>,
   at: number,
+  flagLevelUnchanged = false,
 ): DestFlagState {
   const environments: Record<string, DestEnvState> = Object.assign(
     Object.create(null),
     dest?.environments ?? {},
   );
   for (const env of writtenEnvs) environments[env] = { since: at };
-  return { environments };
+  return flagLevelUnchanged && dest?.fingerprint !== undefined
+    ? { version: dest.version, fingerprint: dest.fingerprint, environments }
+    : { environments };
 }
 
 export interface DestSegmentState {

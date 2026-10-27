@@ -1566,15 +1566,21 @@ let reconciliationResult: RunRecord["reconciliation"] = {
 const flagEditsByKey: Map<string, FlagTargetEdits> = new Map(); // source key
 const observedDestFlags: Map<string, DestFlagState> = new Map(); // source key
 const destFlagsWritten: Set<string> = new Set(); // destination key
+const destFlagLevelWritten: Set<string> = new Set(); // destination key, flag-level fields written
 const flagsDeletedInTarget: Set<string> = new Set(); // destination key
 const segmentEditsById: Map<string, "none" | "edited" | "deleted"> = new Map(); // "<sourceEnv>/<segmentKey>"
 const observedDestSegments: Map<string, DestSegmentState> = new Map(); // "<sourceEnv>/<segmentKey>"
 const destSegmentsWritten: Set<string> = new Set(); // "<destinationEnv>/<destinationKey>"
 const segmentsDeletedInTarget: Set<string> = new Set(); // "<destinationEnv>/<destinationKey>"
 
-const noteFlagWrite = (destKey: string, status: number): void => {
+const noteFlagWrite = (
+  destKey: string,
+  status: number,
+  flagLevel = false,
+): void => {
   if (!inputArgs.dryRun && status >= 200 && status < 300) {
     destFlagsWritten.add(destKey);
+    if (flagLevel) destFlagLevelWritten.add(destKey);
   }
 };
 const noteSegmentWrite = (
@@ -3759,7 +3765,7 @@ async function processOneFlag(
                 "flags",
                 "lifecycle (archived/deprecated) and tags",
               );
-              noteFlagWrite(destKey, patchResp.status);
+              noteFlagWrite(destKey, patchResp.status, true);
               if (patchResp.status >= 200 && patchResp.status < 300) {
                 console.log(
                   Colors.gray(
@@ -4070,7 +4076,7 @@ async function processOneFlag(
         "flags",
       );
 
-      noteFlagWrite(flagKey, flagResp.status);
+      noteFlagWrite(flagKey, flagResp.status, true);
       if (flagResp.status == 200 || flagResp.status == 201) {
         flagCreated = true;
         createdFlagKey = flagKey;
@@ -4366,7 +4372,7 @@ async function processOneFlag(
           "flags",
           "flag-level properties",
         );
-        noteFlagWrite(createdFlagKey, flagLevelResp.status);
+        noteFlagWrite(createdFlagKey, flagLevelResp.status, true);
         if (flagLevelResp.status >= 200 && flagLevelResp.status < 300) {
           console.log(Colors.green(`\t✓ Flag-level properties updated`));
         } else {
@@ -4778,7 +4784,7 @@ async function handleArchivedSourceCopy(
       "flags",
       "archived in the source",
     );
-    noteFlagWrite(destKey, patchResp.status);
+    noteFlagWrite(destKey, patchResp.status, true);
     if (patchResp.status >= 200 && patchResp.status < 300) {
       flagsArchivedInSource.push(destKey);
       console.log(
@@ -5096,7 +5102,12 @@ async function recordDestinationState(): Promise<void> {
           if (!copy) {
             base = {
               ...entry,
-              dest: afterUnreadWrite(entry.dest, destEnvs, Date.now()),
+              dest: afterUnreadWrite(
+                entry.dest,
+                destEnvs,
+                Date.now(),
+                !destFlagLevelWritten.has(destKey),
+              ),
             };
           }
         }
