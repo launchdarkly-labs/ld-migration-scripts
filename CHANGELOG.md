@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.6.1] - 2026-10-28
+
+### Fixed
+
+- `workflow`: `--dry-run` on the command line now makes every step that writes to LaunchDarkly (`migrate`, `third-party-import`, `revert`) a dry run, whatever the YAML says. Until now the workflow ignored it, so `deno task workflow -f <file> --dry-run` ran a real migration. Options the workflow does not know are now refused instead of ignored (#41)
+
 ## [3.6.0] - 2026-10-27
 
 ### Added
