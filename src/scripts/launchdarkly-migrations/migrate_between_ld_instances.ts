@@ -2449,6 +2449,29 @@ if (inputArgs.migrateSegments) {
             segmentsWithErrors.add(`${destEnvKey}/${segmentKey}`);
             break; // segmentCreated stays false: no patching, no manifest entry
           }
+          // A prefix retry can land on a copy shared with another source environment under the same
+          // key: it is checked against that entry's record, as the initial key was
+          if (attemptCount > 1) {
+            const shared = sharedSegmentEntry(destEnvKey, segmentKey);
+            if (shared) {
+              const checked = await checkRecordedSegment(
+                env.key,
+                segment,
+                destEnvKey,
+                segmentKey,
+                shared,
+              );
+              if (checked.copy === undefined) break; // recorded as an error
+              if (checked.edit !== "none") {
+                keepProtectedSegment(env.key, segment.key, {
+                  version: 0,
+                  destEnv: destEnvKey,
+                  destKey: segmentKey,
+                }, checked.edit);
+                break; // the protected entry is recorded; nothing is written
+              }
+            }
+          }
 
           const newSegment: any = {
             name: segmentName,
