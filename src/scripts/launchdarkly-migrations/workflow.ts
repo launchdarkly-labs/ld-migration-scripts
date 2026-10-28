@@ -25,8 +25,10 @@ import {
   resolveProjectPairs,
   simulatePrefixedMerge,
   SOURCE_DATA_DIR,
+  unknownWorkflowFlags,
   usesProjectKeyMapping,
   usesProjectKeysList,
+  withForcedDryRun,
   withProjectPair,
   type WorkflowConfig,
   type WorkflowStepName,
@@ -35,6 +37,7 @@ import { assertNotSelfMigration } from "../../utils/account_guard.ts";
 
 interface Arguments {
   config?: string;
+  dryRun?: boolean;
 }
 
 type StepName = WorkflowStepName;
@@ -55,7 +58,24 @@ const inputArgs: Arguments = yargs(Deno.args)
     description: "Path to workflow configuration YAML file",
   })
   .describe("f", "Path to workflow configuration YAML file")
+  .option("dry-run", {
+    type: "boolean",
+    description:
+      "Preview only: every step that writes to LaunchDarkly runs as a dry run, whatever the YAML says",
+  })
   .parse() as Arguments;
+
+const unknownFlags = unknownWorkflowFlags(Deno.args);
+if (unknownFlags.length > 0) {
+  console.log(
+    Colors.red(
+      `Error: unknown option(s) ${
+        unknownFlags.join(", ")
+      }. The workflow takes -f <file> and --dry-run; set everything else in the YAML.`,
+    ),
+  );
+  Deno.exit(1);
+}
 
 // Allow positional YAML path: deno task workflow examples/workflow-full.yaml
 const configPath = inputArgs.config ??
@@ -948,7 +968,13 @@ const getWorkflowSteps = (config: WorkflowConfig): string[] =>
  * Main workflow orchestration function
  */
 const main = async (): Promise<void> => {
-  const config = await loadConfig(configPath);
+  const loaded = await loadConfig(configPath);
+  const config = inputArgs.dryRun ? withForcedDryRun(loaded) : loaded;
+  if (inputArgs.dryRun) {
+    console.log(Colors.yellow(
+      "\n[DRY RUN] --dry-run: migrate, third-party-import and revert run as dry runs; nothing is written to LaunchDarkly",
+    ));
+  }
   const steps = getWorkflowSteps(config);
 
   printWorkflowHeader(config, steps);

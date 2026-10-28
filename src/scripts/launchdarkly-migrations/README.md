@@ -29,6 +29,9 @@ deno task workflow examples/workflow-full.yaml
 # Or use -f flag
 deno task workflow -f examples/workflow-full.yaml
 
+# Preview only: every writing step runs as a dry run, whatever the YAML says
+deno task workflow -f examples/workflow-full.yaml --dry-run
+
 # Shortcut tasks
 deno task workflow:full
 deno task workflow:incremental

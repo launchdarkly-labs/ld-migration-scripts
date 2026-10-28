@@ -139,6 +139,10 @@ deno task workflow -f examples/workflow-full.yaml
 # Or pass the YAML as a positional argument (no -f needed)
 deno task workflow examples/workflow-full.yaml
 
+# Preview only: every step that writes to LaunchDarkly (migrate, third-party-import, revert)
+# runs as a dry run, whatever the YAML says. Any other option is refused: set it in the YAML.
+deno task workflow -f examples/workflow-full.yaml --dry-run
+
 # Shortcut tasks for common workflows
 deno task workflow:full          # runs examples/workflow-full.yaml
 deno task workflow:incremental   # runs examples/workflow-extract-migrate-incremental.yaml
