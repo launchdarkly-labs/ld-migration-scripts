@@ -122,6 +122,39 @@ export function normalizeWorkflowConfig(raw: WorkflowConfig): WorkflowConfig {
 }
 
 /**
+ * The config with every step that can write to LaunchDarkly (migrate, third-party-import, revert)
+ * set to dry run, whatever the YAML says: what `deno task workflow --dry-run` runs.
+ */
+export function withForcedDryRun(config: WorkflowConfig): WorkflowConfig {
+  return {
+    ...config,
+    migration: { ...config.migration, dryRun: true },
+    ...(config.thirdPartyImport
+      ? { thirdPartyImport: { ...config.thirdPartyImport, dryRun: true } }
+      : {}),
+    revert: { ...config.revert, dryRun: true },
+  };
+}
+
+const WORKFLOW_FLAGS = new Set([
+  "-f",
+  "--config",
+  "--dry-run",
+  "--help",
+  "--version",
+]);
+
+/**
+ * Command-line options the workflow does not know. They are refused rather than ignored: an
+ * ignored `--dryrun` (or any option meant for a step) would silently run a real migration.
+ */
+export function unknownWorkflowFlags(args: string[]): string[] {
+  return args.filter((arg) =>
+    arg.startsWith("-") && !WORKFLOW_FLAGS.has(arg.split("=")[0])
+  );
+}
+
+/**
  * Resolves the list of source project keys from config.
  * @throws Error if neither projectKey nor projectKeys is set
  */

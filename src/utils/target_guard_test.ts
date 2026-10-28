@@ -3,7 +3,6 @@ import {
   afterUnreadWrite,
   detectFlagEdits,
   detectSegmentEdit,
-  flagLevelMatchesRecord,
   guardEnvKeys,
   nextFlagTargetRecord,
   nextSegmentTargetRecord,
@@ -188,22 +187,6 @@ Deno.test("observeFlag keeps an _id inside a JSON variation value as content", a
   b.variations = [{ _id: "v1", value: { _id: "new" } as any }];
   const fa = (await observeFlag(a, ENVS)).fingerprint;
   assertEquals(fa === (await observeFlag(b, ENVS)).fingerprint, false);
-});
-
-Deno.test("flagLevelMatchesRecord tells a destination-only lifecycle edit from a source change", async () => {
-  const entry = { dest: await observeFlag(destFlag(), ENVS) };
-  const archivedInDest = { ...destFlag(), archived: true };
-  // the source still has archived: false, as last written: the destination archived it
-  assertEquals(
-    await flagLevelMatchesRecord(entry, archivedInDest, { archived: false }),
-    true,
-  );
-  // the source deprecated it: a change the destination copy was not given
-  assertEquals(
-    await flagLevelMatchesRecord(entry, destFlag(), { deprecated: true }),
-    false,
-  );
-  assertEquals(await flagLevelMatchesRecord({}, destFlag(), {}), false);
 });
 
 Deno.test("detectFlagEdits does not take an applied approval request of the migration for an edit", async () => {

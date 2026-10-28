@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.6.1] - 2026-10-28
+
+### Fixed
+
+- `workflow`: `--dry-run` on the command line now makes every step that writes to LaunchDarkly (`migrate`, `third-party-import`, `revert`) a dry run, whatever the YAML says. Until now the workflow ignored it, so `deno task workflow -f <file> --dry-run` ran a real migration. Options the workflow does not know are now refused instead of ignored (#41)
+- `migrate --incremental`: a lifecycle or tag difference on an unchanged source flag (for example a copy archived in the destination only) is no longer reported as "changed in the source too": every flag-level source change moves the flag version, so such a difference was made in the destination. Entries from before 3.6.0 get their `sourceDigest` on the first run that finds the source unchanged, so the label stays right afterwards (#41)
+
 ## [3.6.0] - 2026-10-27
 
 ### Added

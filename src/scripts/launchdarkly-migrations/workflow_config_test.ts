@@ -20,8 +20,10 @@ import {
   resolveProjectKeys,
   resolveProjectPairs,
   simulatePrefixedMerge,
+  unknownWorkflowFlags,
   usesProjectKeyMapping,
   usesProjectKeysList,
+  withForcedDryRun,
   withProjectKey,
   withProjectPair,
   type WorkflowConfig,
@@ -789,4 +791,34 @@ Deno.test("a destination environment named __proto__ is kept as an own entry", a
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
+});
+
+Deno.test("withForcedDryRun makes every writing step a dry run", () => {
+  const config: WorkflowConfig = {
+    ...baseConfig(),
+    migration: { dryRun: false, incremental: true },
+    thirdPartyImport: { inputFile: "in.json", targetProject: "p" },
+  };
+  const forced = withForcedDryRun(config);
+  assertEquals(forced.migration, { dryRun: true, incremental: true });
+  assertEquals(forced.thirdPartyImport?.dryRun, true);
+  assertEquals(forced.revert?.dryRun, true);
+  // the original config is left as it is
+  assertEquals(config.migration?.dryRun, false);
+  // without a migration or import section the steps still get one
+  const bare = withForcedDryRun(baseConfig());
+  assertEquals(bare.migration?.dryRun, true);
+  assertEquals(bare.thirdPartyImport, undefined);
+});
+
+Deno.test("unknownWorkflowFlags refuses options the workflow does not know", () => {
+  assertEquals(
+    unknownWorkflowFlags(["-f", "w.yaml", "--dry-run", "--config=x.yaml"]),
+    [],
+  );
+  assertEquals(unknownWorkflowFlags(["w.yaml"]), []);
+  assertEquals(
+    unknownWorkflowFlags(["-f", "w.yaml", "--dryrun", "--incremental"]),
+    ["--dryrun", "--incremental"],
+  );
 });
