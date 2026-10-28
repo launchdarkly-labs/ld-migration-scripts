@@ -62,7 +62,6 @@ import {
   detectFlagEdits,
   detectSegmentEdit,
   epochMs,
-  flagLevelMatchesRecord,
   type FlagTargetEdits,
   guardEnvKeys,
   isWrittenEnvField,
@@ -3778,34 +3777,27 @@ async function processOneFlag(
                 );
               }
             }
-            // Lifecycle and tags change without a version bump. The source changed them (a conflict) unless
-            // the copy with the source values matches what the migration last wrote (a destination-only edit)
-            // The digest last applied answers it directly; older entries reconstruct from the destination
+            // This path runs only while the source flag version is unchanged, and every flag-level change
+            // (archiving, deprecation and tags included) moves it: a lifecycle or tag difference here was made
+            // in the destination, not a conflict. The digest last applied, when recorded, is checked too.
             const sourceLifecycleChanged = lifecyclePatches.length > 0 &&
-              flagLevelProtected &&
-              (prevEntry.sourceDigest !== undefined
-                ? prevEntry.sourceDigest !== sourceFlagLevelDigest(flag)
-                : !(await flagLevelMatchesRecord(
-                  prevEntry,
-                  destFlag,
-                  Object.fromEntries(
-                    lifecyclePatches.map((p) => [p.path.slice(1), p.value]),
-                  ),
-                )));
+              flagLevelProtected && prevEntry.sourceDigest !== undefined &&
+              prevEntry.sourceDigest !== sourceFlagLevelDigest(flag);
             if (lifecyclePatches.length > 0 && flagLevelProtected) {
               const flagItem = protectedResources.find((p) =>
                 p.kind === "flag" && p.key === flag.key &&
                 p.scope !== "environment"
               );
+              // The lifecycle or tags left as they are show up as protected flag-level fields
               if (flagItem) {
                 flagItem.sourceChanged ||= sourceLifecycleChanged;
-              } else if (sourceLifecycleChanged) {
+              } else {
                 protectedResources.push({
                   kind: "flag",
                   key: flag.key,
                   destKey,
                   scope: "flag",
-                  sourceChanged: true,
+                  sourceChanged: sourceLifecycleChanged,
                 });
               }
             } else if (lifecyclePatches.length > 0) {
@@ -3861,8 +3853,10 @@ async function processOneFlag(
         // Carry forward the previous manifest entry (protection fields are updated by recordDestinationState)
         updatedManifestFlags[flag.key] = {
           ...prevEntry,
-          // Lifecycle and tags applied: the source flag-level fields are now all applied
-          ...(lifecycleSynced
+          // The source flag version is unchanged since it was last applied, so its flag-level fields are
+          // what was applied: entries from before the digest existed get one (a failed write restores the
+          // previous value when the manifest is written)
+          ...(lifecycleSynced || prevEntry.sourceDigest === undefined
             ? { sourceDigest: sourceFlagLevelDigest(flag) }
             : {}),
           ...nextFlagTargetRecord(

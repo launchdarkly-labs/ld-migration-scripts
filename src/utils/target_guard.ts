@@ -273,21 +273,6 @@ export function guardEnvKeys(
   ];
 }
 
-/**
- * Whether the destination flag, with `overrides` applied, has the flag-level fingerprint the entry
- * recorded: then the source values in `overrides` equal what the migration last wrote, and any
- * difference to them was made in the destination.
- */
-export async function flagLevelMatchesRecord(
-  entry: FlagTargetRecord | undefined,
-  destFlag: any,
-  overrides: Record<string, unknown>,
-): Promise<boolean> {
-  return entry?.dest?.fingerprint !== undefined &&
-    await fingerprint({ ...destFlag, ...overrides }, FLAG_LEVEL_FIELDS) ===
-      entry.dest.fingerprint;
-}
-
 /** The current state of a destination flag (as returned by GET flags/{project}/{key}) in the given destination environments. */
 export async function observeFlag(
   destFlag: any,
