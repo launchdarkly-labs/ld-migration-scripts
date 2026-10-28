@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.6.0] - 2026-10-27
+
+### Added
+
+- `migrate`: destination edits are never overwritten by a rerun. The sync manifest now records, per destination copy, the state the run left it in (`dest`: version, lastModified and a fingerprint of the fields `migrate` writes, at flag level and per destination environment). Before writing an existing copy, a run compares it with that record and leaves alone what was edited in the destination since: the edited flag environments, the flag-level fields of a flag with any edit, edited segments; recorded copies deleted in the destination are not recreated (nor reported missing). Such resources are marked `targetOwned` in the manifest and stay untouched on later runs. The summary lists them under "Destination edits left as they are", separating conflicts (changed in the source too) from the rest. During a migration the source is usually read-only for the operator and goes stale, so until now a re-sync could revert a change made in the destination (for example after an environment's cutover) to the older source state. Entries from older manifests fall back to comparing the destination's lastModified with the end of the last run on an older version (`legacyEditCutoff`); flag-level edits are detected once a run on this version has recorded a fingerprint. Environments outside the run's mapping are checked too, since an edit there keeps the shared flag-level fields. Big segment membership is not compared (the API does not return it). Costs one read-back per destination copy written in a run (#40)
+- `migrate`: every run that gets past its setup checks (dry runs and aborted runs included) writes a run record to `data/launchdarkly-migrations/runs/<source>/<dest>/` (and `latest.json` there) with the mode, scope, counts, protected destination edits, conflicts, errors (including failed context-kind upserts, which now also fail the run), reconciliation result and exit code; see README "Run Records". The sync manifest also records `lastRunStartedAt` (#40)
+- `migrate`: the reconciliation result is kept for the run record instead of only being printed (#40)
+
 ## [3.5.1] - 2026-10-22
 
 ### Fixed

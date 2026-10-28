@@ -15,7 +15,13 @@
  * left resources without an entry, writes the manifest marked `incomplete`; revert refuses such a
  * manifest until a later run clears the marker (see markerAfterRun and adoptUnresolved). A dry run
  * never writes a manifest.
+ *
+ * Every entry also records the state the run left its destination copy in (`dest`), and what was
+ * edited in the destination since (`targetOwned`), so reruns never overwrite destination edits; see
+ * target_guard.ts.
  */
+
+import type { FlagTargetRecord, SegmentTargetRecord } from "./target_guard.ts";
 
 export const MIGRATION_DATA_DIR = "./data/launchdarkly-migrations";
 
@@ -24,8 +30,11 @@ export interface SyncManifestEnv {
   lastModified?: string;
 }
 
-export interface SyncManifestFlag {
+/** dest, targetOwned and awaitingApproval protect destination edits; see target_guard.ts */
+export interface SyncManifestFlag extends FlagTargetRecord {
   version: number;
+  /** Digest of the source flag-level fields last applied (sourceFlagLevelDigest); absent before 3.6.0 */
+  sourceDigest?: string;
   lastModified?: string;
   environments: Record<string, SyncManifestEnv>;
   /** Destination key, if it differs from the source key (e.g. conflict prefix) */
@@ -34,7 +43,8 @@ export interface SyncManifestFlag {
   extraDestKeys?: string[];
 }
 
-export interface SyncManifestSegment {
+/** dest and targetOwned protect destination edits; see target_guard.ts */
+export interface SyncManifestSegment extends SegmentTargetRecord {
   version: number;
   lastModified?: number;
   /** Destination key in this environment, if it differs from the source key (e.g. conflict prefix) */
@@ -46,7 +56,15 @@ export interface SyncManifestSegment {
 }
 
 export interface SyncManifest {
+  /** When the writing run finished */
   lastSyncTimestamp: string;
+  /** When the writing run started; absent in manifests from older versions */
+  lastRunStartedAt?: string;
+  /**
+   * End of the last run on a version before 3.6.0: entries without a recorded destination state count
+   * as edited when the destination was modified after it (see target_guard.ts)
+   */
+  legacyEditCutoff?: string;
   sourceProject: string;
   destProject: string;
   /** Destination domain the manifest was written for; absent in manifests from older versions */
@@ -500,6 +518,28 @@ export function adoptUnresolved(
  * to its main destination key. The manifest itself stays, possibly with no flags, as the authoritative
  * inventory for the pair.
  */
+/**
+ * Ownership after a revert promotes `remaining[0]` (an adopted copy) to the main copy: surviving
+ * adopted copies keep theirs, and a promoted copy that was edited in the destination belongs to it
+ * entirely (like a copy recreated there: no field or environment is written).
+ */
+function promotedOwnership(
+  owned: SyncManifestFlag["targetOwned"],
+  remaining: string[],
+): Pick<SyncManifestFlag, "targetOwned"> {
+  const copies = (owned?.copies ?? []).filter((k) =>
+    remaining.slice(1).includes(k)
+  );
+  const promotedOwned = Boolean(owned?.copies?.includes(remaining[0]));
+  if (!promotedOwned && copies.length === 0) return {};
+  return {
+    targetOwned: {
+      ...(promotedOwned ? { flag: true, deleted: true } : {}),
+      ...(copies.length > 0 ? { copies } : {}),
+    },
+  };
+}
+
 export function retireDeletedFlags(
   manifest: SyncManifest,
   deletedDestKeys: Iterable<string>,
@@ -509,20 +549,39 @@ export function retireDeletedFlags(
   for (const [key, entry] of Object.entries(manifest.flags)) {
     const remaining = ownedKeys(key, entry).filter((k) => !deleted.has(k));
     if (remaining.length === 0) continue;
-    const { destKey: _d, extraDestKeys: _e, ...rest } = entry;
+    const {
+      destKey: _d,
+      extraDestKeys: _e,
+      dest,
+      targetOwned,
+      awaitingApproval,
+      ...rest
+    } = entry;
     // A promoted extra copy was never synchronized by reruns (only the primary is updated), so its
-    // cached source versions are dropped and the next --incremental run re-syncs it in full
+    // cached source versions are dropped and the next --incremental run re-syncs it in full; the
+    // recorded destination state described the deleted primary copy and goes too
     const promoted = remaining[0] !== (entry.destKey ?? key);
     flags[key] = {
       ...rest,
       ...(promoted
-        ? { version: 0, lastModified: undefined, environments: {} }
-        : {}),
+        ? {
+          version: 0,
+          lastModified: undefined,
+          environments: {},
+          ...promotedOwnership(targetOwned, remaining),
+        }
+        : {
+          ...(dest ? { dest } : {}),
+          ...(targetOwned ? { targetOwned } : {}),
+          ...(awaitingApproval ? { awaitingApproval } : {}),
+        }),
       ...(remaining[0] !== key ? { destKey: remaining[0] } : {}),
       ...(remaining.length > 1 ? { extraDestKeys: remaining.slice(1) } : {}),
     };
   }
-  return { ...manifest, flags, lastSyncTimestamp: new Date().toISOString() };
+  // lastSyncTimestamp stays the last migration's end: it is the cutoff for detecting destination edits
+  // on copies without a recorded state, and a revert is not a sync
+  return { ...manifest, flags };
 }
 
 /**

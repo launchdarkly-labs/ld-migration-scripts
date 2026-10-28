@@ -548,17 +548,21 @@ Deno.test("retireDeletedFlags drops entries whose copies a revert deleted and ke
         environments: {},
         destKey: "imported-c",
         extraDestKeys: ["c"],
+        dest: { fingerprint: "of-imported-c" },
       },
-      d: { version: 1, environments: {} },
+      d: { version: 1, environments: {}, dest: { fingerprint: "of-d" } },
     },
   };
   // a and both copies of b deleted; c's prefixed copy failed to delete; d was not touched
   const after = retireDeletedFlags(before, ["a", "imported-b", "b", "c"]);
   assertEquals(Object.keys(after.flags), ["c", "d"]);
+  // The last migration's end stays the cutoff for destination edits
+  assertEquals(after.lastSyncTimestamp, before.lastSyncTimestamp);
   assertEquals(after.flags.c, {
     version: 1,
     environments: {},
     destKey: "imported-c",
+    dest: { fingerprint: "of-imported-c" },
   });
   assertEquals(after.flags.d, before.flags.d);
   assertEquals(manifestDestinationFlagKeys(after), ["imported-c", "d"]);
@@ -568,17 +572,43 @@ Deno.test("retireDeletedFlags drops entries whose copies a revert deleted and ke
     {},
   );
   // A surviving extra copy becomes the main copy, with its cached versions dropped: reruns only kept the
-  // primary in sync, so the next --incremental run must re-sync the promoted copy in full
+  // primary in sync, so the next --incremental run must re-sync the promoted copy in full (the recorded
+  // destination state described the deleted primary and is dropped too)
   assertEquals(
     retireDeletedFlags(before, ["imported-c"]).flags.c,
     { version: 0, lastModified: undefined, environments: {} },
     "c survives under its own key and is re-synced",
   );
-  // No promotion: the primary survives and its versions are kept
+  // No promotion: the primary survives and its versions and recorded state are kept
   assertEquals(retireDeletedFlags(before, ["c"]).flags.c, {
     version: 1,
     environments: {},
     destKey: "imported-c",
+    dest: { fingerprint: "of-imported-c" },
+  });
+});
+
+Deno.test("retireDeletedFlags keeps the ownership of surviving adopted copies", () => {
+  const before: SyncManifest = {
+    ...manifest,
+    flags: {
+      e: {
+        version: 1,
+        environments: {},
+        destKey: "imported-e",
+        extraDestKeys: ["e", "old-e"],
+        dest: { fingerprint: "of-imported-e" },
+        targetOwned: { copies: ["e", "old-e"] },
+      },
+    },
+  };
+  // The primary is deleted: e is promoted and, edited in the destination, belongs to it entirely
+  assertEquals(retireDeletedFlags(before, ["imported-e"]).flags.e, {
+    version: 0,
+    lastModified: undefined,
+    environments: {},
+    extraDestKeys: ["old-e"],
+    targetOwned: { flag: true, deleted: true, copies: ["old-e"] },
   });
 });
 
