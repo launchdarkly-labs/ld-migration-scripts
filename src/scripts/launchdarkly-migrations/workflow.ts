@@ -12,6 +12,7 @@ import * as Colors from "https://deno.land/std@0.149.0/fmt/colors.ts";
 import {
   agentControlExtractCliArgs,
   agentControlMigrateCliArgs,
+  agentControlModelCliArgs,
 } from "../../utils/agent_control.ts";
 import {
   coerceProjectKey,
@@ -379,6 +380,10 @@ const buildMigrationArgs = (config: WorkflowConfig): string[] => {
   args = [
     ...args,
     ...agentControlMigrateCliArgs(migration.migrateAgentControl),
+    ...agentControlModelCliArgs({
+      modelMapping: migration.agentControlModelMapping,
+      unmappedDefaultRule: migration.agentControlUnmappedDefaultRule,
+    }),
   ];
   args = addBooleanFlag(
     args,

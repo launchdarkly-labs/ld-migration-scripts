@@ -55,3 +55,15 @@ migration:
   # Map source environment keys to destination environment keys for targeting
   # environmentMapping:
   #   production: prod
+
+  # Map source model keys to destination model keys, for models the destination offers under another
+  # key (a custom model's key carries generated text, and the Federal catalog lacks some built-ins).
+  # Variations are written with the mapped key, and mapped source models are not created. A run that
+  # finds a missing model lists destination models that look like it, with a mapping to paste here.
+  # agentControlModelMapping:
+  #   "Gemini.gemini-2.5-flash": "Gemini.gemini-2.5-flash-custom-1a2b"
+
+  # A default rule serving a variation that cannot be migrated (its model is missing) is reported as
+  # an error either way. leave (default): the destination keeps serving what it serves, which for a new
+  # config can be another variation. disabled: the default rule serves the disabled variation instead.
+  # agentControlUnmappedDefaultRule: disabled

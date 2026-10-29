@@ -26,7 +26,12 @@ import { parse as parseYaml } from "https://deno.land/std@0.224.0/yaml/parse.ts"
 import { getDestinationApiKey } from "../../utils/api_keys.ts";
 import {
   type AgentControlMigrationResult,
+  type AgentControlModelMapping,
   migrateAgentControlFromExtract,
+  modelMappingSnippet,
+  parseModelMapping,
+  parseUnmappedDefaultRule,
+  type UnmappedDefaultRule,
 } from "../../utils/agent_control.ts";
 import { resolveDestinationProjectName } from "../../utils/workflow_config.ts";
 import { mergeTags } from "../../utils/tags.ts";
@@ -67,6 +72,9 @@ interface Arguments {
   assignMaintainerIds: boolean;
   migrateSegments: boolean;
   migrateAgentControl: boolean;
+  /** JSON object: source model key -> destination model key */
+  agentControlModelMap?: string;
+  agentControlUnmappedDefaultRule?: string;
   migrateBigSegments?: boolean;
   conflictPrefix?: string;
   tags?: string;
@@ -104,6 +112,8 @@ interface MigrationConfig {
     assignMaintainerIds?: boolean;
     migrateSegments?: boolean;
     migrateAgentControl?: boolean;
+    agentControlModelMapping?: Record<string, string>;
+    agentControlUnmappedDefaultRule?: string;
     tags?: string[] | null;
     migrateBigSegments?: boolean;
     conflictPrefix?: string;
@@ -410,6 +420,21 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .boolean("m")
   .boolean("s")
   .boolean("migrate-agent-control")
+  .alias("agent-control-model-map", "agentControlModelMap")
+  .string("agent-control-model-map")
+  .describe(
+    "agent-control-model-map",
+    'AgentControl: JSON object of source model key -> destination model key, for destination models whose key differs (e.g. \'{"Gemini.gemini-2.5-flash":"Gemini.gemini-2.5-flash-custom-1a2b"}\')',
+  )
+  .alias(
+    "agent-control-unmapped-default-rule",
+    "agentControlUnmappedDefaultRule",
+  )
+  .string("agent-control-unmapped-default-rule")
+  .describe(
+    "agent-control-unmapped-default-rule",
+    "AgentControl: what a default rule does when the variation it serves cannot be migrated: leave (default, the destination keeps what it serves) or disabled (serve the disabled variation)",
+  )
   .boolean("dry-run")
   .boolean("incremental")
   .boolean("create-project")
@@ -512,6 +537,13 @@ if (cliArgs.config) {
           cliArgs.migrateAgentControl !== false
         ? cliArgs.migrateAgentControl
         : opts?.migrateAgentControl ?? false,
+      agentControlModelMap: cliArgs.agentControlModelMap ??
+        (opts?.agentControlModelMapping
+          ? JSON.stringify(opts.agentControlModelMapping)
+          : undefined),
+      agentControlUnmappedDefaultRule:
+        cliArgs.agentControlUnmappedDefaultRule ??
+          opts?.agentControlUnmappedDefaultRule,
       migrateBigSegments: cliArgs.migrateBigSegments ??
         opts?.migrateBigSegments ?? false,
       conflictPrefix: cliArgs.conflictPrefix || opts?.conflictPrefix,
@@ -592,6 +624,33 @@ console.log(Colors.gray(`  Migrate Segments: ${inputArgs.migrateSegments}`));
 console.log(
   Colors.gray(`  Migrate AgentControl: ${inputArgs.migrateAgentControl}`),
 );
+
+let agentControlModelMapping: AgentControlModelMapping | undefined;
+let agentControlUnmappedDefaultRule: UnmappedDefaultRule = "leave";
+try {
+  agentControlModelMapping = parseModelMapping(inputArgs.agentControlModelMap);
+  agentControlUnmappedDefaultRule = parseUnmappedDefaultRule(
+    inputArgs.agentControlUnmappedDefaultRule,
+  );
+} catch (error) {
+  console.log(Colors.red(
+    `Error: ${error instanceof Error ? error.message : String(error)}`,
+  ));
+  Deno.exit(1);
+}
+if (inputArgs.migrateAgentControl) {
+  const mapped = Object.entries(agentControlModelMapping ?? {});
+  console.log(Colors.gray(
+    `  AgentControl model mapping: ${
+      mapped.length > 0
+        ? mapped.map(([from, to]) => `${from} → ${to}`).join(", ")
+        : "none"
+    }`,
+  ));
+  console.log(Colors.gray(
+    `  AgentControl unmapped default rule: ${agentControlUnmappedDefaultRule}`,
+  ));
+}
 console.log(
   Colors.gray(
     `  Migrate Big Segment Members: ${inputArgs.migrateBigSegments || false}`,
@@ -1044,7 +1103,7 @@ let agentControlExpected: { modelConfigs: string[]; configs: string[] } | null =
 let agentControlReport:
   | Pick<
     AgentControlMigrationResult,
-    "summary" | "failures" | "warnings" | "missingModels"
+    "summary" | "failures" | "warnings" | "missingModels" | "modelMappings"
   >
   | null = null;
 // Set when the AgentControl phase threw: everything after the failure point was not migrated
@@ -2445,6 +2504,8 @@ if (inputArgs.migrateAgentControl) {
       tags: migrationTags,
       maintainerMapping,
       assignMaintainerIds: inputArgs.assignMaintainerIds,
+      modelMapping: agentControlModelMapping,
+      unmappedDefaultRule: agentControlUnmappedDefaultRule,
     });
     updatedManifestAgentControl = aicResult.manifest;
     agentControlExpected = aicResult.expected;
@@ -4658,19 +4719,45 @@ const printAgentControlSections = (): void => {
     ));
   }
   if (!agentControlReport) return;
-  const { failures, warnings, missingModels } = agentControlReport;
+  const { failures, warnings, missingModels, modelMappings } =
+    agentControlReport;
+
+  if (modelMappings.length > 0) {
+    console.log(Colors.blue("\n🔁 AGENTCONTROL MODEL MAPPING"));
+    for (const m of modelMappings) {
+      console.log(Colors.gray(
+        `  ${m.sourceKey} → ${m.destKey} (${m.usedBy.length} variation(s))`,
+      ));
+    }
+  }
 
   if (missingModels.length > 0) {
     console.log(Colors.red("\n❌ MODELS NOT AVAILABLE IN DESTINATION"));
     for (const m of missingModels) {
-      console.log(Colors.red(`  ✗ ${m.modelKey}`));
+      console.log(Colors.red(
+        `  ✗ ${m.modelKey}${
+          m.mappedFrom ? ` (mapped from ${m.mappedFrom})` : ""
+        }`,
+      ));
       if (m.usedBy.length > 0) {
         console.log(Colors.gray(`      used by: ${m.usedBy.join(", ")}`));
       }
+      if (m.suggestions) {
+        console.log(Colors.yellow(
+          `      possible destination models: ${m.suggestions.join(", ")}`,
+        ));
+      }
     }
     console.log(Colors.gray(
-      "  → The destination's model catalog does not include these models. Change the variations to a model the destination offers, then re-run.",
+      "  → The destination's model catalog does not include these models. Map each to a destination model (migration.agentControlModelMapping or --agent-control-model-map), or change the variations to a model the destination offers, then re-run.",
     ));
+    const snippet = modelMappingSnippet(missingModels);
+    if (snippet.length > 0) {
+      console.log(Colors.gray(
+        "  → Suggested mapping (check each model before using it):",
+      ));
+      snippet.forEach((line) => console.log(Colors.gray(`      ${line}`)));
+    }
   }
 
   if (failures.length > 0) {
@@ -4722,6 +4809,9 @@ async function writeAgentControlReport(): Promise<void> {
           dryRun: inputArgs.dryRun === true,
           summary: agentControlReport?.summary ?? null,
           phaseError: agentControlPhaseError,
+          modelMapping: agentControlModelMapping ?? {},
+          unmappedDefaultRule: agentControlUnmappedDefaultRule,
+          modelMappings: agentControlReport?.modelMappings ?? [],
           missingModels: agentControlReport?.missingModels ?? [],
           failures: agentControlReport?.failures ?? [],
           warnings: agentControlReport?.warnings ?? [],

@@ -49,6 +49,10 @@ export interface WorkflowConfig {
     migrateSegments?: boolean;
     /** Migrate AgentControl (AI Configs); default false */
     migrateAgentControl?: boolean;
+    /** AgentControl: source model key -> destination model key (e.g. a custom model with a generated key) */
+    agentControlModelMapping?: Record<string, string>;
+    /** AgentControl: what a default rule does when the variation it serves cannot be migrated */
+    agentControlUnmappedDefaultRule?: "leave" | "disabled";
     tags?: string[] | null;
     migrateBigSegments?: boolean;
     conflictPrefix?: string;

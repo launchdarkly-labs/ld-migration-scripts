@@ -1338,3 +1338,145 @@ Deno.test("extract treats a 403/404 on the first list as AgentControl unavailabl
     ["configs:502"],
   );
 });
+
+// ---------- model mapping (custom destination models with generated keys) ----------
+
+const CUSTOM_M1 = "m1-custom-1a2b";
+const varPostKey = `POST projects/${DEST}/ai-configs/cfg-a/variations/var-1`;
+const fallthroughOf = (world: ReturnType<typeof mockWorld>) =>
+  (world.semantic[0]?.body.instructions as Array<Record<string, unknown>>)
+    ?.find((i) => i.kind === "updateFallthroughVariationOrRollout");
+
+Deno.test("a mapped built-in model writes its variations with the destination key, and the default rule maps", async () => {
+  await withExtract(async (sourceKey) => {
+    const world = mockWorld({}, [], { destModels: [CUSTOM_M1] });
+    const result = await run(sourceKey, world.client, {
+      modelMapping: { m1: CUSTOM_M1 },
+    });
+    assertEquals(result.missingModels, []);
+    assertEquals(result.failures, []);
+    assertEquals(result.modelMappings, [{
+      sourceKey: "m1",
+      destKey: CUSTOM_M1,
+      usedBy: ["cfg-a/var-1"],
+    }]);
+    const meta = (world.bodies[varPostKey].value as Record<string, any>)
+      ._ldMeta;
+    assertEquals(meta.modelKey, CUSTOM_M1);
+    assertEquals(fallthroughOf(world)?.variationId, "dest-var-1");
+  }, GLOBAL_M1);
+});
+
+Deno.test("a mapped custom source model is not created in the destination", async () => {
+  await withExtract(async (sourceKey) => {
+    const world = mockWorld({}, [], { destModels: [CUSTOM_M1] });
+    const result = await run(sourceKey, world.client, {
+      modelMapping: { m1: CUSTOM_M1 },
+    });
+    assertEquals(
+      world.writes().filter((c) => c.includes("/model-configs")),
+      [],
+    );
+    assertEquals(result.expected.modelConfigs, []);
+    assertEquals(result.failures, []);
+  });
+});
+
+Deno.test("a mapping target the destination lacks is a missing model, reported with its source key and suggestions", async () => {
+  await withExtract(async (sourceKey) => {
+    const world = mockWorld({}, [], { destModels: [CUSTOM_M1] });
+    const result = await run(sourceKey, world.client, {
+      modelMapping: { m1: "m1-typo" },
+    });
+    assertEquals(result.missingModels, [{
+      modelKey: "m1-typo",
+      usedBy: ["cfg-a/var-1"],
+      mappedFrom: "m1",
+      suggestions: [CUSTOM_M1],
+    }]);
+    assertEquals(result.modelMappings, []);
+    const variation = result.failures.find((f) => f.stage === "variations");
+    assert(variation?.reason.includes('"m1-typo" (mapped from "m1")'));
+    assertEquals(world.bodies[varPostKey], undefined);
+  }, GLOBAL_M1);
+});
+
+Deno.test("an unmapped missing model lists destination models that look like it", async () => {
+  await withExtract(async (sourceKey) => {
+    const world = mockWorld({}, [], { destModels: [CUSTOM_M1, "OpenAI.x"] });
+    const result = await run(sourceKey, world.client);
+    assertEquals(result.missingModels, [{
+      modelKey: "m1",
+      usedBy: ["cfg-a/var-1"],
+      suggestions: [CUSTOM_M1],
+    }]);
+  }, GLOBAL_M1);
+});
+
+Deno.test("a mapping entry no variation uses is a warning", async () => {
+  await withExtract(async (sourceKey) => {
+    const world = mockWorld({}, [], { destModels: ["m1"] });
+    const result = await run(sourceKey, world.client, {
+      modelMapping: { "unused-model": "whatever" },
+    });
+    assertEquals(result.failures, []);
+    assertEquals(
+      result.warnings.map((w) => `${w.stage}:${w.key}`),
+      ["model-configs:unused-model"],
+    );
+  }, GLOBAL_M1);
+});
+
+Deno.test("unmappedDefaultRule disabled points an unmappable default rule at disabled, and it is still an error", async () => {
+  await withExtract(async (sourceKey) => {
+    const world = mockWorld({}, [], { destModels: [] });
+    const result = await run(sourceKey, world.client, {
+      unmappedDefaultRule: "disabled",
+    });
+    assertEquals(fallthroughOf(world)?.variationId, "dest-disabled");
+    const targeting = result.failures.find((f) => f.stage === "targeting");
+    assert(targeting?.reason.includes("disabled variation instead"));
+    assertEquals(
+      result.manifest.configs["cfg-a"].targeting.production,
+      undefined,
+    );
+
+    // Without the option the default rule is left out of the patch
+    const left = mockWorld({}, [], { destModels: [] });
+    await run(sourceKey, left.client);
+    assertEquals(fallthroughOf(left), undefined);
+  }, GLOBAL_M1);
+});
+
+Deno.test("--incremental rewrites a variation when its model mapping changes, and only then", async () => {
+  await withExtract(async (sourceKey) => {
+    const destModels = ["m1-a", "m1-b"];
+    const varPath = `projects/${DEST}/ai-configs/cfg-a/variations/var-1`;
+    const first = mockWorld({}, [], { destModels });
+    const { manifest } = await run(sourceKey, first.client, {
+      modelMapping: { m1: "m1-a" },
+    });
+
+    const same = mockWorld(Object.fromEntries(first.store), [], { destModels });
+    const unchanged = await run(sourceKey, same.client, {
+      incremental: true,
+      previousManifest: manifest,
+      modelMapping: { m1: "m1-a" },
+    });
+    assertEquals(same.writes().filter((c) => c.includes("/variations")), []);
+
+    const changed = mockWorld(Object.fromEntries(first.store), [], {
+      destModels,
+    });
+    await run(sourceKey, changed.client, {
+      incremental: true,
+      previousManifest: unchanged.manifest,
+      modelMapping: { m1: "m1-b" },
+    });
+    assertEquals(
+      (changed.bodies[`PATCH ${varPath}`].value as Record<string, any>)
+        ._ldMeta.modelKey,
+      "m1-b",
+    );
+  }, GLOBAL_M1);
+});

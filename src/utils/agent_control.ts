@@ -67,9 +67,210 @@ export interface AgentControlWarning {
 
 /** A model referenced by the extract that the destination does not offer. */
 export interface AgentControlMissingModel {
+  /** The destination key that was looked for (the mapped key when a model mapping applies) */
   modelKey: string;
   /** `config/variation` keys that use it */
   usedBy: string[];
+  /** The source model key, when `modelKey` comes from the model mapping */
+  mappedFrom?: string;
+  /** Destination models that look like the same model, candidates for the model mapping */
+  suggestions?: string[];
+}
+
+/** A source model that variations reference under a different destination key (model mapping). */
+export interface AgentControlModelMappingUse {
+  sourceKey: string;
+  destKey: string;
+  /** `config/variation` keys that use it */
+  usedBy: string[];
+}
+
+/** What a default rule does when the variation it serves cannot be migrated. */
+export type UnmappedDefaultRule = "leave" | "disabled";
+
+/** Source model key -> destination model key. */
+export type AgentControlModelMapping = Record<string, string>;
+
+/** The destination model key for a source model key. Mappings are a single hop. */
+export function mapModelKey(
+  key: string,
+  mapping: AgentControlModelMapping | undefined,
+): string {
+  return mapping && Object.hasOwn(mapping, key) ? mapping[key] : key;
+}
+
+/**
+ * Validate a model mapping (an object, or its JSON text from the CLI). Throws with the reason when it
+ * is not an object of non-empty strings; entries that map a key to itself are dropped.
+ */
+export function parseModelMapping(
+  raw: unknown,
+): AgentControlModelMapping | undefined {
+  if (raw === undefined || raw === null || raw === "") return undefined;
+  let value = raw;
+  if (typeof raw === "string") {
+    try {
+      value = JSON.parse(raw);
+    } catch (error) {
+      throw new Error(
+        `the AgentControl model mapping is not valid JSON: ${
+          errorMessage(error)
+        }`,
+      );
+    }
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(
+      "the AgentControl model mapping must be an object of source model key -> destination model key",
+    );
+  }
+  const entries: Array<[string, string]> = [];
+  for (const [from, to] of Object.entries(value as Record<string, unknown>)) {
+    if (!from.trim() || typeof to !== "string" || !to.trim()) {
+      throw new Error(
+        `the AgentControl model mapping entry ${
+          JSON.stringify(from)
+        } must map to a non-empty destination model key`,
+      );
+    }
+    if (from.trim() !== to.trim()) entries.push([from.trim(), to.trim()]);
+  }
+  // fromEntries defines own properties, so a "__proto__" key stays an entry
+  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
+}
+
+/** Validate the unmapped default rule setting; unset means "leave". */
+export function parseUnmappedDefaultRule(raw: unknown): UnmappedDefaultRule {
+  if (raw === undefined || raw === null || raw === "") return "leave";
+  if (raw === "leave" || raw === "disabled") return raw;
+  throw new Error(
+    `the AgentControl unmapped default rule must be "leave" or "disabled", not ${
+      JSON.stringify(raw)
+    }`,
+  );
+}
+
+/**
+ * A copy of a variation with its model references (`modelConfigKey`, and `modelKey`/`modelConfigKey`
+ * in its `value` metadata) rewritten through the mapping. Returns the variation itself when nothing maps.
+ */
+export function applyModelMapping(
+  variation: Record<string, unknown>,
+  mapping: AgentControlModelMapping | undefined,
+): Record<string, unknown> {
+  if (!mapping) return variation;
+  const remap = (record: Record<string, unknown>, fields: string[]) => {
+    let out: Record<string, unknown> | undefined;
+    for (const field of fields) {
+      const key = record[field];
+      if (typeof key !== "string" || !key) continue;
+      const mapped = mapModelKey(key, mapping);
+      if (mapped === key) continue;
+      out ??= { ...record };
+      out[field] = mapped;
+    }
+    return out;
+  };
+
+  let result = remap(variation, ["modelConfigKey"]);
+  const value = variation.value;
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const valueRecord = value as Record<string, unknown>;
+    const ldMeta = valueRecord._ldMeta;
+    let mappedValue: Record<string, unknown> | undefined;
+    if (ldMeta && typeof ldMeta === "object") {
+      const mappedMeta = remap(ldMeta as Record<string, unknown>, [
+        "modelKey",
+        "modelConfigKey",
+      ]);
+      if (mappedMeta) mappedValue = { ...valueRecord, _ldMeta: mappedMeta };
+    } else {
+      // Agent-mode values carry the metadata as the value itself
+      mappedValue = remap(valueRecord, ["modelKey", "modelConfigKey"]);
+    }
+    if (mappedValue) {
+      result ??= { ...variation };
+      result.value = mappedValue;
+    }
+  }
+  return result ?? variation;
+}
+
+const providerName = (value: unknown): string | undefined => {
+  if (typeof value === "string" && value) return value;
+  if (value && typeof value === "object") {
+    const name = (value as Record<string, unknown>).name;
+    if (typeof name === "string" && name) return name;
+  }
+  return undefined;
+};
+
+/** Provider and model ID of a model config, falling back to the `Provider.model-id` key shape. */
+function modelIdentity(
+  key: string,
+  model: Record<string, unknown> | undefined,
+): { provider?: string; id?: string } {
+  const dot = key.indexOf(".");
+  const provider = providerName(model?.provider) ??
+    (dot > 0 ? key.slice(0, dot) : undefined);
+  const id = typeof model?.id === "string" && model.id
+    ? model.id
+    : dot > 0
+    ? key.slice(dot + 1)
+    : undefined;
+  return { provider: provider?.toLowerCase(), id: id?.toLowerCase() };
+}
+
+/**
+ * Destination model keys that look like a source model: the same provider and model ID (a custom model
+ * of the same underlying model), or a key that starts with the source key (generated suffixes).
+ */
+export function suggestModelMappings(
+  sourceKey: string,
+  sourceModel: Record<string, unknown> | undefined,
+  destModels: Iterable<Record<string, unknown>>,
+  limit = 5,
+): string[] {
+  const source = modelIdentity(sourceKey, sourceModel);
+  const prefix = sourceKey.toLowerCase();
+  const matches = new Set<string>();
+  for (const model of destModels) {
+    const key = String(model.key ?? "");
+    if (!key || key === sourceKey) continue;
+    const dest = modelIdentity(key, model);
+    const sameModel = source.provider !== undefined &&
+      source.id !== undefined &&
+      dest.provider === source.provider && dest.id === source.id;
+    if (sameModel || key.toLowerCase().startsWith(prefix)) matches.add(key);
+  }
+  return [...matches].sort().slice(0, limit);
+}
+
+/**
+ * YAML lines for `migration.agentControlModelMapping` from the missing models' suggestions: an entry for
+ * each model with exactly one candidate, a comment listing the candidates otherwise.
+ */
+export function modelMappingSnippet(
+  missingModels: AgentControlMissingModel[],
+): string[] {
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  for (const m of missingModels) {
+    const sourceKey = m.mappedFrom ?? m.modelKey;
+    const suggestions = m.suggestions ?? [];
+    if (seen.has(sourceKey) || suggestions.length === 0) continue;
+    seen.add(sourceKey);
+    lines.push(
+      suggestions.length === 1
+        ? `    ${JSON.stringify(sourceKey)}: ${JSON.stringify(suggestions[0])}`
+        : `    # ${JSON.stringify(sourceKey)}: one of ${
+          suggestions.join(", ")
+        }`,
+    );
+  }
+  return lines.length > 0
+    ? ["migration:", "  agentControlModelMapping:", ...lines]
+    : [];
 }
 
 export function recordOutcome(
@@ -794,6 +995,13 @@ export interface MigrateAgentControlOptions {
   /** Source member ID -> destination member ID (maintainer_mapping.json) */
   maintainerMapping?: Record<string, string | null>;
   assignMaintainerIds?: boolean;
+  /**
+   * Source model key -> destination model key, for destination models whose key differs (custom models
+   * get generated keys). Mapped source models are not created; variations are written with the mapped key.
+   */
+  modelMapping?: AgentControlModelMapping;
+  /** What a default rule does when the variation it serves cannot be migrated (default: leave) */
+  unmappedDefaultRule?: UnmappedDefaultRule;
 }
 
 export interface AgentControlMigrationResult {
@@ -818,6 +1026,8 @@ export interface AgentControlMigrationResult {
   warnings: AgentControlWarning[];
   /** Models the extract uses that the destination does not offer (their variations are failures) */
   missingModels: AgentControlMissingModel[];
+  /** Source models that variations use under their mapped destination key */
+  modelMappings: AgentControlModelMappingUse[];
 }
 
 /** JSON with object keys sorted, so equal content fingerprints equally whatever the key order. */
@@ -1151,15 +1361,24 @@ export interface TargetingIssue {
   message: string;
 }
 
+export interface TargetingBuildOptions {
+  /** "disabled": a default rule that cannot be mapped serves the destination's disabled variation */
+  unmappedDefaultRule?: UnmappedDefaultRule;
+  /** Key of the variation the destination's default rule serves now, named when it is left as it is */
+  currentDefaultVariationKey?: string;
+}
+
 /**
  * Build semantic-patch instructions for one environment's targeting state. Whatever maps to destination
  * variations is applied; each rule, target list, default rule or off variation that does not is left out
- * and reported as an error issue.
+ * and reported as an error issue. With `unmappedDefaultRule: "disabled"`, an unmappable default rule is
+ * pointed at the disabled variation instead of being left out (still reported as an error).
  */
 export function buildTargetingInstructionsForEnvironment(
   envConfig: Record<string, unknown>,
   sourceVariations: SourceVariationRef[],
   destVariationIdByKey: Map<string, string>,
+  options: TargetingBuildOptions = {},
 ): { instructions: Record<string, unknown>[]; issues: TargetingIssue[] } {
   const issues: TargetingIssue[] = [];
   const instructions: Record<string, unknown>[] = [];
@@ -1354,6 +1573,32 @@ export function buildTargetingInstructionsForEnvironment(
   const fallthrough = envConfig.fallthrough as
     | Record<string, unknown>
     | undefined;
+  /** An unmappable default rule: left as the destination has it, or pointed at the disabled variation */
+  const unmappedFallthrough = (message: string, variationKey?: string) => {
+    const disabledId = options.unmappedDefaultRule === "disabled"
+      ? destVariationIdByKey.get("disabled")
+      : undefined;
+    if (disabledId) {
+      instructions.push({
+        kind: "updateFallthroughVariationOrRollout",
+        variationId: disabledId,
+      });
+      error(
+        "fallthrough",
+        `${message}; it was set to serve the disabled variation instead`,
+        variationKey,
+      );
+      return;
+    }
+    const current = options.currentDefaultVariationKey;
+    error(
+      "fallthrough",
+      current
+        ? `${message}; the destination's default rule still serves "${current}"`
+        : message,
+      variationKey,
+    );
+  };
   if (fallthrough) {
     if (
       fallthrough.variation !== undefined ||
@@ -1366,8 +1611,7 @@ export function buildTargetingInstructionsForEnvironment(
           variationId: r.destId,
         });
       } else {
-        error(
-          "fallthrough",
+        unmappedFallthrough(
           `Default rule not migrated: it serves ${notInDestination(r)}`,
           r.variationKey,
         );
@@ -1382,8 +1626,7 @@ export function buildTargetingInstructionsForEnvironment(
           ...rolloutFields(rollout),
         });
       } else {
-        error(
-          "fallthrough",
+        unmappedFallthrough(
           missing
             ? `Default rule not migrated: its percentage rollout includes ${
               notInDestination(missing)
@@ -1506,6 +1749,7 @@ export async function migrateAgentControlFromExtract(
   const failures: AgentControlFailure[] = [];
   const warnings: AgentControlWarning[] = [];
   const missingModels: AgentControlMissingModel[] = [];
+  const modelMappings: AgentControlModelMappingUse[] = [];
   /** Records a failure and counts it as an error; the caller has already logged the request failure, if any */
   const fail = (
     stage: AgentControlReportStage,
@@ -1581,6 +1825,7 @@ export async function migrateAgentControlFromExtract(
     failures,
     warnings,
     missingModels,
+    modelMappings,
   });
   const ensureConfig = (key: string): SyncManifestAgentControlConfig => {
     if (!Object.hasOwn(manifest.configs, key)) {
@@ -1731,41 +1976,79 @@ export async function migrateAgentControlFromExtract(
   // Provider catalogs are huge; migrating all of them is usually wrong/noisy.
   const modelUsage = await collectModelUsageFromExtract(aiRoot);
   const referencedModelKeys = new Set(modelUsage.keys());
-  const modelsToMigrate = referencedModelKeys.size > 0
-    ? modelItems.filter((m) => referencedModelKeys.has(String(m.key ?? "")))
-    : modelItems;
+  const usedBy = (k: string) => [...(modelUsage.get(k) ?? [])].sort();
+  const modelMapping = options.modelMapping;
+  const mapKey = (k: string) => mapModelKey(k, modelMapping);
+  // A mapped source model is not created: its variations use the destination model it maps to
+  const mappedSourceKeys = [...referencedModelKeys].filter((k) =>
+    mapKey(k) !== k
+  ).sort();
+  const modelsToMigrate =
+    (referencedModelKeys.size > 0
+      ? modelItems.filter((m) => referencedModelKeys.has(String(m.key ?? "")))
+      : modelItems).filter((m) => {
+        const k = String(m.key ?? "");
+        return mapKey(k) === k;
+      });
+
+  for (const [from, to] of Object.entries(modelMapping ?? {})) {
+    if (referencedModelKeys.has(from)) continue;
+    warn(
+      "model-configs",
+      from,
+      `the model mapping maps "${from}" to "${to}", but no extracted variation uses "${from}"`,
+    );
+  }
 
   // Preflight: built-in models (and ones the extract does not define) are not created by this
-  // migration, so the destination must already offer them. Instances differ (the Federal catalog is
-  // smaller than the commercial one), so check before writing anything, dry runs included.
+  // migration, so the destination must already offer them; so must every model mapping target. Instances
+  // differ (the Federal catalog is smaller than the commercial one, and custom models get generated
+  // keys), so check before writing anything, dry runs included.
   const sourceModels = new Map(
     modelItems.map((m) => [String(m.key ?? ""), m] as const),
   );
+  /** Destination keys this run creates (non-built-in source models), available once written */
+  const createdHere = new Set(
+    modelsToMigrate.filter((m) => !isBuiltInModel(m)).map((m) =>
+      String(m.key ?? "")
+    ),
+  );
   const mustExist = [...referencedModelKeys].filter((k) => {
+    if (mapKey(k) !== k) return true;
     const m = sourceModels.get(k);
     return !m || isBuiltInModel(m);
-  });
-  /** Models variations cannot use in the destination, with why */
+  }).sort();
+  /** Source model keys variations cannot use in the destination, with why */
   const unavailableModels = new Map<string, string>();
-  let destModelKeys: Set<string> | undefined;
+  let destModels: Map<string, Record<string, unknown>> | undefined;
   if (mustExist.length > 0) {
-    destModelKeys = await listDestinationModelKeys(client, dest);
-    if (!destModelKeys) {
+    destModels = await listDestinationModels(client, dest);
+    if (!destModels) {
       warn(
         "model-configs",
         "model-configs",
-        "could not list the destination's model configs; built-in model availability was not checked",
+        "could not list the destination's model configs; availability of built-in and mapped models was not checked",
       );
     } else {
-      for (const k of mustExist.sort()) {
-        if (destModelKeys.has(k)) continue;
+      for (const k of mustExist) {
+        const target = mapKey(k);
+        if (destModels.has(target) || createdHere.has(target)) continue;
+        const suggestions = suggestModelMappings(
+          k,
+          sourceModels.get(k),
+          [...destModels.values()].filter((m) => m.key !== target),
+        );
         missingModels.push({
-          modelKey: k,
-          usedBy: [...(modelUsage.get(k) ?? [])].sort(),
+          modelKey: target,
+          usedBy: usedBy(k),
+          ...(target !== k ? { mappedFrom: k } : {}),
+          ...(suggestions.length > 0 ? { suggestions } : {}),
         });
         unavailableModels.set(
           k,
-          `model "${k}" is not available in the destination`,
+          target !== k
+            ? `model "${target}" (mapped from "${k}") is not available in the destination`
+            : `model "${k}" is not available in the destination`,
         );
       }
       if (missingModels.length > 0) {
@@ -1774,17 +2057,31 @@ export async function migrateAgentControlFromExtract(
         ));
         for (const m of missingModels) {
           console.log(Colors.red(
-            `    ✗ ${m.modelKey} (used by ${
-              m.usedBy.join(", ") || "no variation"
-            })`,
+            `    ✗ ${m.modelKey}${
+              m.mappedFrom ? ` (mapped from ${m.mappedFrom})` : ""
+            } (used by ${m.usedBy.join(", ") || "no variation"})`,
           ));
+          if (m.suggestions) {
+            console.log(Colors.yellow(
+              `      possible destination models: ${m.suggestions.join(", ")}`,
+            ));
+          }
         }
       } else {
         console.log(Colors.gray(
-          `  All ${mustExist.length} built-in model(s) used by the source are available in the destination`,
+          `  All ${mustExist.length} built-in or mapped model(s) used by the source are available in the destination`,
         ));
       }
     }
+  }
+  for (const k of mappedSourceKeys) {
+    if (unavailableModels.has(k)) continue;
+    modelMappings.push({ sourceKey: k, destKey: mapKey(k), usedBy: usedBy(k) });
+    console.log(Colors.gray(
+      `  → Model ${k}: mapped to ${mapKey(k)} (used by ${
+        usedBy(k).length
+      } variation(s))`,
+    ));
   }
 
   if (
@@ -1813,14 +2110,14 @@ export async function migrateAgentControlFromExtract(
     // Built-in (global) and restricted models cannot be created in the destination; skip without a write.
     // The API reports the flag as `global`; `isGlobal` is accepted for older extracts.
     if (isBuiltInModel(model)) {
-      if (destModelKeys && !destModelKeys.has(key)) {
+      if (destModels && !destModels.has(key)) {
         console.log(Colors.red(
           `  ✗ Model config ${key}: built-in, and not available in the destination`,
         ));
       } else {
         console.log(Colors.gray(
           `  → Model config ${key}: built-in, ${
-            destModelKeys
+            destModels
               ? "available in the destination"
               : "not verified in the destination"
           }`,
@@ -2081,9 +2378,11 @@ export async function migrateAgentControlFromExtract(
       );
       continue;
     }
+    // Hashed with the mapped model keys, so a changed mapping rewrites the variation under --incremental
+    const destVariation = applyModelMapping(variation, modelMapping);
     const hash = await hashAgentControlInput({
       destConfigKey: configPlan.destKey,
-      variation: sanitizeVariationPayload(variation),
+      variation: sanitizeVariationPayload(destVariation),
     });
     const previousHash = ownEntry(
       ownEntry(previous?.configs, configKey)?.variations,
@@ -2107,7 +2406,7 @@ export async function migrateAgentControlFromExtract(
     }
     // A variation whose model the destination does not offer would be rejected: report it instead
     const unavailable = [...collectReferencedModelConfigKeys([variation])]
-      .map((m) => unavailableModels.get(m))
+      .map((m) => unavailableModels.get(m) ?? unavailableModels.get(mapKey(m)))
       .find((reason) => reason !== undefined);
     if (unavailable) {
       fail("variations", label, `not migrated: ${unavailable}`, {
@@ -2123,7 +2422,7 @@ export async function migrateAgentControlFromExtract(
       client,
       `projects/${dest}/ai-configs/${configPlan.destKey}/variations`,
       `projects/${dest}/ai-configs/${configPlan.destKey}/variations/${variationKey}`,
-      variation,
+      destVariation,
       options.dryRun,
       {
         sanitize: sanitizeVariationPayload,
@@ -2214,6 +2513,7 @@ export async function migrateAgentControlFromExtract(
             destKey: configPlan.destKey,
           }),
         warn: (key, message) => warn("targeting", key, message),
+        unmappedDefaultRule: options.unmappedDefaultRule,
       },
     );
     logStageOutcome("Targeting", configKey, outcome);
@@ -2387,6 +2687,8 @@ interface TargetingReport {
   /** Records (and logs) a failure; each call counts as one error */
   fail: (key: string, reason: string, status?: number) => void;
   warn: (key: string, message: string) => void;
+  /** What a default rule that cannot be mapped does (default: leave) */
+  unmappedDefaultRule?: UnmappedDefaultRule;
 }
 
 /**
@@ -2451,13 +2753,14 @@ async function migrateConfigTargeting(
   }
   if (envKeys.length === 0) return "skipped";
 
-  const destVariationIdByKey = await loadDestVariationIdByKey(
-    client,
-    dest,
-    destConfigKey,
-    sourceVariations,
-    dryRun,
-  );
+  const { ids: destVariationIdByKey, defaultByEnv } =
+    await loadDestVariationIdByKey(
+      client,
+      dest,
+      destConfigKey,
+      sourceVariations,
+      dryRun,
+    );
   // A dry run invents destination IDs; variations that were not written this run would not have one
   if (dryRun) {
     for (const key of report.failedVariations.keys()) {
@@ -2493,6 +2796,10 @@ async function migrateConfigTargeting(
       environments[sourceEnvKey],
       sourceVariations,
       destVariationIdByKey,
+      {
+        unmappedDefaultRule: report.unmappedDefaultRule,
+        currentDefaultVariationKey: defaultByEnv.get(destEnvKey),
+      },
     );
     // Name the earlier failure that left a variation out of the destination
     const explain = (issue: TargetingIssue) => {
@@ -2617,24 +2924,28 @@ async function loadDestVariationIdByKey(
   configKey: string,
   sourceVariations: SourceVariationRef[],
   dryRun: boolean,
-): Promise<Map<string, string>> {
+): Promise<{
+  /** Variation key -> destination variation ID */
+  ids: Map<string, string>;
+  /** Destination environment key -> key of the variation its default rule serves now */
+  defaultByEnv: Map<string, string>;
+}> {
   const map = new Map<string, string>();
+  const defaultByEnv = new Map<string, string>();
   if (dryRun) {
     // Stable fake IDs so instruction builders can run in dry-run tests
     for (const v of sourceVariations) {
       if (v.key) map.set(v.key, `dry-run-${v.key}`);
     }
-    return map;
+    return { ids: map, defaultByEnv };
   }
-  if (!client.get) return map;
+  if (!client.get) return { ids: map, defaultByEnv };
 
   // The targeting resource lists every variation targeting can name, including the built-in "disabled"
   // (and "enabled") ones that the config detail omits; the config detail fills any gap.
+  const targetingPath = `projects/${dest}/ai-configs/${configKey}/targeting`;
   for (
-    const path of [
-      `projects/${dest}/ai-configs/${configKey}/targeting`,
-      `projects/${dest}/ai-configs/${configKey}`,
-    ]
+    const path of [targetingPath, `projects/${dest}/ai-configs/${configKey}`]
   ) {
     const resp = await client.get(path);
     if (resp.status < 200 || resp.status >= 300 || !resp.json) continue;
@@ -2647,8 +2958,29 @@ async function loadDestVariationIdByKey(
       const id = String(v._id ?? "");
       if (key && id && !map.has(key)) map.set(key, id);
     }
+    if (path !== targetingPath) continue;
+    // A default rule that cannot be migrated is left as it is: name what it serves in the report
+    const environments = (detail.environments ?? {}) as Record<
+      string,
+      Record<string, unknown>
+    >;
+    for (const [envKey, env] of Object.entries(environments)) {
+      const fallthrough = env?.fallthrough as
+        | Record<string, unknown>
+        | undefined;
+      const ref = fallthrough?.variationId ?? fallthrough?.variation;
+      const served = typeof ref === "number"
+        ? variations[ref]
+        : typeof ref === "string"
+        ? variations.find((v) => v._id === ref)
+        : undefined;
+      const key = served
+        ? resolveVariationKey(served) || String(served.key ?? "")
+        : "";
+      if (key) defaultByEnv.set(envKey, key);
+    }
   }
-  return map;
+  return { ids: map, defaultByEnv };
 }
 
 /** Built-in (global) and restricted model configs: offered by the instance, never created by a migration. */
@@ -2657,19 +2989,21 @@ export function isBuiltInModel(model: Record<string, unknown>): boolean {
     model.isRestricted === true;
 }
 
-/** The model config keys the destination offers (its own and built-in), or undefined when they cannot be listed. */
-async function listDestinationModelKeys(
+/** The model configs the destination offers (its own and built-in) by key, or undefined when they cannot be listed. */
+async function listDestinationModels(
   client: AgentControlHttpClient,
   dest: string,
-): Promise<Set<string> | undefined> {
+): Promise<Map<string, Record<string, unknown>> | undefined> {
   if (!client.get) return undefined;
   const listed = await listAgentControlCollection(
     client.get,
     `projects/${dest}/ai-configs/model-configs`,
   );
   if (listed.unavailable || listed.error) return undefined;
-  return new Set(
-    listed.items.map((m) => String(m.key ?? "")).filter((k) => k !== ""),
+  return new Map(
+    listed.items
+      .map((m) => [String(m.key ?? ""), m] as const)
+      .filter(([k]) => k !== ""),
   );
 }
 
@@ -2811,4 +3145,25 @@ export function agentControlMigrateCliArgs(
   migrateAgentControl?: boolean,
 ): string[] {
   return migrateAgentControl === true ? ["--migrate-agent-control"] : [];
+}
+
+/** CLI args for migrate's AgentControl model mapping and unmapped default rule settings. */
+export function agentControlModelCliArgs(options: {
+  modelMapping?: Record<string, string>;
+  unmappedDefaultRule?: string;
+}): string[] {
+  const args: string[] = [];
+  if (options.modelMapping && Object.keys(options.modelMapping).length > 0) {
+    args.push(
+      "--agent-control-model-map",
+      JSON.stringify(options.modelMapping),
+    );
+  }
+  if (options.unmappedDefaultRule) {
+    args.push(
+      "--agent-control-unmapped-default-rule",
+      options.unmappedDefaultRule,
+    );
+  }
+  return args;
 }

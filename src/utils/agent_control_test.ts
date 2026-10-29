@@ -9,7 +9,9 @@ import {
   agentControlExtractCliArgs,
   type AgentControlHttpClient,
   agentControlMigrateCliArgs,
+  agentControlModelCliArgs,
   agentControlRoot,
+  applyModelMapping,
   buildSourceVariationRefsFromTargeting,
   buildTargetingInstructionsForEnvironment,
   classifyUpsertStatus,
@@ -17,14 +19,19 @@ import {
   configsPath,
   emptyAgentControlSummary,
   isAgentControlUnavailable,
+  mapModelKey,
   mergeFlagRulesIntoTargeting,
   migrateAgentControlFromExtract,
   modelConfigsPath,
+  modelMappingSnippet,
+  parseModelMapping,
+  parseUnmappedDefaultRule,
   recordOutcome,
   resolveVariationKey,
   sanitizeAgentControlPayload,
   sanitizeVariationPayload,
   shouldExtractAgentControl,
+  suggestModelMappings,
   targetingHasRules,
   targetingPath,
   upsertAgentControlResource,
@@ -243,6 +250,202 @@ Deno.test("targeting reports a default rule or off variation it cannot map, and 
       "error:target:gone",
       "error:fallthrough:gone",
       "error:offVariation:gone",
+    ],
+  );
+});
+
+Deno.test("an unmappable default rule names what the destination serves, or serves disabled when asked to", () => {
+  const env = { fallthrough: { variation: 2 } };
+  const left = buildTargetingInstructionsForEnvironment(
+    env,
+    partialRefs,
+    partialDestIds,
+    { currentDefaultVariationKey: "on" },
+  );
+  assertEquals(
+    left.instructions.some((i) =>
+      i.kind === "updateFallthroughVariationOrRollout"
+    ),
+    false,
+  );
+  assert(left.issues[0].message.includes(`default rule still serves "on"`));
+
+  const disabled = buildTargetingInstructionsForEnvironment(
+    env,
+    partialRefs,
+    partialDestIds,
+    { unmappedDefaultRule: "disabled", currentDefaultVariationKey: "on" },
+  );
+  assertEquals(
+    disabled.instructions.find((i) =>
+      i.kind === "updateFallthroughVariationOrRollout"
+    ),
+    { kind: "updateFallthroughVariationOrRollout", variationId: "dest-off" },
+  );
+  // Still an error: the source's default rule was not migrated
+  assertEquals(
+    disabled.issues.map((i) => `${i.severity}:${i.part}:${i.variationKey}`),
+    ["error:fallthrough:gone"],
+  );
+  assert(disabled.issues[0].message.includes("disabled variation instead"));
+
+  // A rollout with an unmapped weight falls back the same way
+  const rollout = buildTargetingInstructionsForEnvironment(
+    {
+      fallthrough: {
+        rollout: {
+          variations: [
+            { variation: 1, weight: 50000 },
+            { variation: 2, weight: 50000 },
+          ],
+        },
+      },
+    },
+    partialRefs,
+    partialDestIds,
+    { unmappedDefaultRule: "disabled" },
+  );
+  assertEquals(rollout.instructions.at(-1), {
+    kind: "updateFallthroughVariationOrRollout",
+    variationId: "dest-off",
+  });
+
+  // Without a disabled variation in the destination there is nothing to fall back to
+  const none = buildTargetingInstructionsForEnvironment(
+    env,
+    partialRefs,
+    new Map([["on", "dest-on"]]),
+    { unmappedDefaultRule: "disabled" },
+  );
+  assertEquals(
+    none.instructions.some((i) =>
+      i.kind === "updateFallthroughVariationOrRollout"
+    ),
+    false,
+  );
+  assertEquals(none.issues.length, 1);
+});
+
+Deno.test("applyModelMapping rewrites model references in every variation shape, and nothing else", () => {
+  const mapping = { "Gemini.flash": "Gemini.flash-custom-1a2b" };
+  const topLevel = {
+    key: "v",
+    modelConfigKey: "Gemini.flash",
+    model: { name: "flash", parameters: { temperature: 0.2 } },
+  };
+  assertEquals(applyModelMapping(topLevel, mapping), {
+    ...topLevel,
+    modelConfigKey: "Gemini.flash-custom-1a2b",
+  });
+  assertEquals(topLevel.modelConfigKey, "Gemini.flash"); // not mutated
+
+  const wrapped = {
+    key: "v",
+    value: {
+      _ldMeta: { modelKey: "Gemini.flash", variationKey: "v" },
+      messages: [{ role: "system", content: "hi" }],
+    },
+  };
+  assertEquals(applyModelMapping(wrapped, mapping), {
+    key: "v",
+    value: {
+      _ldMeta: { modelKey: "Gemini.flash-custom-1a2b", variationKey: "v" },
+      messages: [{ role: "system", content: "hi" }],
+    },
+  });
+
+  // Agent-mode values carry the metadata as the value itself
+  const agent = {
+    key: "v",
+    value: { mode: "agent", modelKey: "Gemini.flash" },
+  };
+  assertEquals(
+    (applyModelMapping(agent, mapping).value as Record<string, unknown>)
+      .modelKey,
+    "Gemini.flash-custom-1a2b",
+  );
+
+  const unmapped = { key: "v", modelConfigKey: "OpenAI.gpt-4.1" };
+  assert(applyModelMapping(unmapped, mapping) === unmapped);
+  assert(applyModelMapping(topLevel, undefined) === topLevel);
+});
+
+Deno.test("parseModelMapping accepts an object or its JSON, drops identity entries, and rejects bad input", () => {
+  assertEquals(parseModelMapping(undefined), undefined);
+  assertEquals(parseModelMapping('{"a":"b"}'), { a: "b" });
+  assertEquals(parseModelMapping({ a: " b ", same: "same" }), { a: "b" });
+  assertEquals(parseModelMapping({ same: "same" }), undefined);
+  const proto = parseModelMapping('{"__proto__":"x"}')!;
+  assertEquals(mapModelKey("__proto__", proto), "x");
+  assertEquals(mapModelKey("other", proto), "other");
+  for (const bad of ["{not json", "[]", '"a"', { a: "" }, { a: 1 }]) {
+    let threw = false;
+    try {
+      parseModelMapping(bad);
+    } catch {
+      threw = true;
+    }
+    assert(threw, `expected ${JSON.stringify(bad)} to be rejected`);
+  }
+});
+
+Deno.test("parseUnmappedDefaultRule defaults to leave and rejects anything else", () => {
+  assertEquals(parseUnmappedDefaultRule(undefined), "leave");
+  assertEquals(parseUnmappedDefaultRule("disabled"), "disabled");
+  let threw = false;
+  try {
+    parseUnmappedDefaultRule("off");
+  } catch {
+    threw = true;
+  }
+  assert(threw);
+});
+
+Deno.test("suggestModelMappings finds custom models of the same model and keys with a generated suffix", () => {
+  const dest = [
+    { key: "Gemini.gemini-2.5-flash-cartesia-1a2b" },
+    { key: "my-flash", provider: "Gemini", id: "gemini-2.5-flash" },
+    {
+      key: "other-flash",
+      provider: { name: "OpenAI" },
+      id: "gemini-2.5-flash",
+    },
+    { key: "Gemini.gemini-2.5-pro" },
+    { key: "Gemini.gemini-2.5-flash" },
+  ];
+  assertEquals(
+    suggestModelMappings("Gemini.gemini-2.5-flash", undefined, dest),
+    ["Gemini.gemini-2.5-flash-cartesia-1a2b", "my-flash"],
+  );
+  // The source model's own provider and ID are preferred over its key shape
+  assertEquals(
+    suggestModelMappings(
+      "src-model",
+      { key: "src-model", provider: "Gemini", id: "gemini-2.5-flash" },
+      dest,
+    ),
+    ["Gemini.gemini-2.5-flash", "my-flash"],
+  );
+  assertEquals(suggestModelMappings("Anthropic.claude", undefined, dest), []);
+});
+
+Deno.test("modelMappingSnippet writes single suggestions as entries and several as a comment", () => {
+  assertEquals(modelMappingSnippet([{ modelKey: "a", usedBy: [] }]), []);
+  assertEquals(
+    modelMappingSnippet([
+      { modelKey: "a", usedBy: [], suggestions: ["a-1"] },
+      {
+        modelKey: "b-typo",
+        mappedFrom: "b",
+        usedBy: [],
+        suggestions: ["b-1", "b-2"],
+      },
+    ]),
+    [
+      "migration:",
+      "  agentControlModelMapping:",
+      '    "a": "a-1"',
+      '    # "b": one of b-1, b-2',
     ],
   );
 });
@@ -697,6 +900,23 @@ Deno.test("agentControlMigrateCliArgs wiring", () => {
   assertEquals(agentControlMigrateCliArgs(undefined), []);
   assertEquals(agentControlMigrateCliArgs(false), []);
   assertEquals(agentControlMigrateCliArgs(true), ["--migrate-agent-control"]);
+});
+
+Deno.test("agentControlModelCliArgs wiring", () => {
+  assertEquals(agentControlModelCliArgs({}), []);
+  assertEquals(agentControlModelCliArgs({ modelMapping: {} }), []);
+  assertEquals(
+    agentControlModelCliArgs({
+      modelMapping: { "Gemini.flash": "Gemini.flash-custom" },
+      unmappedDefaultRule: "disabled",
+    }),
+    [
+      "--agent-control-model-map",
+      '{"Gemini.flash":"Gemini.flash-custom"}',
+      "--agent-control-unmapped-default-rule",
+      "disabled",
+    ],
+  );
 });
 
 Deno.test("migrateAgentControlFromExtract dry-run makes no write calls", async () => {

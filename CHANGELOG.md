@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **AgentControl model mapping** (`migration.agentControlModelMapping`, `--agent-control-model-map '<json>'`): map a source model key to a destination model key, for models the destination offers under another key (custom models get generated keys; the Federal catalog lacks some built-ins). Variations are written with the mapped key, so they and the default rules and other targeting that serve them migrate, where before they were errors. Mapped source models are not created; every mapping target is checked against the destination before anything is written, and a missing one is reported with the source key it is mapped from. An entry no variation uses is a warning; changing a mapping rewrites the affected variations under `--incremental`
+- Missing models are listed with destination models that look like them (same provider and model ID, or a key that starts with the source key) and a ready-to-paste mapping; the report JSON includes the mapping, the mappings used and the suggestions
+- `migration.agentControlUnmappedDefaultRule` (`--agent-control-unmapped-default-rule`): `disabled` makes a default rule whose variation cannot be migrated serve the disabled variation, instead of keeping what the destination serves (for a new config, the first variation created). Still reported as an error; `leave` (default) keeps the previous behavior, and the error now names the variation the destination's default rule serves
+
 ## [3.5.0] - 2026-10-21
 
 ### Added
