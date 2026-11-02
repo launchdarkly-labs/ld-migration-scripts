@@ -15,6 +15,8 @@ import {
   mergeSelectionFromConfig,
   normalizeWorkflowConfig,
   partitionWorkflowSteps,
+  renameMapConfigError,
+  renameMapPathFor,
   resolveDestinationProjectName,
   resolveProjectKeyMapping,
   resolveProjectKeys,
@@ -821,4 +823,95 @@ Deno.test("unknownWorkflowFlags refuses options the workflow does not know", () 
     unknownWorkflowFlags(["-f", "w.yaml", "--dryrun", "--incremental"]),
     ["--dryrun", "--incremental"],
   );
+});
+
+Deno.test("renameMapPathFor fills in the project pair", () => {
+  const config = {
+    source: { projectKey: "a" },
+    migration: { renameMap: "renames/{sourceProject}-to-{destProject}.csv" },
+  };
+  assertEquals(
+    renameMapPathFor(config, { source: "a", destination: "b" }),
+    "renames/a-to-b.csv",
+  );
+  assertEquals(
+    renameMapPathFor({ source: { projectKey: "a" } }, {
+      source: "a",
+      destination: "b",
+    }),
+    undefined,
+  );
+});
+
+Deno.test("withProjectPair gives each project its own rename map", () => {
+  const config = {
+    source: { projectKeys: ["a", "b"] },
+    migration: {
+      renameMap: "renames/{sourceProject}.csv",
+      assignMaintainerIds: true,
+    },
+  };
+  const pair = withProjectPair(config, { source: "b", destination: "b-new" });
+  assertEquals(pair.migration?.renameMap, "renames/b.csv");
+  assertEquals(pair.migration?.assignMaintainerIds, true);
+  assertEquals(config.migration.renameMap, "renames/{sourceProject}.csv");
+});
+
+Deno.test("renameMapConfigError: no prefix, and a per-project path when there are several projects", () => {
+  const pairs = [{ source: "a", destination: "x" }, {
+    source: "b",
+    destination: "y",
+  }];
+  const base = { source: { projectKeys: ["a", "b"] } };
+  assertEquals(
+    renameMapConfigError({ ...base, migration: {} }, pairs),
+    undefined,
+  );
+  assertEquals(
+    renameMapConfigError({
+      ...base,
+      migration: { renameMap: "r/{sourceProject}.csv" },
+    }, pairs),
+    undefined,
+  );
+  assertEquals(
+    typeof renameMapConfigError({
+      ...base,
+      migration: { renameMap: "r/all.csv" },
+    }, pairs),
+    "string",
+  );
+  assertEquals(
+    typeof renameMapConfigError(
+      {
+        ...base,
+        migration: { renameMap: "r/{sourceProject}.csv", conflictPrefix: "x-" },
+      },
+      pairs,
+    ),
+    "string",
+  );
+  // One project: a fixed path is fine
+  assertEquals(
+    renameMapConfigError({
+      source: { projectKey: "a" },
+      migration: { renameMap: "r.csv" },
+    }, [pairs[0]]),
+    undefined,
+  );
+});
+
+Deno.test("loadMergeKeys compares renamed flag keys as they will be in the destination", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    await writeSource(dir, "a", ["f1", "f2"], { test: ["seg"] });
+    const renames = { flagKey: (k: string) => (k === "f1" ? "Allow-f1" : k) };
+    // Segments are not renamed
+    assertEquals(await loadMergeKeys("a", dir, {}, renames), {
+      flags: ["Allow-f1", "f2"],
+      segments: { test: ["seg"] },
+    });
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });

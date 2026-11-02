@@ -8,6 +8,7 @@ This directory contains scripts for migrating LaunchDarkly projects between diff
 - **`source_from_ld.ts`** - Downloads project data from a source LaunchDarkly instance
 - **`map_members_between_ld_instances.ts`** - Creates member ID mappings between LaunchDarkly instances
 - **`migrate_between_ld_instances.ts`** - Migrates projects between LaunchDarkly instances
+- **`propose_renames.ts`** - Proposes new flag keys and names as an editable CSV (rename map) for `migrate --rename-map`
 - **`revert_migration.ts`** - Reverts a previously executed migration
 - **`estimate_migration_time.ts`** - Estimates migration time based on project size and rate limits
 
@@ -17,6 +18,7 @@ Data is stored in `data/launchdarkly-migrations/`:
 
 - `source/` - Downloaded source project data
 - `mappings/` - Member ID mappings between instances
+- `renames/` - Rename maps proposed by `propose-renames`
 
 Extracted flag data uses index-prefixed filenames (`flags/0-my-flag.json`, `flags/1-other-flag.json`, ...) to avoid case collisions on case-insensitive filesystems while keeping files human-browsable.
 

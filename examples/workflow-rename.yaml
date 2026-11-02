@@ -1,0 +1,61 @@
+# Migration with new flag keys and names (rename map); segments keep their keys
+#
+# 1. Extract the source:      deno task source-from-ld -p my-source-project
+# 2. Propose new names:       deno task propose-renames -p my-source-project
+#                             (writes data/launchdarkly-migrations/renames/my-source-project-renames.csv,
+#                              <purpose>-<area>-<behavior> by default; rows with a note need a person)
+# 3. Review and edit the CSV: columns type (flag), key, new_key, new_name
+# 4. Run this workflow:       deno task workflow -f examples/workflow-rename.yaml
+#    It is a dry run until you set dryRun: false. The rename map is checked before anything is
+#    written; any collision stops the run and leaves a report under
+#    data/launchdarkly-migrations/runs/<source>/<destination>/rename-check-<time>.json
+#
+# Renamed keys break SDK calls that use the old keys: update application code from the rename map
+# before cutover. See "Renaming Flag Keys" in the README.
+
+workflow:
+  steps:
+    - extract-source
+    - map-members
+    - migrate
+
+source:
+  projectKey: my-source-project
+  domain: app.launchdarkly.com
+
+destination:
+  projectKey: my-dest-project
+  domain: app.launchdarkly.com
+
+extraction:
+  includeSegments: true
+
+memberMapping:
+  outputFile: data/launchdarkly-migrations/mappings/maintainer_mapping.json
+
+migration:
+  assignMaintainerIds: true
+  migrateSegments: true
+
+  # The reviewed rename map. Flags without a row, and all segments, keep their keys and names.
+  renameMap: data/launchdarkly-migrations/renames/my-source-project-renames.csv
+
+  # Preview first: prints the planned renames; set to false for the real run
+  dryRun: true
+
+  # Not with a rename map: conflictPrefix / onConflict: prefix (add rows to the map instead)
+
+  # Later runs: only sync what changed; renamed copies are updated in place
+  # incremental: true
+
+# Several projects: give each its own map with {sourceProject} and/or {destProject} in the path
+# source:
+#   projectKeys:
+#     - project-a
+#     - project-b
+# destination:
+#   projectKeyMapping:
+#     project-a: project-a-new
+#     project-b: project-b-new
+# migration:
+#   renameMap: data/launchdarkly-migrations/renames/{sourceProject}-renames.csv

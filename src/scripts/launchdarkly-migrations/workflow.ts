@@ -22,6 +22,8 @@ import {
   normalizeWorkflowConfig,
   partitionWorkflowSteps,
   type ProjectPair,
+  renameMapConfigError,
+  renameMapPathFor,
   resolveProjectPairs,
   simulatePrefixedMerge,
   SOURCE_DATA_DIR,
@@ -33,6 +35,11 @@ import {
   type WorkflowConfig,
   type WorkflowStepName,
 } from "../../utils/workflow_config.ts";
+import {
+  formatIssues,
+  KeyResolver,
+  loadRenameMap,
+} from "../../utils/renames.ts";
 import { assertNotSelfMigration } from "../../utils/account_guard.ts";
 
 interface Arguments {
@@ -415,6 +422,7 @@ const buildMigrationArgs = (config: WorkflowConfig): string[] => {
     migration.tags?.length ? migration.tags.join(",") : undefined,
   );
   args = addOptionalArg(args, "-c", migration.conflictPrefix);
+  args = addOptionalArg(args, "--rename-map", migration.renameMap);
   args = addOptionalArg(args, "--on-conflict", migration.onConflict);
   args = addOptionalArg(args, "-v", migration.targetView);
   args = addOptionalArg(args, "-e", migration.environments?.join(","));
@@ -724,12 +732,35 @@ const runMergePreflight = async (
     return;
   }
   const selection = mergeSelectionFromConfig(config);
+  // With rename maps, sources' flags collide on the keys they will have in the destination
+  const renamesFor = async (source: string) => {
+    const path = renameMapPathFor(config, {
+      source,
+      destination: pair.destination,
+    });
+    if (!path) return undefined;
+    const { map, issues } = await loadRenameMap(path);
+    if (issues.some((i) => i.severity === "error")) {
+      throw new Error(
+        `rename map ${path} has errors:\n${formatIssues(issues).join("\n")}`,
+      );
+    }
+    const resolver = new KeyResolver(map, undefined);
+    return { flagKey: (k: string) => resolver.flagKey(k) };
+  };
   let current: MergeKeys;
   let earlier: MergeKeys[];
   try {
-    current = await loadMergeKeys(pair.source, SOURCE_DATA_DIR, selection);
+    current = await loadMergeKeys(
+      pair.source,
+      SOURCE_DATA_DIR,
+      selection,
+      await renamesFor(pair.source),
+    );
     earlier = await Promise.all(
-      earlierSources.map((s) => loadMergeKeys(s, SOURCE_DATA_DIR, selection)),
+      earlierSources.map(async (s) =>
+        loadMergeKeys(s, SOURCE_DATA_DIR, selection, await renamesFor(s))
+      ),
     );
   } catch (error) {
     console.log(
@@ -830,6 +861,16 @@ const executeWorkflowSteps = async (
   }
 
   await runAccountGuard(steps, config);
+  if (steps.includes("migrate") && config.migration?.renameMap) {
+    const problem = renameMapConfigError(
+      config,
+      resolveProjectPairsOrExit(config),
+    );
+    if (problem) {
+      console.log(Colors.red(`Error: ${problem}`));
+      Deno.exit(1);
+    }
+  }
 
   if (!usesProjectKeysList(config)) {
     for (const step of steps) {

@@ -39,6 +39,10 @@ export interface SyncManifestFlag extends FlagTargetRecord {
   environments: Record<string, SyncManifestEnv>;
   /** Destination key, if it differs from the source key (e.g. conflict prefix) */
   destKey?: string;
+  /** Destination name set by a rename map; kept on reruns without a map, reset when a map empties new_name */
+  destName?: string;
+  /** destKey was set by a rename map (not a conflict prefix): runs without the map still translate references to it */
+  renamedByMap?: boolean;
   /** Further destination copies this migration owns, e.g. a write an aborted run left unrecorded and a later run prefixed; adopted with --adopt-unresolved */
   extraDestKeys?: string[];
 }

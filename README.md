@@ -499,6 +499,7 @@ migration: # Optional - for migrate step
   migrateSegments: boolean
   tags: string[] | null # Optional tags added to migrated flags and segments
   migrateBigSegments: boolean # Copy big segment members via CSV export/import (default: false)
+  renameMap: string # Rename map CSV: new flag keys/names; {sourceProject}/{destProject} tokens with several projects
   migrateViews: boolean # Recreate views and link flags/segments to them (default: true)
   adoptUnresolved: boolean # Record resources an incomplete sync manifest lists as untracked as this migration's copies
   conflictPrefix: string
@@ -572,6 +573,7 @@ By default, segments are **not** extracted unless explicitly needed, preventing 
 - `examples/workflow-extract-only.yaml` - Extract source data only
 - `examples/workflow-migrate-only.yaml` - Migrate with pre-extracted data
 - `examples/workflow-extract-migrate-incremental.yaml` - Re-extract and sync only changes after the first migration
+- `examples/workflow-rename.yaml` - Migrate with new flag keys and names from a rename map
 - `examples/workflow-third-party.yaml` - Third-party flag import
 - `examples/workflow-split.yaml` - Split (Harness FME) → LaunchDarkly migration
 - `examples/workflow-custom-steps.yaml` - Custom step combinations
@@ -666,6 +668,7 @@ migration: # Migration settings (also accepts "options:" as alias)
   assignMaintainerIds: boolean # Default: false
   migrateSegments: boolean # Default: true
   migrateBigSegments: boolean # Default: false; needs CSVs from extraction
+  renameMap: string # Optional: rename map CSV (see Renaming Flag Keys)
   conflictPrefix: string # Optional
   targetView: string # Optional
   includeFlags: string[] # Optional
@@ -770,8 +773,10 @@ Flags are migrated in prerequisite order, so prerequisite links land correctly. 
 ```bash
 deno run --allow-net --allow-read scripts/verify-segments.ts SOURCE_PROJECT DEST_PROJECT [keyPrefix] \
   [--source-domain app.launchdarkly.com] [--dest-domain app.eu.launchdarkly.com] \
-  [--env-map prod:production,dev:development]
+  [--env-map prod:production,dev:development] [--rename-map renames.csv]
 ```
+
+With `--rename-map` (the CSV the migration used), view flag links are compared by the flags' new keys. Segments are not renamed.
 
 The projects may live on different instances (`--source-domain` / `--dest-domain`, both default to `app.launchdarkly.com`), and destination environment keys may differ (`--env-map`, same format as the migrate option). With `--env-map`, only the mapped source environments are checked, as in the migration.
 
@@ -781,6 +786,98 @@ The projects may live on different instances (`--source-domain` / `--dest-domain
 - **Percentage rollout rules** in segments are listed separately: the segment salt isn't exposed by the API, so bucketing can't be compared.
 
 It exits non-zero if anything differs. The optional `keyPrefix` limits the check to segments and views whose keys start with it.
+
+### Renaming Flag Keys
+
+Flags can get new keys and names in the destination, for example `release-checkout-web` → `Release-checkout-web`. The renames come from a CSV that people review before the migration reads it. Segments are not renamed: they keep their keys and names, and conflicts on them are handled by `--on-conflict` / the conflict prefix as usual.
+
+**At a glance** (replace the project keys; each step is explained below):
+
+```bash
+# 0. Extract the source (also done by the workflow's extract-source step)
+deno task source-from-ld -p SOURCE_PROJECT
+
+# 1. Propose new flag keys and names → data/launchdarkly-migrations/renames/SOURCE_PROJECT-renames.csv
+deno task propose-renames -p SOURCE_PROJECT
+
+# 2. Review and edit the CSV (rows with a note need a person)
+
+# 3. Preview: checks the map and prints the planned renames; nothing is written
+deno task migrate -p SOURCE_PROJECT -d DEST_PROJECT --rename-map data/launchdarkly-migrations/renames/SOURCE_PROJECT-renames.csv --dry-run
+
+# 4. Migrate for real (same command without --dry-run)
+deno task migrate -p SOURCE_PROJECT -d DEST_PROJECT --rename-map data/launchdarkly-migrations/renames/SOURCE_PROJECT-renames.csv
+
+# 5. Check the result under the new keys (SDK payloads; see step 5)
+deno task diff --rename-map data/launchdarkly-migrations/renames/SOURCE_PROJECT-renames.csv
+```
+
+Or run the whole flow from YAML with `migration.renameMap`: see `examples/workflow-rename.yaml` (`deno task workflow -f examples/workflow-rename.yaml`, a dry run until you set `dryRun: false`). Later runs: add `--incremental` (or `incremental: true`) with the same map.
+
+> **SDK warning.** A renamed key breaks every `variation("old-key")` call and every SDK or Relay Proxy configuration that names the old key: LaunchDarkly has no key aliases. Use the final rename map to update application code (LaunchDarkly code references help find the calls), deploy that code before cutover, and never reuse an old key for a different flag.
+
+**1. Propose new names.** `propose-renames` reads the source data extracted in step 0 (no API calls) and writes an editable CSV with one row per flag:
+
+```bash
+deno task propose-renames -p SOURCE_PROJECT [--out file.csv] [--namer my_namer.ts] [--force]
+```
+
+The default namer follows `<purpose>-<area>-<behavior>`, e.g. `Allow-blueprint-seamless-learning`:
+
+- **Purpose**: the first match from a fixed list (`Kill`, `Experiment`, `Release`, `Allow`, `Show`, `Enable`, `Config`), checked against the flag's key and name, then its description; a multivariate flag with string, number or JSON values and no match is `Config`. Only when none of those name a purpose are the flag's tags checked. No match: `Review`.
+- **Area**: the first meaningful word of the name (or key). Tags never become part of the key; they are migrated as they are.
+- **Behavior**: the rest of the name, else the first words of the description.
+- **New name**: the same words in Title Case.
+
+Proposals the rules aren't sure about carry a `note` (for example "purpose unclear" or "needs a name: key and description say too little" for keys like `flag-1`), so reviewers can filter to them. The file defaults to `data/launchdarkly-migrations/renames/<project>-renames.csv` and is never overwritten without `--force`, since it may hold reviewers' edits. Swap the naming logic with `--namer <module>`: its default (or `namer`) export receives each flag and returns `{ key, name, note }` or `null`.
+
+**2. Review the CSV.** The migration reads only these columns; the others (`name`, `description`, `tags`, `note`, `issues`) are context for reviewers:
+
+| Column     | Meaning                                       |
+| ---------- | --------------------------------------------- |
+| `type`     | `flag` (a `segment` row is an error)          |
+| `key`      | Source flag key                               |
+| `new_key`  | Destination key; empty keeps the source key   |
+| `new_name` | Destination name; empty keeps the source name |
+
+A CSV can also be written by hand. Open it in a text editor, or import it into a spreadsheet as text: spreadsheets turn values such as `1e3` into numbers.
+
+**3–4. Migrate with the map.** Run with `--dry-run` first, then without it:
+
+```bash
+deno task migrate -p SOURCE_PROJECT -d DEST_PROJECT --rename-map renames.csv --dry-run
+```
+
+(`migration.renameMap` in YAML; see `examples/workflow-rename.yaml`. With several projects, put `{sourceProject}` and/or `{destProject}` in the path, e.g. `data/launchdarkly-migrations/renames/{sourceProject}-renames.csv`.)
+
+Before anything is written, dry runs included, the map is checked against the extracted source, the sync manifest and the destination's flags (live and archived). **Any error stops the run, whatever `--on-conflict` says:**
+
+| Code                                       | Meaning                                                                                                    |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| `INVALID_KEY`                              | Not a valid LaunchDarkly key (letters, numbers, `.`, `_`, `-`; starting with a letter or number)           |
+| `DUPLICATE_NEW_KEY`                        | Two flags would get the same key                                                                           |
+| `NEW_KEY_IS_SOURCE_KEY`                    | The new key is another source flag's key, and that flag keeps it                                           |
+| `DEST_EXISTS_FOREIGN`                      | The new key already exists in the destination and this migration didn't create it                          |
+| `DEST_OWNED_BY_OTHER`                      | The new key is already the migrated copy of a different source flag                                        |
+| `DEST_UNRESOLVED`                          | An aborted run may have created the key; rerun with `--adopt-unresolved` once you have checked it          |
+| `MANIFEST_MISMATCH`                        | The flag was already migrated under another key (or its row was removed); restore the row, or revert first |
+| `BAD_TYPE`                                 | A row whose `type` isn't `flag`, including `segment` rows (segments are not renamed)                       |
+| `BAD_HEADER`, `EMPTY_KEY`, `DUPLICATE_ROW` | The CSV itself is malformed                                                                                |
+
+Warnings don't stop the run: `UNKNOWN_SOURCE_KEY`, and `CHAIN_OR_SWAP` (a key one flag gives up is taken by another: SDK calls for it get a different flag).
+
+Every check writes a report under `data/launchdarkly-migrations/runs/<source>/<destination>/`: `rename-check-<time>.json` (outcome, counts by code, next step, and each issue with its CSV line) and the same issues as `rename-check-<time>.csv`. When a run stops, the console prints each error with its CSV line and the path of the report; fix those rows (or the destination flag they collide with) and run again.
+
+During the migration, prerequisites are rewritten to the new flag keys, view links use the new keys, and the sync manifest records each copy's `destKey` and `destName`. Reruns, `--incremental` included, update the renamed copies in place; a changed `new_name` is applied, an emptied `new_name` puts back the source name, and a changed `new_key` for a migrated flag is `MANIFEST_MISMATCH`. A rerun without `--rename-map` keeps the recorded keys and the names the map gave, and prerequisites keep pointing at the renamed keys (the sync manifest records which keys a map renamed). A renamed key that appears in the destination between the check and the write is reported as an error and never overwritten.
+
+Limits: `--rename-map` can't be combined with a conflict prefix (`-c` / `onConflict: prefix`); add rows to the map instead. Flags without a row keep their keys and follow `--on-conflict` as usual. Keys that differ only by case are not checked.
+
+**5. Check the result.** Both tools compare renamed flags under their new keys:
+
+- `deno task diff --rename-map renames.csv`: the SDK payloads of one environment, with key A the source environment's SDK key and key B the destination's (in `config/server_side_sdk_keys.json` or on the command line).
+- `deno run --allow-net --allow-read scripts/verify-segments.ts SOURCE_PROJECT DEST_PROJECT --rename-map renames.csv`: segments, big segment members and views, with view flag links compared by the new keys.
+
+To undo, `deno task revert` finds the renamed copies through the sync manifest; only without a manifest does it need `--rename-map` to find them.
 
 ### Conflict Resolution
 
@@ -1137,6 +1234,7 @@ The `revert:` block applies both in the workflow orchestrator and when running `
 - `--dry-run` / `--no-dry-run`: Preview the revert without making changes, or force a real revert (overrides `revert.dryRun`)
 - `--delete-views`: Also delete the view after unlinking all flags (overrides `revert.deleteViews`)
 - `--no-use-source-data`: Disable smart mode (scan all destination flags instead)
+- `--rename-map`: Rename map CSV the migration used; only needed when no sync manifest exists (the manifest records renamed keys)
 - `-f, --config`: Path to YAML configuration file
 
 ### Revert Workflow Examples
@@ -1214,6 +1312,7 @@ The task definitions live in `deno.json`; the ones above the line are the migrat
 | `deno task source-from-ld`          | Extract flags, segments, environments (and optionally views, big segments, archived flags) from a source project |
 | `deno task map-members`             | Map member IDs between source and destination accounts by email                                                  |
 | `deno task migrate`                 | Create/update segments, flags and views in the destination project                                               |
+| `deno task propose-renames`         | Propose new flag keys and names as an editable CSV (rename map)                                                  |
 | `deno task revert`                  | Remove what a migration created in the destination (uses the sync manifest)                                      |
 | `deno task estimate-migration-time` | Estimate how long a migration will take from resource counts and rate limits                                     |
 | `deno task import-flags`            | Bulk-import flags from a JSON or CSV file (third-party migrations)                                               |
@@ -1367,6 +1466,8 @@ don't need to specify them manually.
 - `--adopt-unresolved`: (Optional) Record the destination resources an incomplete sync manifest
   lists as untracked as this migration's copies (config: `migration.adoptUnresolved`). Only after
   checking by hand that the aborted run created them; see the revert section on merged destinations.
+- `--rename-map`: (Optional) CSV of new destination keys and names for flags
+  (config: `migration.renameMap`); see Renaming Flag Keys. Can't be combined with `-c`.
 - `--dry-run`: (Optional) Preview without writing to the destination or the sync manifest.
 
 **Exit code.** After the summary, `migrate` reconciles the flag keys (and segment keys per mapped environment) in the source data against the destination and exits with code `1` when any flag or segment failed to create or update, is missing from the destination, or when the reconciliation itself could not be completed (flags skipped by `--since` are out of scope). The workflow runner stops at that step. Exit code `0` means every resource in scope is present in the destination; use `scripts/verify-segments.ts` or an external field-level comparison for content parity.

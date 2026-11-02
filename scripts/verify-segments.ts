@@ -5,7 +5,10 @@
  * Usage:
  *   deno run --allow-net --allow-read scripts/verify-segments.ts <sourceProj> <destProj> [keyPrefix]
  *     [--source-domain app.launchdarkly.com] [--dest-domain app.eu.launchdarkly.com]
- *     [--env-map prod:production,dev:development]
+ *     [--env-map prod:production,dev:development] [--rename-map renames.csv]
+ *
+ * With --rename-map (the CSV the migration used), view flag links are compared by the flags' new keys.
+ * Segments are not renamed, so they are always compared by their source keys.
  *
  * The two projects may live on different instances (e.g. US → EU) and the destination environment
  * keys may differ (--env-map, same format as migrate). With --env-map only the mapped source
@@ -27,9 +30,14 @@ import {
   readExportedKeys,
 } from "../src/utils/big_segments.ts";
 import { extractViews } from "../src/utils/views.ts";
+import {
+  formatIssues,
+  KeyResolver,
+  loadRenameMap,
+} from "../src/utils/renames.ts";
 
 const USAGE =
-  "Usage: verify-segments.ts <sourceProj> <destProj> [keyPrefix] [--source-domain d] [--dest-domain d] [--env-map src:dest,...]";
+  "Usage: verify-segments.ts <sourceProj> <destProj> [keyPrefix] [--source-domain d] [--dest-domain d] [--env-map src:dest,...] [--rename-map file.csv]";
 const argv = yargs(Deno.args)
   .usage(USAGE)
   // Project keys and prefixes are identifiers: "1e3" must stay "1e3", not become 1000
@@ -47,6 +55,11 @@ const argv = yargs(Deno.args)
     "dest-domain",
     "Destination LaunchDarkly domain (default: app.launchdarkly.com)",
   )
+  .string("rename-map")
+  .describe(
+    "rename-map",
+    "Rename map CSV the migration used: compare view flag links by the flags' new keys",
+  )
   .string("env-map")
   .describe(
     "env-map",
@@ -57,6 +70,7 @@ const argv = yargs(Deno.args)
     sourceDomain?: string;
     destDomain?: string;
     envMap?: string;
+    renameMap?: string;
   };
 
 const [sourceProj, destProj, keyPrefix = ""] = argv._.map(String);
@@ -81,6 +95,19 @@ const envMap: Record<string, string> | null = argv.envMap
   )
   : null;
 const destEnvOf = (env: string): string => (envMap ? envMap[env] : env);
+
+// Source → destination flag keys when the migration used a rename map (identity otherwise)
+let renames: KeyResolver | undefined;
+if (argv.renameMap) {
+  const loaded = await loadRenameMap(argv.renameMap);
+  const errors = loaded.issues.filter((i) => i.severity === "error");
+  if (errors.length > 0) {
+    formatIssues(errors).forEach((l) => console.error(l));
+    Deno.exit(2);
+  }
+  renames = new KeyResolver(loaded.map, undefined);
+}
+const destFlagKey = (key: string) => renames?.flagKey(key) ?? key;
 
 const sourceKey = await getSourceApiKey();
 const destKey = await getDestinationApiKey();
@@ -375,7 +402,7 @@ for (const [key, { view: src }] of sourceViews) {
     description: v.description ?? "",
     tags: [...(v.tags ?? [])].sort(),
     maintainer: await maintainerOf(apiKey, domain, proj, v.key),
-    flags: [...v.flags].sort(),
+    flags: v.flags.map((k: string) => (mapEnvs ? destFlagKey(k) : k)).sort(),
     // Deduplicated: two source environments mapped to one destination environment yield one link there
     segments: [
       ...new Set<string>(

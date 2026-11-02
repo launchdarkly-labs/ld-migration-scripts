@@ -1,7 +1,17 @@
 #!/usr/bin/env -S deno run --allow-net --allow-env --allow-read
 
 import { parseArgs } from "jsr:@std/cli@^1.0.6/parse-args";
-import { type DiffFormat, diffPayloads, fetchSDKPayload } from "./mod.ts";
+import {
+  type DiffFormat,
+  diffPayloads,
+  fetchSDKPayload,
+  rewritePayloadKeys,
+} from "./mod.ts";
+import {
+  formatIssues,
+  KeyResolver,
+  loadRenameMap,
+} from "../../utils/renames.ts";
 
 const DEFAULT_KEYS_FILE = new URL(
   "../../../config/server_side_sdk_keys.json",
@@ -50,7 +60,14 @@ async function loadKeysFromFile(
 }
 
 const args = parseArgs(Deno.args, {
-  string: ["base-url", "base-url-a", "base-url-b", "format", "keys-file"],
+  string: [
+    "base-url",
+    "base-url-a",
+    "base-url-b",
+    "format",
+    "keys-file",
+    "rename-map",
+  ],
   boolean: ["help", "include-segments"],
   alias: { h: "help", f: "format" },
   default: { format: "console", "include-segments": true },
@@ -80,6 +97,7 @@ Options:
   --base-url-a          SDK polling base URL for key A (overrides --base-url; e.g. US)
   --base-url-b          SDK polling base URL for key B (overrides --base-url; e.g. https://sdk.eu.launchdarkly.com)
   --keys-file           Path to JSON file with sdkKeyA and sdkKeyB (default: config/server_side_sdk_keys.json)
+  --rename-map          Rename map CSV the migration used: key A's flags are compared under their new keys
   --help, -h            Show this help message
 
 Environment variables:
@@ -94,8 +112,8 @@ Config file (when no two positionals given):
 Examples:
   deno task diff
   deno task diff sdk-xxx-111 sdk-xxx-222
-  deno task diff -- --format jsonpatch | jq .
-  deno task diff -- --keys-file ./config/server_side_sdk_keys.json`,
+  deno task diff --format jsonpatch | jq .
+  deno task diff --keys-file ./config/server_side_sdk_keys.json`,
   );
   Deno.exit(0);
 }
@@ -161,9 +179,22 @@ if (includeSegments) {
   console.error(`  B: ${Object.keys(segsB).length} segments`);
 }
 
+// A migration that renamed flags: compare A's flags under the keys they were migrated to
+let comparedA = payloadA;
+if (args["rename-map"]) {
+  const loaded = await loadRenameMap(args["rename-map"]);
+  if (loaded.issues.some((i) => i.severity === "error")) {
+    formatIssues(loaded.issues).forEach((l) => console.error(l));
+    Deno.exit(1);
+  }
+  const resolver = new KeyResolver(loaded.map, undefined);
+  comparedA = rewritePayloadKeys(payloadA, (k) => resolver.flagKey(k));
+  console.error(`  A rewritten to destination keys with ${args["rename-map"]}`);
+}
+
 // Diff
 console.error("Diffing...");
-const result = diffPayloads(payloadA, payloadB, {
+const result = diffPayloads(comparedA, payloadB, {
   includeSegments,
   format: format as DiffFormat,
 });

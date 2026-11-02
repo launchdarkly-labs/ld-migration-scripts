@@ -66,6 +66,18 @@ Extract source project data without running migration.
 deno task workflow -f examples/workflow-extract-only.yaml
 ```
 
+### `workflow-rename.yaml`
+
+Migration that gives flags new keys and names from a reviewed rename map (CSV); segments keep their keys. Run `deno task propose-renames -p <project>` first, review the CSV, then:
+
+**Usage:**
+
+```bash
+deno task workflow -f examples/workflow-rename.yaml
+```
+
+It starts as a dry run; renamed keys break SDK calls that use the old keys (see "Renaming Flag Keys" in the main README).
+
 ### `workflow-migrate-only.yaml`
 
 Run migration with pre-extracted data (skips extract and map steps).
@@ -234,6 +246,19 @@ deno run --allow-net --allow-read scripts/verify-segments.ts my-source-project m
   --dest-domain app.eu.launchdarkly.com --env-map prod:production,dev:development
 ```
 
+If the migration used a rename map, pass it too: `--rename-map data/launchdarkly-migrations/renames/my-source-project-renames.csv`.
+
+## Renaming Flags
+
+Propose new flag keys and names (`<purpose>-<area>-<behavior>`), review the CSV, then migrate with it:
+
+```bash
+deno task propose-renames -p my-source-project
+deno task migrate -p my-source-project -d my-dest-project --rename-map data/launchdarkly-migrations/renames/my-source-project-renames.csv --dry-run
+```
+
+In a workflow, set `migration.renameMap`. Renamed keys break SDK calls that use the old keys; see "Renaming Flag Keys" in the main README.
+
 ## Flag Import Template Files
 
 ### `flags_template.json`
@@ -328,6 +353,7 @@ That's it! The workflow runs all steps automatically.
 | ------------------------------------ | ----------- | ------------------------------------------- |
 | **Complete migration (recommended)** | Workflow    | `workflow-full.yaml`                        |
 | Incremental sync (after initial)     | Workflow    | `workflow-extract-migrate-incremental.yaml` |
+| Rename flags                         | Workflow    | `workflow-rename.yaml`                      |
 | Extract source data only             | Workflow    | `workflow-extract-only.yaml`                |
 | Third-party flag import              | Workflow    | `workflow-third-party.yaml`                 |
 | Custom step combinations             | Workflow    | `workflow-custom-steps.yaml`                |

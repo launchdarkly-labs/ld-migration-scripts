@@ -81,6 +81,29 @@ import {
   writeRunRecord,
 } from "../../utils/run_record.ts";
 import denoConfig from "../../../deno.json" with { type: "json" };
+import { stringify as stringifyCsv } from "https://deno.land/std@0.224.0/csv/mod.ts";
+import {
+  destinationCollisions,
+  type DestinationKeys,
+  flagDestination,
+  flagDestinationName,
+  formatIssues,
+  hasErrors,
+  KeyResolver,
+  loadRenameMap,
+  manifestRenames,
+  renameCheckReport,
+  renameCheckReportCsvRows,
+  type RenameIssue,
+  type RenameMap,
+  translatePrerequisites,
+  validateRenameMapAgainstManifest,
+  validateRenameMapStatic,
+} from "../../utils/renames.ts";
+import {
+  readExtractedFlagKeys,
+  sourceProjectPath,
+} from "../../utils/source_data.ts";
 
 interface Arguments {
   projKeySource: string;
@@ -107,6 +130,7 @@ interface Arguments {
   createEnvironments?: boolean;
   migrateViews?: boolean;
   adoptUnresolved?: boolean;
+  renameMap?: string;
   propagateArchived?: boolean;
 }
 
@@ -142,6 +166,7 @@ interface MigrationConfig {
     createEnvironments?: boolean;
     migrateViews?: boolean;
     adoptUnresolved?: boolean;
+    renameMap?: string;
     propagateArchived?: boolean;
   };
   /** Alias for options — YAML configs may use migration: instead of options: */
@@ -398,6 +423,12 @@ const cliArgs: Arguments = (yargs(Deno.args)
   .alias("create-project", "createProject")
   .alias("create-environments", "createEnvironments")
   .alias("adopt-unresolved", "adoptUnresolved")
+  .alias("rename-map", "renameMap")
+  .string("rename-map")
+  .describe(
+    "rename-map",
+    "CSV of new destination keys and names for flags (see propose-renames); segments keep their keys",
+  )
   .boolean("adopt-unresolved")
   .default("adopt-unresolved", undefined)
   .describe(
@@ -543,6 +574,7 @@ if (cliArgs.config) {
       migrateViews: cliArgs.migrateViews ?? opts?.migrateViews ?? true,
       adoptUnresolved: cliArgs.adoptUnresolved ?? opts?.adoptUnresolved ??
         false,
+      renameMap: cliArgs.renameMap || opts?.renameMap,
       propagateArchived: cliArgs.propagateArchived ??
         opts?.propagateArchived ?? true,
       config: cliArgs.config,
@@ -603,6 +635,9 @@ console.log(
 );
 console.log(
   Colors.gray(`  Conflict Prefix: ${inputArgs.conflictPrefix || "none"}`),
+);
+console.log(
+  Colors.gray(`  Rename Map: ${inputArgs.renameMap || "none"}`),
 );
 console.log(
   Colors.gray(
@@ -755,6 +790,18 @@ type ConflictAction = "overwrite" | "skip" | "prefix" | "abort";
 // Default preserves historical behavior: prefix when -c is set, else overwrite.
 const onConflictMode: string = inputArgs.onConflict ??
   (inputArgs.conflictPrefix ? "prefix" : "overwrite");
+
+if (
+  inputArgs.renameMap &&
+  (inputArgs.conflictPrefix || onConflictMode === "prefix")
+) {
+  console.log(
+    Colors.red(
+      `Error: --rename-map can't be combined with a conflict prefix; add a row to the rename map instead.`,
+    ),
+  );
+  Deno.exit(1);
+}
 
 if (onConflictMode === "prefix" && !inputArgs.conflictPrefix) {
   console.log(
@@ -1257,6 +1304,209 @@ if (inputArgs.incremental) {
   }
 }
 
+// ==================== Rename Map ====================
+// New destination flag keys and names come from a reviewed CSV (segments are not renamed). Everything is
+// checked before any write:
+// a collision stops the run whatever --on-conflict says, dry runs included.
+let renameMap: RenameMap | undefined;
+let renameResolver: KeyResolver | undefined;
+if (inputArgs.renameMap) {
+  console.log(
+    Colors.blue(`\n🏷  Checking rename map ${inputArgs.renameMap}...`),
+  );
+  const issues: RenameIssue[] = [];
+  const loaded = await loadRenameMap(inputArgs.renameMap).catch((error) => {
+    console.log(
+      Colors.red(
+        `❌ Could not read the rename map: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      ),
+    );
+    Deno.exit(1);
+  });
+  renameMap = loaded.map;
+  issues.push(...loaded.issues);
+
+  const projPath = sourceProjectPath(inputArgs.projKeySource);
+  const allFlagKeys = await readExtractedFlagKeys(projPath);
+  const inventory = { flagKeys: allFlagKeys };
+  const manifestView = previousManifest
+    ? { flags: previousManifest.flags }
+    : undefined;
+
+  issues.push(...validateRenameMapStatic(renameMap, inventory));
+  issues.push(
+    ...validateRenameMapAgainstManifest(renameMap, manifestView, inventory),
+  );
+
+  // What already exists in the destination (a missing project or environment counts as empty)
+  const listOrEmpty = async (path: string): Promise<Set<string>> => {
+    try {
+      return await listDestinationKeys(path);
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("HTTP 404")) {
+        return new Set();
+      }
+      throw error;
+    }
+  };
+  try {
+    const existing: DestinationKeys = { flags: new Set() };
+    if (renameMap.flags.size > 0) {
+      const base =
+        `flags/${inputArgs.projKeyDest}?summary=true&limit=50&offset=0`;
+      for (const k of await listOrEmpty(base)) existing.flags.add(k);
+      for (const k of await listOrEmpty(`${base}&filter=state:archived`)) {
+        existing.flags.add(k);
+      }
+    }
+    issues.push(
+      ...destinationCollisions(
+        renameMap,
+        inventory,
+        existing,
+        manifestView,
+        new Set(previousManifest?.incomplete?.unresolved?.flags ?? []),
+        Boolean(inputArgs.adoptUnresolved),
+      ),
+    );
+  } catch (error) {
+    console.log(Colors.red(
+      `❌ Could not list destination keys to check the rename map: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    ));
+    Deno.exit(1);
+  }
+
+  for (const line of formatIssues(issues)) {
+    console.log(
+      line.startsWith("✗")
+        ? Colors.red(`  ${line}`)
+        : Colors.yellow(`  ${line}`),
+    );
+  }
+  // Every check leaves a report: why the run stopped, or which warnings it passed with
+  const report = renameCheckReport(issues, {
+    sourceProject: inputArgs.projKeySource,
+    destinationProject: inputArgs.projKeyDest,
+    renameMap: inputArgs.renameMap,
+    dryRun: Boolean(inputArgs.dryRun),
+  });
+  const reportDir =
+    `./data/launchdarkly-migrations/runs/${inputArgs.projKeySource}/${inputArgs.projKeyDest}`;
+  const reportBase = `${reportDir}/rename-check-${
+    report.checkedAt.replace(/[:.]/g, "-")
+  }`;
+  try {
+    await Deno.mkdir(reportDir, { recursive: true });
+    await Deno.writeTextFile(
+      `${reportBase}.json`,
+      JSON.stringify(report, null, 2) + "\n",
+    );
+    await Deno.writeTextFile(
+      `${reportBase}.csv`,
+      stringifyCsv(renameCheckReportCsvRows(report), {
+        columns: [
+          "severity",
+          "code",
+          "line",
+          "type",
+          "key",
+          "message",
+        ],
+      }),
+    );
+    console.log(
+      Colors.gray(
+        `  Rename check report: ${reportBase}.json (issues also in ${reportBase}.csv)`,
+      ),
+    );
+  } catch (error) {
+    console.log(Colors.yellow(
+      `  ⚠ Could not write the rename check report: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    ));
+  }
+  if (hasErrors(issues)) {
+    const byCode = Object.entries(report.summary.byCode).map(([c, n]) =>
+      `${n} ${c}`
+    ).join(", ");
+    console.log(Colors.red(
+      `\n❌ Stopped before any write: the rename map has ${report.summary.errors} error(s) (${byCode}).`,
+    ));
+    console.log(Colors.red(`   ${report.nextStep}`));
+    console.log(Colors.red(`   Details: ${reportBase}.json`));
+    Deno.exit(1);
+  }
+
+  renameResolver = new KeyResolver(renameMap, manifestView, allFlagKeys);
+  const flagRenames = [...renameMap.flags].filter(([k, r]) =>
+    allFlagKeys.includes(k) && (r.key || r.name)
+  );
+  console.log(Colors.green(
+    `✓ Rename map OK: ${flagRenames.length} flag(s) renamed` +
+      (issues.length ? ` (${issues.length} warning(s) above)` : ""),
+  ));
+  for (const [key, r] of flagRenames.slice(0, 50)) {
+    console.log(
+      Colors.gray(
+        `    flag ${key} → ${r.key ?? key}${r.name ? ` ("${r.name}")` : ""}`,
+      ),
+    );
+  }
+  if (flagRenames.length > 50) {
+    console.log(Colors.gray(`    … ${flagRenames.length - 50} more`));
+  }
+  console.log(Colors.yellow(
+    `  ⚠ Renamed keys break SDK calls that use the old keys; update application code from the rename map before cutover.`,
+  ));
+}
+
+/** Destination key for a source flag: recorded copy, then the rename map, then the source key */
+const destFlagKeyOf = (sourceKey: string): string =>
+  renameResolver ? renameResolver.flagKey(sourceKey) : sourceKey;
+// Without --rename-map, flags an earlier map renamed keep their keys, and references to them keep following
+if (!renameResolver && previousManifest) {
+  const recordedRenames = manifestRenames(previousManifest.flags);
+  if (recordedRenames) {
+    renameResolver = new KeyResolver(
+      undefined,
+      recordedRenames,
+      Object.keys(recordedRenames.flags!),
+    );
+    console.log(Colors.gray(
+      `  Rename map: none; ${
+        Object.keys(recordedRenames.flags!).length
+      } flag key(s) renamed by an earlier map are kept from the sync manifest`,
+    ));
+  }
+}
+
+/** The destination name a rename map gives a flag (see flagDestinationName) */
+const renamedFlagName = (sourceKey: string): string | undefined =>
+  flagDestinationName(
+    renameMap,
+    sourceKey,
+    ownEntry(previousManifest?.flags, sourceKey),
+  );
+/** Applies the rename map (and names recorded by an earlier map) to a recorded destination */
+const renamedFlagDestination = (
+  flag: { key: string },
+  recorded: { key: string; name: string; recorded: boolean },
+) =>
+  flagDestination({
+    sourceKey: flag.key,
+    recorded,
+    map: renameMap,
+    resolver: renameResolver,
+    entry: ownEntry(previousManifest?.flags, flag.key),
+    unresolved: previousManifest?.incomplete?.unresolved?.flags,
+    adopt: inputArgs.adoptUnresolved,
+  });
+
 // Destination project must exist unless --create-project is set.
 // 401/403 means the token cannot see the project; do not treat that as "missing".
 const projStatus = await getProjectStatus(
@@ -1524,6 +1774,8 @@ const flagsWithErrors: Set<string> = new Set();
 const reconciliationErrors: string[] = [];
 // --adopt-unresolved ran for this run (see stageAdoptedCopies)
 let adoptionStaged = false;
+// Renamed keys an aborted run left unrecorded that processOneFlag took over (--adopt-unresolved)
+const flagsAdoptedByRename: Set<string> = new Set();
 // Declared with the shared tracking state so the flag phase and reconciliation both see it
 const flagsSkippedByDate: Set<string> = new Set(); // --since: never attempted, excluded from reconciliation
 // --on-conflict skip: the destination copy stays as it is, so the previous manifest entry is kept
@@ -1732,7 +1984,7 @@ if (inputArgs.includeFlags || inputArgs.excludeFlags) {
       ldAPIRequest(
         apiKey,
         domain,
-        `flags/${inputArgs.projKeyDest}/${prereqKey}`,
+        `flags/${inputArgs.projKeyDest}/${destFlagKeyOf(prereqKey)}`,
       ),
       "flags",
     );
@@ -3693,6 +3945,14 @@ async function processOneFlag(
           }
         }
       }
+      // A changed name in the rename map (set, edited or emptied) is a change even when the source is unchanged
+      if (
+        renameMap &&
+        (renameMap.flags.get(flag.key)?.name ?? flag.name) !==
+          ((prevEntry as { destName?: string }).destName ?? flag.name)
+      ) {
+        allEnvsUnchanged = false;
+      }
       if (allEnvsUnchanged) {
         // Sync lifecycle (archived/deprecated) even when versions match — LD may not bump version for lifecycle-only
         // changes — and reconcile migration tags, which are not part of the source version either.
@@ -3913,11 +4173,24 @@ async function processOneFlag(
 
   // A previous manifest entry under another key names this migration's own earlier copy (conflict
   // prefix): update it instead of creating a second prefixed duplicate
-  const recorded = recordedDestination(
-    ownEntry(previousManifest?.flags, flag.key),
+  const recorded = renamedFlagDestination(
     flag,
-    inputArgs.conflictPrefix,
+    recordedDestination(
+      ownEntry(previousManifest?.flags, flag.key),
+      flag,
+      inputArgs.conflictPrefix,
+    ),
   );
+  // A renamed key that isn't our recorded copy must never land on an existing flag
+  const flagRenamedUnrecorded = !recorded.recorded && !recorded.adopted &&
+    recorded.key !== flag.key;
+  const failRenamedCollision = (detail: string) => {
+    console.log(
+      Colors.red(`\t✗ Renamed key "${flagKey}" ${detail}; not written`),
+    );
+    flagsWithErrors.add(flag.key);
+    flagErrorDetails.set(flag.key, `renamed key "${flagKey}" ${detail}`);
+  };
   let flagKey = recorded.key;
   let flagName = recorded.name;
   let attemptCount = 0;
@@ -3948,6 +4221,24 @@ async function processOneFlag(
           `\t→ Updating the copy recorded in the sync manifest (${flagKey})`,
         ),
       );
+    } else if (checkFlagResp.status === 200 && recorded.adopted) {
+      // --adopt-unresolved: the aborted run's copy under the renamed key, verified by the user
+      flagCreated = true;
+      flagAlreadyExisted = true;
+      createdFlagKey = flagKey;
+      flagsAdoptedByRename.add(flagKey);
+      console.log(
+        Colors.gray(
+          `\t→ Adopting ${flagKey}, left unrecorded by an aborted run, as this flag's copy`,
+        ),
+      );
+    } else if (checkFlagResp.status === 200 && flagRenamedUnrecorded) {
+      // The rename-map check found the key free; something created it since. Never overwrite it.
+      flagsAttempted.delete(flag.key);
+      failRenamedCollision(
+        "appeared in the destination after the rename-map check",
+      );
+      return { incrementalSkipCountDelta, incrementalEnvSkipCountDelta };
     } else if (checkFlagResp.status === 200) {
       // Flag already exists — resolve according to --on-conflict
       const action = await resolveConflictAction("flag", flagKey);
@@ -4141,6 +4432,10 @@ async function processOneFlag(
         } else {
           console.log(Colors.green(`\t✓ Created`));
         }
+      } else if (flagResp.status === 409 && flagRenamedUnrecorded) {
+        // A renamed key is never adopted as "ours": stop instead of updating a foreign flag
+        failRenamedCollision("already exists in the destination (409)");
+        break;
       } else if (flagResp.status === 409) {
         // The flag appeared between the existence check and the POST, or the check itself failed.
         // Without a prefix it is treated like a flag found by the check: flag-level properties
@@ -4497,6 +4792,17 @@ async function processOneFlag(
           return Object.assign(cur, { [key]: flagEnvData[key] });
         }, {});
 
+      // Prerequisites on renamed flags point at their destination keys
+      if (renameResolver) {
+        const pd = parsedData as Record<string, any>;
+        if (Array.isArray(pd.prerequisites)) {
+          pd.prerequisites = translatePrerequisites(
+            pd.prerequisites,
+            destFlagKeyOf,
+          );
+        }
+      }
+
       // A source environment with no off variation serves the SDK fallback value while off, but the
       // destination flag is created with the default off variation, so remove it explicitly. Only when
       // the destination has one: a JSON Patch remove on a missing path fails the whole patch.
@@ -4582,6 +4888,10 @@ async function processOneFlag(
           : flag.creationDate,
         environments: flagManifestEnvs,
         ...(createdFlagKey !== flag.key && { destKey: createdFlagKey }),
+        ...(renamedFlagName(flag.key) && { destName: flagName }),
+        ...(createdFlagKey !== flag.key &&
+          (renameMap || prevForRecord?.renamedByMap) &&
+          { renamedByMap: true }),
         // Updated from the copy's state after this run's writes (recordDestinationState)
         ...nextFlagTargetRecord(
           prevForRecord,
@@ -5025,7 +5335,8 @@ if (usableViews.size > 0) {
         .map((r) => [r.originalKey, r.resolvedKey]),
     );
     const destFlagKey = (key: string) =>
-      updatedManifestFlags[key]?.destKey ?? flagRenamesThisRun.get(key) ?? key;
+      updatedManifestFlags[key]?.destKey ?? flagRenamesThisRun.get(key) ??
+        destFlagKeyOf(key);
     const destSegmentKey = (sourceEnvKey: string, key: string) =>
       updatedManifestSegments[sourceEnvKey]?.[key]?.destKey ?? key;
     const destEnvIds = new Map<string, string>();
@@ -5328,7 +5639,12 @@ function stageAdoptedCopies(): void {
     },
     inputArgs.conflictPrefix,
   );
-  const list = [...adopted.flags, ...adopted.segments];
+  // Renamed keys were taken over while their flags were migrated; they are mapped by those entries' destKey
+  const list = [
+    ...adopted.flags,
+    ...[...flagsAdoptedByRename].filter((k) => !adopted.flags.includes(k)),
+    ...adopted.segments,
+  ];
   const verb = inputArgs.dryRun ? "[DRY RUN] Would adopt" : "Adopted";
   console.log(
     list.length > 0
@@ -5396,7 +5712,7 @@ async function writeSyncManifestFile(
       .map((k) =>
         prefix && flagsPrefixedByConflict.has(k)
           ? applyConflictPrefix(k, prefix)
-          : ownEntry(previousManifest?.flags, k)?.destKey ?? k
+          : ownEntry(previousManifest?.flags, k)?.destKey ?? destFlagKeyOf(k)
       );
     const pendingSegments = [...segmentsAttempted]
       .filter((id) => {

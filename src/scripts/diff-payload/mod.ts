@@ -218,3 +218,38 @@ export function diffPayloads(
 
   return result;
 }
+
+// --- Renamed keys ---
+
+/**
+ * Rewrites a payload's flag keys into another project's keys, so a migration that renamed flags
+ * (rename map) can be diffed flag by flag: map keys, each flag's `key` and prerequisite keys.
+ * Segments are not renamed and are left as they are. The input is not changed.
+ */
+export function rewritePayloadKeys(
+  payload: Record<string, unknown>,
+  flagKey: (key: string) => string,
+): Record<string, unknown> {
+  if (!payload.flags) return { ...payload };
+  const flags = payload.flags as Record<string, Record<string, unknown>>;
+  return {
+    ...payload,
+    flags: Object.fromEntries(
+      Object.entries(flags).map(([key, flag]) => {
+        const prerequisites = flag.prerequisites as
+          | { key: string }[]
+          | undefined;
+        return [flagKey(key), {
+          ...flag,
+          ...(typeof flag.key === "string" && { key: flagKey(flag.key) }),
+          ...(prerequisites && {
+            prerequisites: prerequisites.map((p) => ({
+              ...p,
+              key: flagKey(p.key),
+            })),
+          }),
+        }];
+      }),
+    ),
+  };
+}

@@ -17,6 +17,11 @@ import { ldAPIRequest, rateLimitRequest } from "../../utils/utils.ts";
 import { getDestinationApiKey } from "../../utils/api_keys.ts";
 import { getAccountId } from "../../utils/account_guard.ts";
 import {
+  formatIssues,
+  KeyResolver,
+  loadRenameMap,
+} from "../../utils/renames.ts";
+import {
   assertManifestComplete,
   type DestinationIdentity,
   manifestDestinationFlagKeys,
@@ -44,6 +49,8 @@ export interface RevertConfig {
   viewKeys?: string[];
   configFile?: string;
   useSourceData?: boolean;
+  /** Rename map the migration used; only needed when no sync manifest exists */
+  renameMap?: string;
 }
 
 export interface Arguments {
@@ -55,6 +62,7 @@ export interface Arguments {
   views?: string;
   config?: string;
   useSourceData?: boolean;
+  renameMap?: string;
 }
 
 interface Flag {
@@ -145,6 +153,7 @@ export const buildRevertConfigs = (
       : undefined,
     configFile: configPath,
     useSourceData: cliArgs.useSourceData !== false, // Default to true when config is provided
+    renameMap: cliArgs.renameMap,
   };
 
   const multi = usesProjectKeysList(workflowConfig);
@@ -243,6 +252,12 @@ const parseArguments = async (): Promise<RevertConfig[]> => {
     .alias("delete-views", "delete-views")
     .alias("v", "views")
     .alias("use-source-data", "use-source-data")
+    .alias("rename-map", "renameMap")
+    .string("rename-map")
+    .describe(
+      "rename-map",
+      "Rename map CSV the migration used; only needed when no sync manifest exists (the manifest records renamed keys)",
+    )
     .boolean("dry-run")
     .boolean("delete-views")
     .boolean("use-source-data")
@@ -292,6 +307,7 @@ const parseArguments = async (): Promise<RevertConfig[]> => {
     viewKeys: args.views ? args.views.split(",") : undefined,
     // Smart mode (sync manifest, else extracted data) applies without a config file too; it needs -s
     useSourceData: args.useSourceData !== false,
+    renameMap: args.renameMap,
   }];
 };
 
@@ -406,6 +422,7 @@ let manifestIdentity: DestinationIdentity | undefined;
 const loadMigratedFlagKeys = async (
   sourceProjectKey: string,
   destProjectKey: string,
+  renameMap?: string,
 ): Promise<MigratedFlagKeys> => {
   const manifestPath = syncManifestPath(sourceProjectKey, destProjectKey);
   const manifest = await readSyncManifest(
@@ -438,6 +455,30 @@ const loadMigratedFlagKeys = async (
     ),
   );
   const extracted = await loadFlagListFromSourceData(sourceProjectKey);
+  if (extracted && renameMap) {
+    // Renamed flags live under their new keys; the rename map says which
+    const { map, issues } = await loadRenameMap(renameMap);
+    if (issues.some((i) => i.severity === "error")) {
+      throw new Error(
+        `rename map ${renameMap} has errors:\n${
+          formatIssues(issues).join("\n")
+        }`,
+      );
+    }
+    const resolver = new KeyResolver(map, undefined);
+    const keys = extracted.map((k) => resolver.flagKey(k));
+    console.log(Colors.gray(
+      `  Using rename map ${renameMap}: ${
+        keys.filter((k, i) => k !== extracted[i]).length
+      } flag(s) under new keys`,
+    ));
+    return { project: sourceProjectKey, keys, source: "extract" };
+  }
+  if (extracted) {
+    console.log(Colors.yellow(
+      `  Warning: if this migration used a rename map, pass --rename-map: renamed flags are not found under their source keys`,
+    ));
+  }
   return extracted
     ? { project: sourceProjectKey, keys: extracted, source: "extract" }
     : { project: sourceProjectKey, keys: [], source: "none" };
@@ -620,6 +661,7 @@ const discoverMigrationFlags = async (
     const own = await loadMigratedFlagKeys(
       config.sourceProjectKey,
       config.projectKey,
+      config.renameMap,
     );
     // Siblings only matter for raw source keys; manifest keys already are the destination keys
     const siblings: MigratedFlagKeys[] = [];

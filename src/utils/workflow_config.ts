@@ -66,6 +66,11 @@ export interface WorkflowConfig {
     adoptUnresolved?: boolean;
     /** false: a recorded flag archived in the source since it was migrated is not archived in the destination (default: true) */
     propagateArchived?: boolean;
+    /**
+     * Rename map CSV of new flag keys and names (see propose-renames). With several projects, the path must contain
+     * {sourceProject} and/or {destProject}, which are filled in for each project pair.
+     */
+    renameMap?: string;
   };
   thirdPartyImport?: {
     inputFile: string;
@@ -291,6 +296,41 @@ export function resolveDestinationProjectName(opts: {
  * destination.projectName comes from destination.projectNames[destination] (a single
  * projectName can't label every project in the list); the mapping maps are dropped.
  */
+const RENAME_MAP_TOKENS = /\{(sourceProject|destProject)\}/;
+
+/** The rename map path for one project pair: {sourceProject} and {destProject} filled in. */
+export function renameMapPathFor(
+  config: WorkflowConfig,
+  pair: ProjectPair,
+): string | undefined {
+  const path = config.migration?.renameMap?.trim();
+  if (!path) return undefined;
+  return path.replaceAll("{sourceProject}", pair.source).replaceAll(
+    "{destProject}",
+    pair.destination,
+  );
+}
+
+/**
+ * Config problems with migration.renameMap, or undefined: it can't be combined with a conflict prefix,
+ * and with several project pairs one path would rename every project alike, so it must be per pair.
+ */
+export function renameMapConfigError(
+  config: WorkflowConfig,
+  pairs: ProjectPair[],
+): string | undefined {
+  const path = config.migration?.renameMap?.trim();
+  if (!path) return undefined;
+  const { policy, prefix } = effectiveConflictPolicy(config);
+  if (prefix || policy === "prefix") {
+    return "migration.renameMap can't be combined with migration.conflictPrefix or onConflict: prefix; add rows to the rename map instead";
+  }
+  if (pairs.length > 1 && !RENAME_MAP_TOKENS.test(path)) {
+    return `migration.renameMap "${path}" would apply to all ${pairs.length} projects; use {sourceProject} and/or {destProject} in the path, e.g. data/launchdarkly-migrations/renames/{sourceProject}-renames.csv`;
+  }
+  return undefined;
+}
+
 export function withProjectPair(
   config: WorkflowConfig,
   pair: ProjectPair,
@@ -302,9 +342,13 @@ export function withProjectPair(
     ...destination
   } = config.destination ?? {};
   const projectName = coerceProjectKey(projectNames?.[pair.destination]);
+  const renameMap = renameMapPathFor(config, pair);
   return {
     ...config,
     workflow: config.workflow ? { ...config.workflow } : undefined,
+    ...(config.migration && {
+      migration: { ...config.migration, ...(renameMap && { renameMap }) },
+    }),
     source: {
       ...config.source,
       projectKey: pair.source,
@@ -525,8 +569,11 @@ export async function loadMergeKeys(
   source: string,
   baseDir: string = SOURCE_DATA_DIR,
   selection: MergeSelection = {},
+  /** A rename map in use: flag keys are compared as they will be in the destination */
+  renames?: { flagKey: (key: string) => string },
 ): Promise<MergeKeys> {
-  const flags = selectFlagKeys(await loadFlagKeys(baseDir, source), selection);
+  const flags = selectFlagKeys(await loadFlagKeys(baseDir, source), selection)
+    .map((k) => renames ? renames.flagKey(k) : k);
   const segments: Record<string, string[]> = {};
   if (selection.migrateSegments !== false) {
     for (const env of await listSegmentEnvs(baseDir, source)) {

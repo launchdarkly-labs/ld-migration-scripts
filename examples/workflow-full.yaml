@@ -33,6 +33,10 @@ migration:
   # Include segments
   migrateSegments: true
 
+  # New flag keys and names from a reviewed CSV (optional; see workflow-rename.yaml). Segments keep their keys.
+  # Can't be combined with conflictPrefix below.
+  # renameMap: data/launchdarkly-migrations/renames/us-production-renames.csv
+
   # Copy big (larger list-based) segment members via CSV export/import (optional, default: false).
   # Needs createSegmentExport on the source token (see docs/launchdarkly-migration-role.md).
   # migrateBigSegments: true

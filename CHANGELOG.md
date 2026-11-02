@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `migrate --rename-map` / `migration.renameMap`: give migrated flags new keys and names from a reviewed CSV (segments are not renamed; a segment row is an error). The map is checked against the source, the sync manifest and the destination before any write; any collision stops the run whatever `--on-conflict` says, and every check leaves a `rename-check-<time>.json`/`.csv` report. Prerequisites and view links follow the new keys; the sync manifest records `destKey` and `destName`, so reruns update the renamed copies in place
+- `propose-renames`: proposes new flag keys and names (`<purpose>-<area>-<behavior>` by default from the key, name and description; tags only as a last resort for the purpose and never in the key; swappable with `--namer`) as an editable CSV, with a note on every proposal that needs a person
+- `verify-segments.ts --rename-map` (view flag links), `diff --rename-map`, and `revert --rename-map` (for the extracted-data fallback) compare and find renamed flags under their new keys
+- `examples/workflow-rename.yaml`: an end-to-end rename workflow (extract, map members, migrate with `renameMap`, dry run first)
+
+### Documentation
+
+- `diff`: the usage examples now pass options as `deno task diff --format …`; with `deno task diff -- …` the `--` reached the script and the options after it were ignored
+
 ## [3.6.1] - 2026-10-28
 
 ### Fixed
