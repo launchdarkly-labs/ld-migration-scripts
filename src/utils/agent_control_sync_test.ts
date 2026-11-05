@@ -722,6 +722,97 @@ Deno.test("an existing config is updated directly, without a POST that could be 
   });
 });
 
+Deno.test("a config whose mode changed is an error, and its variations and targeting are not written", async () => {
+  await withExtract(async (sourceKey) => {
+    await Deno.writeTextFile(
+      `./data/launchdarkly-migrations/source/project/${sourceKey}/ai-configs/configs.json`,
+      JSON.stringify({
+        items: [{ key: "cfg-a", name: "Config A", mode: "agent" }],
+      }),
+    );
+    const configPath = `projects/${DEST}/ai-configs/cfg-a`;
+    const world = mockWorld({
+      [configPath]: { key: "cfg-a", mode: "completion" },
+      [`${configPath}/variations/legacy`]: { key: "legacy" },
+    });
+    const result = await run(sourceKey, world.client, {
+      onConflict: "overwrite",
+    });
+    assertEquals(result.failures.map((f) => `${f.stage}:${f.key}`), [
+      "configs:cfg-a",
+    ]);
+    // The whole config is reported once: no destination-only warning for its old variations
+    assertEquals(result.warnings, []);
+    assert(
+      result.failures[0].reason.startsWith(
+        `mode changed (completion → agent); an AI Config's mode cannot be changed`,
+      ),
+    );
+    assert(
+      result.failures[0].reason.includes(`delete ${DEST}/cfg-a and re-run`),
+    );
+    assertEquals(
+      world.writes().filter((c) => c.includes("/ai-configs/cfg-a")),
+      [],
+    );
+  });
+});
+
+Deno.test("a destination config without a mode is a completion config, and a dry run reports the mode change", async () => {
+  await withExtract(async (sourceKey) => {
+    await Deno.writeTextFile(
+      `./data/launchdarkly-migrations/source/project/${sourceKey}/ai-configs/configs.json`,
+      JSON.stringify({
+        items: [{ key: "cfg-a", name: "Config A", mode: "agent" }],
+      }),
+    );
+    const world = mockWorld({
+      [`projects/${DEST}/ai-configs/cfg-a`]: { key: "cfg-a" },
+    });
+    const result = await run(sourceKey, world.client, {
+      onConflict: "overwrite",
+      dryRun: true,
+    });
+    assertEquals(result.failures.map((f) => `${f.stage}:${f.key}`), [
+      "configs:cfg-a",
+    ]);
+    assert(
+      result.failures[0].reason.startsWith("mode changed (completion → agent)"),
+    );
+    assertEquals(world.writes(), []);
+  });
+});
+
+Deno.test("--incremental does not skip an unchanged config whose destination copy has another mode", async () => {
+  await withExtract(async (sourceKey) => {
+    await Deno.writeTextFile(
+      `./data/launchdarkly-migrations/source/project/${sourceKey}/ai-configs/configs.json`,
+      JSON.stringify({
+        items: [{ key: "cfg-a", name: "Config A", mode: "agent" }],
+      }),
+    );
+    const first = mockWorld();
+    const { manifest } = await run(sourceKey, first.client);
+    const configPath = `projects/${DEST}/ai-configs/cfg-a`;
+    // The destination kept its old mode (a PATCH does not change it)
+    first.store.set(configPath, {
+      ...first.store.get(configPath),
+      mode: "completion",
+    });
+    const again = mockWorld(Object.fromEntries(first.store));
+    const result = await run(sourceKey, again.client, {
+      previousManifest: manifest,
+      incremental: true,
+    });
+    assertEquals(result.failures.map((f) => `${f.stage}:${f.key}`), [
+      "configs:cfg-a",
+    ]);
+    assert(
+      result.failures[0].reason.startsWith("mode changed (completion → agent)"),
+    );
+  });
+});
+
 Deno.test("the result lists the destination keys a reconciliation should find", async () => {
   await withExtract(async (sourceKey) => {
     // written: the model config, and the config under its prefixed key
@@ -1038,6 +1129,34 @@ Deno.test("a variation this migration archived is restored when the source resto
   });
 });
 
+Deno.test("a variation deleted in the source is reported as destination-only, and not deleted", async () => {
+  await withExtract(async (sourceKey) => {
+    const configPath = `projects/${DEST}/ai-configs/cfg-a`;
+    const world = mockWorld({
+      [configPath]: { key: "cfg-a", name: "Config A" },
+      [`${configPath}/variations/var-1`]: { key: "var-1" },
+      [`${configPath}/variations/var-old`]: { key: "var-old" },
+      [`${configPath}/variations/var-gone`]: {
+        key: "var-gone",
+        state: "archived",
+      },
+    });
+    const result = await run(sourceKey, world.client);
+    assertEquals(result.failures, []);
+    assertEquals(
+      result.warnings.map((w) => `${w.stage}:${w.key}`),
+      ["variations:cfg-a/var-old", "variations:cfg-a/var-gone"],
+    );
+    assert(result.warnings[1].message.includes("(archived)"));
+    assert(result.warnings[0].message.includes(`delete it in ${DEST}/cfg-a`));
+    assertEquals(
+      world.calls.filter((c) => c.startsWith("DELETE")),
+      [],
+    );
+    assert(world.store.has(`${configPath}/variations/var-old`));
+  });
+});
+
 Deno.test("a config's only active variation is not archived, and that is reported as a warning", async () => {
   await withExtract(async (sourceKey) => {
     await writeVariationFile(sourceKey, "var-1", { state: "archived" });
@@ -1209,7 +1328,23 @@ async function runExtract(
     } catch {
       // not created when the extract is skipped
     }
-    return { result, calls, targetingFiles: targetingFiles.sort(), targeting };
+    const variationFiles: string[] = [];
+    try {
+      for await (const d of Deno.readDir(`${projPath}/ai-configs/variations`)) {
+        for await (
+          const f of Deno.readDir(`${projPath}/ai-configs/variations/${d.name}`)
+        ) variationFiles.push(`${d.name}/${f.name}`);
+      }
+    } catch {
+      // not created when the extract is skipped
+    }
+    return {
+      result,
+      calls,
+      targetingFiles: targetingFiles.sort(),
+      targeting,
+      variationFiles: variationFiles.sort(),
+    };
   } finally {
     await Deno.remove(projPath, { recursive: true }).catch(() => {});
   }
@@ -1257,6 +1392,47 @@ Deno.test("extract records failed reads and does not leave stale targeting behin
   );
   assert(result.failures[0].reason.includes("internal error"));
   assertEquals(targetingFiles, ["a.json", "agent.json"]);
+});
+
+Deno.test("extract drops an earlier extract's files for variations and configs deleted in the source", async () => {
+  const p = "projects/src/ai-configs";
+  const { result, variationFiles, targetingFiles } = await runExtract(
+    {
+      [`${p}/model-configs`]: { status: 200, json: [] },
+      [p]: {
+        status: 200,
+        json: { items: [{ key: "a" }, { key: "b" }], totalCount: 2 },
+      },
+      [`${p}/a`]: {
+        status: 200,
+        json: { key: "a", variations: [{ key: "m0" }, { key: "m2" }] },
+      },
+      [`${p}/a/targeting`]: { status: 200, json: { environments: {} } },
+      // b could not be read: its earlier files are kept, and the failure is reported
+      [`${p}/b`]: { status: 500, body: "internal error" },
+      [`${p}/b/variations`]: { status: 500, body: "internal error" },
+      [`${p}/b/targeting`]: { status: 200, json: { environments: {} } },
+    },
+    async (projPath) => {
+      const root = `${projPath}/ai-configs`;
+      for (
+        const [cfg, keys] of [["a", ["m0", "m1", "m2"]], ["b", ["x"]], [
+          "gone",
+          ["y"],
+        ]] as const
+      ) {
+        await Deno.mkdir(`${root}/variations/${cfg}`, { recursive: true });
+        for (const k of keys) {
+          await Deno.writeTextFile(`${root}/variations/${cfg}/${k}.json`, "{}");
+        }
+      }
+      await Deno.mkdir(`${root}/targeting`, { recursive: true });
+      await Deno.writeTextFile(`${root}/targeting/gone.json`, "{}");
+    },
+  );
+  assertEquals(variationFiles, ["a/m0.json", "a/m2.json", "b/x.json"]);
+  assertEquals(targetingFiles, ["a.json", "b.json"]);
+  assert(result.failures.some((f) => f.key === "b"));
 });
 
 Deno.test("extract reads what each targeting rule serves from the config's flag, and reports when it cannot", async () => {

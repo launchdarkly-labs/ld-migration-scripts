@@ -201,6 +201,13 @@ const REQUEST_TIMEOUT_MS = 60_000;
 // rejected). Those surface as errors and are repaired by an incremental re-run.
 const RETRY_SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS", "PUT", "DELETE"]);
 
+// application/json and +json types; not NDJSON (one document per line), which big segment exports use
+function isJsonContentType(contentType: string | null): boolean {
+  return /^application\/(?:[\w.-]+\+)?json\s*(?:;|$)/i.test(
+    contentType?.trim() ?? "",
+  );
+}
+
 function transientBackoff(attempt: number): number {
   return 1000 * 2 ** attempt + Math.floor(Math.random() * 250);
 }
@@ -300,6 +307,61 @@ export async function rateLimitRequest(
     );
     await delay(wait);
     return rateLimitRequest(rateLimitReq, routeCategory, attempt + 1);
+  }
+
+  // The connection can drop after the headers arrive, while the body streams ("error reading a body
+  // from connection"). Bodies are read here: for idempotent requests that failure, or a JSON body cut
+  // short, is retried like a network error. A POST/PATCH is not replayed (it may have been applied):
+  // its status is returned with a body saying the response could not be read.
+  if (res.body) {
+    const method = req.method.toUpperCase();
+    const idempotent = RETRY_SAFE_METHODS.has(method);
+    try {
+      const body = await res.arrayBuffer();
+      if (
+        idempotent && body.byteLength > 0 &&
+        isJsonContentType(res.headers.get("content-type"))
+      ) JSON.parse(new TextDecoder().decode(body));
+      return new Response(body.byteLength > 0 ? body : null, {
+        status: res.status,
+        statusText: res.statusText,
+        headers: res.headers,
+      });
+    } catch (err) {
+      if (!idempotent) {
+        const reason = err instanceof Error ? err.message : String(err);
+        console.log(
+          Colors.yellow(
+            `Response to ${method} ${req.url} (HTTP ${res.status}) could not be read (${reason}); ${
+              res.ok
+                ? "the change was applied, but verify it or re-run with --incremental"
+                : "not retried"
+            }`,
+          ),
+        );
+        // Headers are kept: some callers read the created resource from Location
+        const headers = new Headers(res.headers);
+        headers.set("content-type", "text/plain");
+        headers.delete("content-length");
+        headers.delete("content-encoding");
+        return new Response(`(response body could not be read: ${reason})`, {
+          status: res.status,
+          statusText: res.statusText,
+          headers,
+        });
+      }
+      if (attempt >= MAX_TRANSIENT_RETRIES) throw err;
+      const wait = transientBackoff(attempt);
+      console.log(
+        Colors.yellow(
+          `Body read failed for ${req.url} (${
+            err instanceof Error ? err.message : String(err)
+          }); retry ${attempt + 1}/${MAX_TRANSIENT_RETRIES} in ${wait}ms`,
+        ),
+      );
+      await delay(wait);
+      return rateLimitRequest(rateLimitReq, routeCategory, attempt + 1);
+    }
   }
 
   return res;

@@ -192,11 +192,15 @@ async function runExport(
   }
 
   // Relative links are LaunchDarkly API paths and need auth; absolute links are pre-signed storage URLs.
-  const fileResp = href.startsWith("/")
-    ? await fetch(`https://${domain}${href}`, {
-      headers: { Authorization: apiKey },
-    })
-    : await fetch(href);
+  // Sent through rateLimitRequest so a dropped download is retried.
+  const fileResp = await rateLimitRequest(
+    href.startsWith("/")
+      ? new Request(`https://${domain}${href}`, {
+        headers: { Authorization: apiKey },
+      })
+      : new Request(href),
+    "segments",
+  );
   if (!fileResp.ok) {
     return {
       ok: false,

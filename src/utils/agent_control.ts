@@ -567,6 +567,18 @@ export interface ExtractAgentControlResult {
   failures: AgentControlFailure[];
 }
 
+/** Removes the `<key>.json` files in `dir` whose key is not in `keep` */
+async function removeFilesExcept(dir: string, keep: Set<string>) {
+  try {
+    for await (const entry of Deno.readDir(dir)) {
+      if (!entry.isFile || !entry.name.endsWith(".json")) continue;
+      if (!keep.has(entry.name.slice(0, -".json".length))) {
+        await Deno.remove(`${dir}/${entry.name}`).catch(() => {});
+      }
+    }
+  } catch { /* no directory: nothing extracted before */ }
+}
+
 /** Extract model-configs, configs, variations, and targeting to disk. */
 export async function extractAgentControlResources(
   options: ExtractAgentControlOptions,
@@ -664,6 +676,8 @@ export async function extractAgentControlResources(
 
     // Prefer full GET for embedded variations
     let detail: Record<string, unknown> = config;
+    // Stale variation files are pruned only when this config's variations were read in full
+    let variationsComplete = true;
     try {
       const detailResp = await get(
         `projects/${projectKey}/ai-configs/${configKey}`,
@@ -671,6 +685,7 @@ export async function extractAgentControlResources(
       if (detailResp.status >= 200 && detailResp.status < 300) {
         detail = (detailResp.json ?? config) as Record<string, unknown>;
       } else {
+        variationsComplete = false;
         fail(
           configKey,
           `reading the config failed: ${
@@ -684,6 +699,7 @@ export async function extractAgentControlResources(
         }
       }
     } catch (error) {
+      variationsComplete = false;
       fail(configKey, `reading the config failed: ${errorMessage(error)}`);
     }
 
@@ -691,6 +707,7 @@ export async function extractAgentControlResources(
       ? detail.variations as Record<string, unknown>[]
       : [];
 
+    const writtenVariations = new Set<string>();
     const writeVariation = async (v: Record<string, unknown>) => {
       const variationKey = resolveVariationKey(v);
       // Skip synthetic disabled — created by LD; only used for targeting index maps
@@ -703,6 +720,7 @@ export async function extractAgentControlResources(
         `${root}/variations/${configKey}/${variationKey}`,
         withKey,
       );
+      writtenVariations.add(variationKey);
       variationCount++;
     };
 
@@ -713,6 +731,7 @@ export async function extractAgentControlResources(
       );
       // 405: the config has no variation collection (agent mode); nothing to extract
       if (listed.error && listed.error.status !== 405) {
+        variationsComplete = false;
         fail(
           `${configKey}/variations`,
           `listing variations failed: ${listed.error.reason}`,
@@ -726,6 +745,13 @@ export async function extractAgentControlResources(
       for (const v of variations) {
         await writeVariation(v);
       }
+    }
+    // A variation deleted in the source must not be migrated from an earlier extract's file
+    if (variationsComplete) {
+      await removeFilesExcept(
+        `${root}/variations/${configKey}`,
+        writtenVariations,
+      );
     }
 
     // Dedicated targeting endpoint (not fields scraped from config detail)
@@ -792,6 +818,25 @@ export async function extractAgentControlResources(
           errorMessage(error)
         }`,
       );
+    }
+  }
+
+  // Configs deleted in the source: drop an earlier extract's variations and targeting for them
+  if (!configs.error) {
+    const current = new Set(configs.items.map((c) => String(c.key ?? "")));
+    for (const dir of ["variations", "targeting"]) {
+      try {
+        for await (const entry of Deno.readDir(`${root}/${dir}`)) {
+          const configKey = entry.isFile
+            ? entry.name.replace(/\.json$/, "")
+            : entry.name;
+          if (!current.has(configKey)) {
+            await Deno.remove(`${root}/${dir}/${entry.name}`, {
+              recursive: true,
+            }).catch(() => {});
+          }
+        }
+      } catch { /* no directory yet */ }
     }
   }
 
@@ -1028,6 +1073,11 @@ export interface AgentControlMigrationResult {
   missingModels: AgentControlMissingModel[];
   /** Source models that variations use under their mapped destination key */
   modelMappings: AgentControlModelMappingUse[];
+}
+
+/** An AI Config's mode; a config without one is a completion config */
+export function configMode(config: { mode?: unknown }): string {
+  return typeof config.mode === "string" ? config.mode : "completion";
 }
 
 /** JSON with object keys sorted, so equal content fingerprints equally whatever the key order. */
@@ -1713,6 +1763,8 @@ type WritePlan =
     existingTags: string[];
     /** A copy already exists in the destination (a dry run reports an update, not a create) */
     exists: boolean;
+    /** The existing copy's mode (configs only) */
+    existingMode?: string;
   }
   | { kind: "skip" }
   | { kind: "abort" }
@@ -1876,6 +1928,9 @@ export async function migrateAgentControlFromExtract(
     const existingTags = existing.state === "exists"
       ? stringTags(existing.json.tags)
       : [];
+    const existingMode = existing.state === "exists"
+      ? configMode(existing.json)
+      : undefined;
     if (recorded || existing.state !== "exists") {
       return {
         kind: "write",
@@ -1883,6 +1938,7 @@ export async function migrateAgentControlFromExtract(
         destName,
         existingTags,
         exists: existing.state === "exists",
+        existingMode,
       };
     }
 
@@ -1944,6 +2000,7 @@ export async function migrateAgentControlFromExtract(
       destName,
       existingTags,
       exists: true,
+      existingMode,
     };
   };
 
@@ -2250,7 +2307,10 @@ export async function migrateAgentControlFromExtract(
       if (hash === previousEntry.hash) {
         // Confirm the destination still has it (it may have been deleted or recreated since the sync)
         const there = await fetchExisting(client, `${configBase}/${own.key}`);
-        if (there.state !== "missing") {
+        // A mode the destination copy does not have is reported below, not skipped
+        const modeDiffers = there.state === "exists" &&
+          configMode(there.json) !== configMode(config);
+        if (there.state !== "missing" && !modeDiffers) {
           console.log(
             Colors.gray(
               `  → Config ${key}: unchanged, skipping (--incremental)`,
@@ -2284,6 +2344,25 @@ export async function migrateAgentControlFromExtract(
     if (plan.kind === "error") {
       fail("configs", key, plan.reason, { log: false });
       configPlans.set(key, { destKey: key, blocked: true });
+      if (!options.dryRun && previousEntry) delete manifest.configs[key].hash;
+      continue;
+    }
+    // A config deleted and re-created in another mode (completion ↔ agent) in the source: the destination
+    // copy keeps its mode and rejects the other mode's variations
+    if (
+      plan.existingMode !== undefined &&
+      plan.existingMode !== configMode(config)
+    ) {
+      fail(
+        "configs",
+        key,
+        `mode changed (${plan.existingMode} → ${
+          configMode(config)
+        }); an AI Config's mode cannot be changed, so its variations and targeting were not migrated. To fix: delete ${dest}/${plan.destKey} and re-run the migration, which re-creates it with its variations and targeting`,
+        { destKey: plan.destKey },
+      );
+      configPlans.set(key, { destKey: plan.destKey, blocked: true });
+      expected.configs.add(plan.destKey);
       if (!options.dryRun && previousEntry) delete manifest.configs[key].hash;
       continue;
     }
@@ -2629,6 +2708,35 @@ export async function migrateAgentControlFromExtract(
           })
         }`,
         { status: resp.status, destKey: v.destConfigKey, log: false },
+      );
+    }
+  }
+
+  // A variation deleted in the source stays in the destination (deleting it could break what still
+  // serves it there): report it so the copies do not drift silently
+  const sourceVariationKeys = new Map<string, Set<string>>();
+  for (const { configKey, variationKey } of variationFiles) {
+    if (!sourceVariationKeys.has(configKey)) {
+      sourceVariationKeys.set(configKey, new Set());
+    }
+    sourceVariationKeys.get(configKey)!.add(variationKey);
+  }
+  for (const [configKey, plan] of configPlans) {
+    if (aborted || plan.blocked) continue;
+    const states = await destStateOf(plan.destKey);
+    if (!states) continue;
+    const inSource = sourceVariationKeys.get(configKey) ?? new Set<string>();
+    for (const [variationKey, state] of states) {
+      if (
+        variationKey === "disabled" || variationKey === "enabled" ||
+        inSource.has(variationKey)
+      ) continue;
+      warn(
+        "variations",
+        `${configKey}/${variationKey}`,
+        `exists only in the destination${
+          state === "archived" ? " (archived)" : ""
+        }; the source no longer has it. It was not deleted: delete it in ${dest}/${plan.destKey} if nothing needs it`,
       );
     }
   }

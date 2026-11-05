@@ -64,6 +64,14 @@ import {
 } from "../../utils/big_segments.ts";
 import { getAccountId } from "../../utils/account_guard.ts";
 import { linkToView, type SourceView } from "../../utils/views.ts";
+import {
+  isIdentityMapping,
+  planChangesVariations,
+  planVariationSync,
+  translateVariationRefs,
+  variationIndexByValue,
+  type VariationPlan,
+} from "../../utils/variations.ts";
 
 interface Arguments {
   projKeySource: string;
@@ -1606,6 +1614,13 @@ const segmentsCreateRejected: Set<string> = new Set(); // "<sourceEnv>/<segmentK
 // the manifest writer can run from an abort or phase failure before the flag phase.
 let manifestWriteFailed = false;
 const flagErrorDetails: Map<string, string> = new Map();
+// Flags (source key) whose removed variations are still in the destination: source variation index →
+// destination index, for prerequisites on them (dependents are processed in a later level)
+const keptVariationLayouts: Map<string, number[]> = new Map();
+// Flags this run has processed (any outcome). A prerequisite on a flag not processed cleanly this run
+// is translated by value, since that flag's destination variations may not match the source.
+const flagsProcessedThisRun: Set<string> = new Set();
+const destVariationsCache: Map<string, Promise<any[] | null>> = new Map();
 
 // Prerequisite check: with include/exclude filters, every prerequisite of a selected flag must be
 // selected too, or already exist in destination. Without filters the whole project is migrated in
@@ -3034,14 +3049,22 @@ const wouldPatchChangeEnvironment = (
     switch (patch.op) {
       case "replace":
         if (field === "rules") {
-          // Strip internal fields from current rules before comparing
+          // Strip internal fields from current rules before comparing, with the key order
+          // buildRulesReplace gives the patch (clauses last)
           const cleanCurrent = (currentEnvConfig.rules || []).map(
             (rule: any) => {
-              const { _id, _generation, _deleted, _version, _ref, ...rest } =
-                rule;
+              const {
+                _id,
+                _generation,
+                _deleted,
+                _version,
+                _ref,
+                clauses,
+                ...rest
+              } = rule;
               return {
                 ...rest,
-                clauses: (rest.clauses || []).map(({ _id, ...c }: any) => c),
+                clauses: (clauses || []).map(({ _id, ...c }: any) => c),
               };
             },
           );
@@ -3128,6 +3151,32 @@ async function segmentAbsentInSource(
   }
   const keys = sourceSegmentKeysCache.get(sourceEnv);
   return keys !== null && keys !== undefined && !keys.has(segmentKey);
+}
+
+// The destination flag with every environment, or why it could not be read
+async function readDestinationFlag(
+  flagKey: string,
+): Promise<{ flag: any; error?: undefined } | { flag: null; error: string }> {
+  try {
+    const resp = await rateLimitRequest(
+      ldAPIRequest(
+        apiKey,
+        domain,
+        `flags/${inputArgs.projKeyDest}/${flagKey}?env=*`,
+      ),
+      "flags",
+    );
+    if (resp.status !== 200) {
+      await resp.body?.cancel();
+      return { flag: null, error: `HTTP ${resp.status}` };
+    }
+    return { flag: await resp.json() };
+  } catch (error) {
+    return {
+      flag: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 const makePatchCall = async (
@@ -3314,10 +3363,75 @@ interface FlagProcessResult {
   incrementalEnvSkipCountDelta: number;
 }
 
+// Source flags (in this migration) with a prerequisite on prereqKey in any environment
+async function flagsUsingAsPrerequisite(prereqKey: string): Promise<string[]> {
+  const users: string[] = [];
+  for (const [index, key] of flagList.entries()) {
+    if (key === prereqKey) continue;
+    const f = await getFlagDataByIndexOrKey(index, key);
+    const uses = Object.values(f?.environments ?? {}).some((e: any) =>
+      (e?.prerequisites ?? []).some((p: any) => p?.key === prereqKey)
+    );
+    if (uses) users.push(key);
+  }
+  return users;
+}
+
+// Prerequisites translated to the destination's variation positions, or the prerequisite that could not be
+async function translatePrerequisites(
+  prerequisites: any[],
+): Promise<{ prerequisites: any[] } | { error: string }> {
+  const out: any[] = [];
+  for (const p of prerequisites) {
+    const layout = keptVariationLayouts.get(p?.key);
+    if (layout) {
+      out.push(
+        layout[p.variation] !== undefined
+          ? { ...p, variation: layout[p.variation] }
+          : p,
+      );
+      continue;
+    }
+    if (flagsProcessedThisRun.has(p?.key) && !flagsWithErrors.has(p?.key)) {
+      out.push(p);
+      continue;
+    }
+    const source = await getFlagDataByIndexOrKey(0, p.key);
+    if (!destVariationsCache.has(p.key)) {
+      destVariationsCache.set(
+        p.key,
+        readDestinationFlag(p.key).then((r) => r.flag?.variations ?? null),
+      );
+    }
+    const destVariations = await destVariationsCache.get(p.key)!;
+    if (!source?.variations || !destVariations) {
+      return {
+        error: `could not read the variations of prerequisite ${p.key} ${
+          source?.variations ? "in the destination" : "in the source data"
+        }`,
+      };
+    }
+    const variation = variationIndexByValue(
+      source.variations,
+      destVariations,
+      p.variation,
+    );
+    if (variation === undefined) {
+      return {
+        error:
+          `prerequisite ${p.key} has no variation with the value of its source variation ${p.variation} in the destination; migrate ${p.key} first`,
+      };
+    }
+    out.push({ ...p, variation });
+  }
+  return { prerequisites: out };
+}
+
 async function processOneFlag(
   index: number,
   flagkey: string,
 ): Promise<FlagProcessResult> {
+  flagsProcessedThisRun.add(flagkey);
   let incrementalSkipCountDelta = 0;
   let incrementalEnvSkipCountDelta = 0;
 
@@ -3772,27 +3886,30 @@ async function processOneFlag(
     let destinationVariations = flag.variations; // Fallback to source variations
     let destinationFlag: any = null;
 
-    try {
-      const destFlagReq = ldAPIRequest(
-        apiKey,
-        domain,
-        `flags/${inputArgs.projKeyDest}/${createdFlagKey}?env=*`, // Request all environments
-      );
-      const destFlagResp = await rateLimitRequest(destFlagReq, "flags");
-
-      if (destFlagResp.status === 200) {
-        destinationFlag = await destFlagResp.json();
-        if (
-          destinationFlag.variations &&
-          Array.isArray(destinationFlag.variations)
-        ) {
-          destinationVariations = destinationFlag.variations;
-        }
+    const readDestination = await readDestinationFlag(createdFlagKey);
+    if (readDestination.flag) {
+      destinationFlag = readDestination.flag;
+      if (Array.isArray(destinationFlag.variations)) {
+        destinationVariations = destinationFlag.variations;
       }
-    } catch {
+    } else if (flagAlreadyExisted) {
+      // Without the destination's current variations and environments, the patches below would be
+      // built blind (variation positions, skip detection, approval mapping): retry the flag next run
+      console.log(
+        Colors.red(
+          `\t✗ Could not read the destination flag (${readDestination.error}); not updating it this run`,
+        ),
+      );
+      flagsWithErrors.add(flag.key);
+      flagErrorDetails.set(
+        flag.key,
+        `destination flag could not be read before update: ${readDestination.error}`,
+      );
+      return { incrementalSkipCountDelta, incrementalEnvSkipCountDelta };
+    } else if (!inputArgs.dryRun) {
       console.log(
         Colors.yellow(
-          `\t⚠ Could not fetch destination flag, using source IDs (may cause issues with approval requests and skip detection)`,
+          `\t⚠ Could not fetch destination flag (${readDestination.error}), using source IDs (may cause issues with approval requests and skip detection)`,
         ),
       );
     }
@@ -3818,6 +3935,12 @@ async function processOneFlag(
         "created, but archived/deprecated state could not be applied (destination read failed)",
       );
     }
+    let variationPlan: VariationPlan = {
+      before: [],
+      after: [],
+      sourceToDest: (flag.variations ?? []).map((_: unknown, i: number) => i),
+    };
+    let variationsChanged = false;
     if (
       destinationFlag &&
       (flagAlreadyExisted || flag.archived || flag.deprecated)
@@ -3891,26 +4014,39 @@ async function processOneFlag(
       // deprecatedDate is managed by the API (stamped when `deprecated` flips) and cannot be patched
       // on its own: a lone `replace /deprecatedDate` is rejected with "Unsupported json-patch operation".
 
-      // Variations and defaults must be patched together to avoid index conflicts
-      // Strip _id from both sides before comparing
-      const stripIds = (v: any[]) => v.map(({ _id, ...rest }: any) => rest);
-      const destVarsClean = destinationFlag.variations
-        ? stripIds(destinationFlag.variations)
-        : [];
-      if (newVariations?.length > 0 && changed(newVariations, destVarsClean)) {
-        flagLevelPatches.push(
-          buildPatch("variations", "replace", newVariations),
-        );
-        if (flag.defaults) {
-          flagLevelPatches.push(
-            buildPatch("defaults", "replace", flag.defaults),
-          );
+      // Variations and defaults are planned together (see planVariationSync): removed variations are
+      // deleted only after the environments, which are translated with variationPlan.sourceToDest
+      variationPlan = planVariationSync(
+        flag.variations,
+        destinationFlag.variations ?? [],
+        {
+          srcKind: flag.kind,
+          destKind: destinationFlag.kind,
+          srcDefaults: flag.defaults,
+          destDefaults: destinationFlag.defaults,
+        },
+      );
+      if (variationPlan.incompatible) {
+        let detail = variationPlan.incompatible;
+        if (flag.kind !== destinationFlag.kind) {
+          const dependents = await flagsUsingAsPrerequisite(flag.key);
+          detail +=
+            `. To fix: delete ${createdFlagKey} in project ${inputArgs.projKeyDest}, then re-run with --include-flags ${
+              [flag.key, ...dependents].join(",")
+            }`;
+          if (dependents.length > 0) {
+            detail += ` (${
+              dependents.join(", ")
+            } use it as a prerequisite, and destination-only flags may too: remove that prerequisite in the destination before deleting; the re-run restores it for flags in the source)`;
+          }
         }
-      } else if (
-        flag.defaults && changed(flag.defaults, destinationFlag.defaults)
-      ) {
-        flagLevelPatches.push(buildPatch("defaults", "replace", flag.defaults));
+        console.log(Colors.red(`\t✗ ${createdFlagKey}: ${detail}`));
+        flagsWithErrors.add(flag.key);
+        flagErrorDetails.set(flag.key, detail);
+        return { incrementalSkipCountDelta, incrementalEnvSkipCountDelta };
       }
+      variationsChanged = planChangesVariations(variationPlan);
+      flagLevelPatches.push(...variationPlan.before);
 
       if (flagLevelPatches.length > 0) {
         console.log(
@@ -3928,8 +4064,36 @@ async function processOneFlag(
           "flags",
           "flag-level properties",
         );
+        const fields = [
+          ...new Set(
+            flagLevelPatches.map((p) => String(p.path).split("/")[1]),
+          ),
+        ].join(", ");
         if (flagLevelResp.status >= 200 && flagLevelResp.status < 300) {
           console.log(Colors.green(`\t✓ Flag-level properties updated`));
+          if (variationsChanged && !inputArgs.dryRun) {
+            // Appended variations get new IDs, which approval requests and skip detection need
+            const reread = await readDestinationFlag(createdFlagKey);
+            if (!reread.flag) {
+              console.log(
+                Colors.red(
+                  `\t✗ Could not re-read the flag after updating its variations (${reread.error}); environments not updated this run`,
+                ),
+              );
+              flagsWithErrors.add(flag.key);
+              flagErrorDetails.set(
+                flag.key,
+                `variations updated, but the flag could not be re-read (${reread.error}); environments not updated`,
+              );
+              return {
+                incrementalSkipCountDelta,
+                incrementalEnvSkipCountDelta,
+              };
+            }
+            destinationFlag = reread.flag;
+            destinationVariations = destinationFlag.variations ??
+              destinationVariations;
+          }
         } else {
           const errText = await flagLevelResp.text();
           console.log(
@@ -3937,11 +4101,29 @@ async function processOneFlag(
               `\t⚠ Flag-level update failed (${flagLevelResp.status}): ${errText}`,
             ),
           );
-          flagsWithErrors.add(createdFlagKey);
+          flagsWithErrors.add(flag.key);
+          flagErrorDetails.set(
+            flag.key,
+            `flag-level update rejected (${fields}) (HTTP ${flagLevelResp.status}): ${
+              errText.slice(0, 300)
+            }`,
+          );
+          if (variationsChanged) {
+            // Environment patches reference variations by position, so applying them against the
+            // destination's old variation list could serve the wrong variation
+            console.log(
+              Colors.red(
+                `\t✗ Variations not updated; environments not updated this run`,
+              ),
+            );
+            return { incrementalSkipCountDelta, incrementalEnvSkipCountDelta };
+          }
         }
       }
     }
 
+    const envErrorsBefore = flagsWithErrors.has(createdFlagKey);
+    const approvalsBefore = approvalRequestsCreated.length;
     for (const env of envkeys) {
       if (!flag.environments || !flag.environments[env]) {
         continue;
@@ -3953,13 +4135,17 @@ async function processOneFlag(
         : env;
 
       const flagEnvData = flag.environments[env];
+      let envConfig = isIdentityMapping(variationPlan.sourceToDest)
+        ? flagEnvData
+        : translateVariationRefs(flagEnvData, variationPlan.sourceToDest);
 
       // Read env version and lastModified before filtering
       const envVersion = flagEnvData.version as number | undefined;
       const envLastModified = flagEnvData.lastModified as string | undefined;
 
-      // Incremental sync: skip unchanged environments by version comparison
-      if (inputArgs.incremental && previousManifest) {
+      // Incremental sync: skip unchanged environments by version comparison. Not when the variations
+      // changed: every environment is re-pointed so none still references a variation being removed.
+      if (inputArgs.incremental && previousManifest && !variationsChanged) {
         const prevFlag = ownEntry(previousManifest.flags, flag.key);
         const prevEnv = prevFlag?.environments?.[env];
         if (
@@ -3980,6 +4166,30 @@ async function processOneFlag(
         }
       }
 
+      if (
+        Array.isArray(envConfig.prerequisites) &&
+        envConfig.prerequisites.length > 0
+      ) {
+        const translated = await translatePrerequisites(
+          envConfig.prerequisites,
+        );
+        if ("error" in translated) {
+          // Written as is, the prerequisite could point at another variation in the destination
+          console.log(
+            Colors.red(
+              `\t  ✗ ${destEnvKey}: not updated: ${translated.error}`,
+            ),
+          );
+          flagsWithErrors.add(flag.key);
+          flagErrorDetails.set(
+            flag.key,
+            `${destEnvKey} not updated: ${translated.error}`,
+          );
+          continue;
+        }
+        envConfig = { ...envConfig, prerequisites: translated.prerequisites };
+      }
+
       const patchReq: any[] = [];
       const parsedData: Record<string, string> = Object.keys(flagEnvData)
         .filter((key) => !key.includes("salt"))
@@ -3994,7 +4204,7 @@ async function processOneFlag(
         .filter((key) => !key.startsWith("_"))
         .filter((key) => !key.startsWith("-"))
         .reduce((cur, key) => {
-          return Object.assign(cur, { [key]: flagEnvData[key] });
+          return Object.assign(cur, { [key]: envConfig[key] });
         }, {});
 
       // A source environment with no off variation serves the SDK fallback value while off, but the
@@ -4056,6 +4266,96 @@ async function processOneFlag(
           version: envVersion,
           lastModified: envLastModified,
         };
+      }
+    }
+
+    // Destination variations the source no longer has are removed only once every environment points
+    // elsewhere: an environment that failed or is awaiting approval may still use them
+    const removedCount = variationPlan.after.filter((op) => op.op === "remove")
+      .length;
+    if (removedCount > 0) {
+      const awaitingApproval = approvalRequestsCreated.slice(approvalsBefore)
+        .some((a) => a.flag === createdFlagKey);
+      const reason = envErrorsBefore
+        ? "an earlier update of this flag failed"
+        : flagsWithErrors.has(createdFlagKey)
+        ? "an environment update failed"
+        : awaitingApproval
+        ? "an environment update is awaiting approval"
+        : undefined;
+      if (reason) {
+        console.log(
+          Colors.yellow(
+            `\t⚠ ${removedCount} variation(s) no longer in the source were kept because ${reason}`,
+          ),
+        );
+        flagsWithErrors.add(flag.key);
+        flagErrorDetails.set(
+          flag.key,
+          `${removedCount} variation(s) no longer in the source were not removed: ${reason}`,
+        );
+        keptVariationLayouts.set(flag.key, variationPlan.sourceToDest);
+      } else {
+        if (inputArgs.dryRun) {
+          // Only the destination can refuse it, so a dry run cannot be sure; flag the likely case
+          const dependents = await flagsUsingAsPrerequisite(flag.key);
+          if (dependents.length > 0) {
+            console.log(
+              Colors.yellow(
+                `\t⚠ ${createdFlagKey}: ${
+                  dependents.join(", ")
+                } use it as a prerequisite; if they do in ${inputArgs.projKeyDest} too, LaunchDarkly will refuse to remove its ${removedCount} variation(s), and the real run reports the steps to finish`,
+              ),
+            );
+          }
+        }
+        const removeResp = await dryRunAwarePatch(
+          inputArgs.dryRun || false,
+          apiKey,
+          domain,
+          `flags/${inputArgs.projKeyDest}/${createdFlagKey}`,
+          variationPlan.after,
+          false,
+          "flags",
+          "remove variations no longer in the source",
+        );
+        if (removeResp.status >= 200 && removeResp.status < 300) {
+          console.log(
+            Colors.green(
+              `\t✓ Removed ${removedCount} variation(s) no longer in the source`,
+            ),
+          );
+        } else {
+          // Typically a destination-only environment still uses one, or another flag has this flag as a
+          // prerequisite: LaunchDarkly refuses to remove any variation of such a flag
+          const errText = await removeResp.text();
+          console.log(
+            Colors.yellow(
+              `\t⚠ Removing variations no longer in the source failed (${removeResp.status}): ${errText}`,
+            ),
+          );
+          let detail =
+            `removing ${removedCount} variation(s) no longer in the source was rejected (HTTP ${removeResp.status}): ${
+              errText.slice(0, 300)
+            }`;
+          if (errText.includes("prerequisites depend on the flag")) {
+            const dependents = await flagsUsingAsPrerequisite(flag.key);
+            detail +=
+              `. To finish: in project ${inputArgs.projKeyDest}, remove the prerequisite on ${createdFlagKey} from ${
+                dependents.length
+                  ? `${
+                    dependents.join(", ")
+                  } (and any destination-only flags that use it)`
+                  : "the flags that use it (none are in the source, so they exist only in the destination)"
+              }, then re-run without --incremental with --include-flags ${
+                [flag.key, ...dependents].join(",")
+              } (this removes the variations, then restores the prerequisites). Until then the destination keeps them, and prerequisites on this flag are translated to its current variation order`;
+          }
+          console.log(Colors.red(`\t✗ ${createdFlagKey}: ${detail}`));
+          flagsWithErrors.add(flag.key);
+          flagErrorDetails.set(flag.key, detail);
+          keptVariationLayouts.set(flag.key, variationPlan.sourceToDest);
+        }
       }
     }
   }
